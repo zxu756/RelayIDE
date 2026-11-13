@@ -32,7 +32,7 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(helpOut == RelayCLIRunner.helpBanner)
 
         let versionOut = try await cli.execute(arguments: ["--version"])
-        #expect(versionOut.contains("RelayIDE 1.0.0"))
+        #expect(versionOut.contains("RelayIDE 1.1.0"))
 
         await #expect(throws: RelayIDEError.self) {
             _ = try await cli.execute(arguments: ["non-existent-subcommand"])
@@ -581,5 +581,116 @@ struct CLIMCPAndWorkbenchShellTests {
 
         coordinator.dispatchCommand(id: "journal.undo")
         #expect(didUndo == true)
+    }
+
+    // MARK: - 16. `RelayLocalizer` Precedence, Chinese Locale Auto-Detection & Live Toggle (`v1.1.0`)
+
+    @Test("RelayLocalizer resolves --lang, RELAYIDE_LANG, UserDefaults, and Chinese Locale fallback, and toggles live")
+    @MainActor
+    func relayLocalizerResolutionPrecedenceAndLiveToggle() throws {
+        let suiteName = "io.relayide.tests.localizer.\(UUID().uuidString)"
+        let isolatedDefaults = UserDefaults(suiteName: suiteName)!
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+
+        // 1. Auto-detect Chinese when Locale.preferredLanguages starts with "zh"
+        let autoZh = RelayLocalizer.resolveLanguage(
+            arguments: ["RelayIDE"],
+            environment: [:],
+            userDefaults: isolatedDefaults,
+            storageKey: RelayLocalizer.userDefaultsKey,
+            preferredLanguages: ["zh-Hans-CN", "en-US"]
+        )
+        #expect(autoZh == .zhHans)
+        #expect(autoZh.badge == "中文")
+
+        // 2. Fallback to English for non-Chinese preferredLanguages
+        let autoEn = RelayLocalizer.resolveLanguage(
+            arguments: ["RelayIDE"],
+            environment: [:],
+            userDefaults: isolatedDefaults,
+            storageKey: RelayLocalizer.userDefaultsKey,
+            preferredLanguages: ["en-US", "fr-FR"]
+        )
+        #expect(autoEn == .en)
+        #expect(autoEn.badge == "EN")
+
+        // 3. UserDefaults overrides system locale
+        let localizer = RelayLocalizer(
+            arguments: ["RelayIDE"],
+            environment: [:],
+            userDefaults: isolatedDefaults,
+            storageKey: RelayLocalizer.userDefaultsKey,
+            preferredLanguages: ["en-US"],
+            persistToUserDefaults: true
+        )
+        #expect(localizer.language == .en)
+        #expect(localizer.L("PTY Multiplexer", "并行终端网格") == "PTY Multiplexer")
+
+        let toggled = localizer.toggleLanguage()
+        #expect(toggled == .zhHans)
+        #expect(localizer.language == .zhHans)
+        #expect(localizer.L("PTY Multiplexer", "并行终端网格") == "并行终端网格")
+        #expect(isolatedDefaults.string(forKey: RelayLocalizer.userDefaultsKey) == "zh-Hans")
+
+        // 4. RELAYIDE_LANG overrides UserDefaults, and CLI --lang overrides RELAYIDE_LANG
+        let envResolved = RelayLocalizer.resolveLanguage(
+            arguments: ["RelayIDE"],
+            environment: ["RELAYIDE_LANG": "en"],
+            userDefaults: isolatedDefaults,
+            storageKey: RelayLocalizer.userDefaultsKey,
+            preferredLanguages: ["zh-Hans-CN"]
+        )
+        #expect(envResolved == .en)
+
+        let cliResolved = RelayLocalizer.resolveLanguage(
+            arguments: ["RelayIDE", "--export-screenshots", "./docs", "--lang", "zh"],
+            environment: ["RELAYIDE_LANG": "en"],
+            userDefaults: isolatedDefaults,
+            storageKey: RelayLocalizer.userDefaultsKey,
+            preferredLanguages: ["en-US"]
+        )
+        #expect(cliResolved == .zhHans)
+        #expect(RelayLocalizer.parseCLILanguageOverride(arguments: ["RelayIDE", "--lang=en"]) == .en)
+
+        // 5. Coordinator ⇧⌘L ("workbench.toggleLanguage") updates Command Palette live
+        let registry = RelayKeybindingAndShortcutRegistry(
+            userDefaults: isolatedDefaults,
+            storageKey: "coord.lang.keymap",
+            loadPersistedOverrides: false
+        )
+        let coordinator = RelayWorkbenchCoordinator(
+            localizer: localizer,
+            shortcutRegistry: registry
+        )
+        #expect(coordinator.commandPalette.catalog.contains(where: { $0.title.contains("并行终端网格") }))
+        coordinator.dispatchCommand(id: "workbench.toggleLanguage")
+        #expect(localizer.language == .en)
+        #expect(coordinator.commandPalette.catalog.contains(where: { $0.title.contains("PTY Multiplexer") }))
+    }
+
+    // MARK: - 17. Bilingual Standalone HTML Dossier Markers & Zero Em-Dash Invariant (`v1.1.0`)
+
+    @Test("BauhausRelayHTMLReportExporter emits interactive 中文 | EN toggle, data-en/data-zh attributes, and zero em-dashes")
+    func bilingualHTMLDossierMarkersAndZeroEmDash() async throws {
+        let tempDir = try makeIsolatedTempDirectory(prefix: "relay-bilingual-html")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let bundlePath = tempDir.appendingPathComponent("BilingualDemo.relayproj").path
+        let outHTMLURL = tempDir.appendingPathComponent("bilingual-dossier.html")
+        let cli = RelayCLIRunner()
+
+        _ = try await cli.execute(arguments: ["init", "--project", bundlePath, "--seed-demo"])
+        _ = try await cli.execute(arguments: ["export-html", outHTMLURL.path, "--project", bundlePath, "--lang", "zh"])
+
+        let html = try String(contentsOf: outHTMLURL, encoding: .utf8)
+        #expect(html.contains(#"class="lang-switch""#))
+        #expect(html.contains(#"data-lang-choice="zh-Hans""#))
+        #expect(html.contains(#"data-lang-choice="en""#))
+        #expect(html.contains("data-en="))
+        #expect(html.contains("data-zh="))
+        #expect(html.contains("io.github.zxu756.RelayIDE.language"))
+        #expect(html.contains("navigator.language"))
+        #expect(html.contains("隔离 Git 工作树矩阵与文件归属围栏"))
+        #expect(!html.contains("\u{2014}"))
     }
 }

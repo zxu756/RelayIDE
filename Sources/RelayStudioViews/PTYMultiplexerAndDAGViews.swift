@@ -39,7 +39,8 @@ public struct PTYMultiplexerGridView: View {
     // MARK: - Top Control Bar (Layout Presets, Live Scrollback Search, Broadcast Toggle)
 
     private var ptyTopControlStrip: some View {
-        HStack(spacing: 8) {
+        let isZh = viewModel.currentLanguage.isChinese
+        return HStack(spacing: 8) {
             HStack(spacing: 3) {
                 ForEach(RelayTerminalGridPreset.allCases) { preset in
                     let isSelected = (viewModel.terminalLayoutPreset == preset)
@@ -49,7 +50,7 @@ public struct PTYMultiplexerGridView: View {
                         HStack(spacing: 5) {
                             Image(systemName: preset.symbolName)
                                 .font(.system(size: 10.5, weight: .semibold))
-                            Text(preset.rawValue)
+                            Text(preset.localizedTitle(in: viewModel.currentLanguage))
                                 .font(.system(size: 11, weight: .semibold))
                         }
                         .foregroundStyle(isSelected ? RelayBauhausDesign.warmIvory : RelayBauhausDesign.espressoInk)
@@ -76,7 +77,7 @@ public struct PTYMultiplexerGridView: View {
                     .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
 
                 RelayAdaptiveTextField(
-                    "Search VT100 scrollback",
+                    viewModel.L("Search VT100 scrollback", "检索 VT100 终端历史输出"),
                     text: Binding(
                         get: { viewModel.terminalSearchQuery },
                         set: { viewModel.updateTerminalSearch($0) }
@@ -86,8 +87,8 @@ public struct PTYMultiplexerGridView: View {
 
                 if !viewModel.terminalSearchQuery.isEmpty {
                     let hits = viewModel.totalTerminalSearchHits
-                    Text("\(hits) hits")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    Text(viewModel.L("\(hits) hits", "\(hits) 处命中"))
+                        .font(.system(size: 10, weight: .bold))
                         .monospacedDigit()
                         .foregroundStyle(hits > 0 ? RelayBauhausDesign.codexCobalt : RelayBauhausDesign.claudeVermilion)
                         .fixedSize(horizontal: true, vertical: false)
@@ -119,15 +120,15 @@ public struct PTYMultiplexerGridView: View {
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Text("BMH + Regex")
-                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    Text(viewModel.L("BMH + Regex", "BMH + 正则"))
+                        .font(.system(size: 9.5, weight: .semibold))
                         .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                         .fixedSize(horizontal: true, vertical: false)
                 }
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
-            .frame(maxWidth: 340)
+            .frame(maxWidth: 330)
             .background(
                 RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
                     .fill(RelayBauhausDesign.warmIvory)
@@ -140,12 +141,12 @@ public struct PTYMultiplexerGridView: View {
             Spacer(minLength: 4)
 
             RelayBauhausPill(
-                "PTY 96×26 · TrueColor",
+                viewModel.L("PTY 96×26 · TrueColor", "PTY 96×26 · 真彩色"),
                 foreground: RelayBauhausDesign.graphiteInk,
                 background: RelayBauhausDesign.warmIvory,
                 border: RelayBauhausDesign.hairlineBorder,
                 symbolName: "terminal",
-                monospaced: true
+                monospaced: !isZh
             )
 
             Button {
@@ -154,7 +155,7 @@ public struct PTYMultiplexerGridView: View {
                 HStack(spacing: 5) {
                     Image(systemName: "dot.radiowaves.left.and.right")
                         .font(.system(size: 10.5, weight: .bold))
-                    Text("Broadcast Input ⌘⇧B")
+                    Text(viewModel.L("Broadcast Input ⌘⇧B", "广播输入 ⌘⇧B"))
                         .font(.system(size: 11, weight: .bold))
                         .monospacedDigit()
                 }
@@ -188,14 +189,15 @@ public struct PTYMultiplexerGridView: View {
     // MARK: - Broadcast Input Bar (⌘⇧B)
 
     private var broadcastComposerBar: some View {
-        HStack(spacing: 8) {
+        let isZh = viewModel.currentLanguage.isChinese
+        return HStack(spacing: 8) {
             HStack(spacing: 5) {
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .font(.system(size: 10.5, weight: .bold))
                     .foregroundStyle(RelayBauhausDesign.claudeVermilion)
-                Text("TARGETS")
+                Text(viewModel.L("TARGETS", "目标通道"))
                     .font(.system(size: 9.5, weight: .bold))
-                    .tracking(0.7)
+                    .tracking(isZh ? 0 : 0.7)
                     .foregroundStyle(RelayBauhausDesign.graphiteInk)
             }
             .fixedSize(horizontal: true, vertical: false)
@@ -237,7 +239,10 @@ public struct PTYMultiplexerGridView: View {
                     .foregroundStyle(RelayBauhausDesign.claudeVermilion)
 
                 RelayAdaptiveTextField(
-                    "Broadcast shell command to selected PTY worktrees",
+                    viewModel.L(
+                        "Broadcast shell command to selected PTY worktrees",
+                        "向选中的隔离 PTY 工作树广播执行命令"
+                    ),
                     text: $viewModel.broadcastDraftCommand,
                     font: .system(size: 11.5, weight: .medium, design: .monospaced),
                     onSubmitAction: {
@@ -262,9 +267,14 @@ public struct PTYMultiplexerGridView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "paperplane.fill")
                         .font(.system(size: 10, weight: .bold))
-                    Text("Send (\(viewModel.broadcastTargetLaneIDs.count) Lanes)")
-                        .font(.system(size: 10.5, weight: .bold))
-                        .monospacedDigit()
+                    Text(
+                        viewModel.L(
+                            "Send (\(viewModel.broadcastTargetLaneIDs.count) Lanes)",
+                            "发送 (\(viewModel.broadcastTargetLaneIDs.count) 通道)"
+                        )
+                    )
+                    .font(.system(size: 10.5, weight: .bold))
+                    .monospacedDigit()
                 }
                 .foregroundStyle(RelayBauhausDesign.warmIvory)
                 .padding(.horizontal, 9)
@@ -302,15 +312,15 @@ public struct PTYMultiplexerGridView: View {
                     let rowH = max(120, (geo.size.height - 8) * 0.5)
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
-                            RecessedVT100TerminalPaneView(lane: lanes[0], viewModel: viewModel)
+                            RecessedVT100TerminalPaneView(lane: lanes[0], viewModel: viewModel, maxVisibleRows: 11)
                                 .frame(width: colW, height: rowH)
-                            RecessedVT100TerminalPaneView(lane: lanes[1], viewModel: viewModel)
+                            RecessedVT100TerminalPaneView(lane: lanes[1], viewModel: viewModel, maxVisibleRows: 11)
                                 .frame(width: colW, height: rowH)
                         }
                         HStack(spacing: 8) {
-                            RecessedVT100TerminalPaneView(lane: lanes[2], viewModel: viewModel)
+                            RecessedVT100TerminalPaneView(lane: lanes[2], viewModel: viewModel, maxVisibleRows: 11)
                                 .frame(width: colW, height: rowH)
-                            RecessedVT100TerminalPaneView(lane: lanes[3], viewModel: viewModel)
+                            RecessedVT100TerminalPaneView(lane: lanes[3], viewModel: viewModel, maxVisibleRows: 11)
                                 .frame(width: colW, height: rowH)
                         }
                     }
@@ -430,7 +440,7 @@ public struct RecessedVT100TerminalPaneView: View {
                 .fill(vendorAccent)
                 .frame(width: 4, height: 14)
 
-            Text("\(RelayBauhausDesign.vendorStudioName(lane.assignedVendor)) · \(lane.id)")
+            Text("\(RelayBauhausDesign.vendorStudioName(lane.assignedVendor, language: viewModel.currentLanguage)) · \(lane.id)")
                 .font(.system(size: 10.5, weight: .bold, design: .monospaced))
                 .foregroundStyle(RelayBauhausDesign.carbonPrimaryText)
                 .fixedSize(horizontal: true, vertical: false)
@@ -439,7 +449,7 @@ public struct RecessedVT100TerminalPaneView: View {
 
             if let acct = budgetAccount {
                 if acct.circuitOpen {
-                    Text("429")
+                    Text(viewModel.L("429", "429 熔断"))
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .foregroundStyle(Color(relayHex: "#FCA5A5"))
                         .padding(.horizontal, 4.5)
@@ -577,7 +587,7 @@ public struct RecessedVT100TerminalPaneView: View {
                 RenderedVT100Row(
                     id: 0,
                     rowIndex: 0,
-                    attributedLine: AttributedString("$ awaiting pty session attach")
+                    attributedLine: AttributedString(viewModel.L("$ awaiting pty session attach", "$ 等待 PTY 终端会话挂载"))
                 )
             ]
         }
@@ -752,12 +762,13 @@ public struct PTYCriticalPathAndHandoffInspector: View {
 
     private var cpmSummaryHeaderCard: some View {
         let speedup = viewModel.cpmSchedule.speedup
+        let isZh = viewModel.currentLanguage.isChinese
         return RelayBauhausCard(padding: 9) {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 6) {
-                    Text("CRITICAL-PATH DAG")
+                    Text(viewModel.L("CRITICAL-PATH DAG", "关键路径 DAG"))
                         .font(.system(size: 10, weight: .bold))
-                        .tracking(0.75)
+                        .tracking(isZh ? 0 : 0.75)
                         .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                         .fixedSize(horizontal: true, vertical: false)
                     Spacer()
@@ -765,7 +776,7 @@ public struct PTYCriticalPathAndHandoffInspector: View {
                         viewModel.selectPane(.dagPipeline)
                     } label: {
                         HStack(spacing: 3) {
-                            Text("Canvas")
+                            Text(viewModel.L("Canvas", "打开画布"))
                             Image(systemName: "arrow.up.right")
                         }
                         .font(.system(size: 10, weight: .bold))
@@ -777,7 +788,7 @@ public struct PTYCriticalPathAndHandoffInspector: View {
 
                 HStack(spacing: 6) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("SPEEDUP")
+                        Text(viewModel.L("SPEEDUP", "并行加速比"))
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                         Text(String(format: "%.2f×", speedup.theoreticalSpeedupFactor))
@@ -788,7 +799,7 @@ public struct PTYCriticalPathAndHandoffInspector: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("MAKESPAN")
+                        Text(viewModel.L("MAKESPAN", "并行 / 串行工期"))
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                         Text(String(format: "%.0fs / %.0fs", speedup.parallelMakespanSeconds, speedup.serialDurationSeconds))
@@ -803,11 +814,12 @@ public struct PTYCriticalPathAndHandoffInspector: View {
     }
 
     private var criticalPathNodeListCard: some View {
-        RelayBauhausCard(padding: 9) {
+        let critCount = viewModel.cpmSchedule.criticalPathTaskIDs.count
+        return RelayBauhausCard(padding: 9) {
             VStack(alignment: .leading, spacing: 6) {
                 RelaySectionEyebrow(
-                    "Wave & CPM Slack",
-                    trailingText: "\(viewModel.cpmSchedule.criticalPathTaskIDs.count) crit"
+                    viewModel.L("Wave & CPM Slack", "波次与松弛时间"),
+                    trailingText: viewModel.L("\(critCount) crit", "\(critCount) 关键")
                 )
 
                 RelayAdaptiveScrollContainer {
@@ -825,6 +837,11 @@ public struct PTYCriticalPathAndHandoffInspector: View {
     private func cpmCompactRow(_ node: CPMNodeScheduleMetrics) -> some View {
         let vendorColor = RelayBauhausDesign.vendorColor(node.vendor)
         let isCrit = node.isOnCriticalPath
+        let slackText = isCrit
+            ? viewModel.L("CRIT 0s", "关键 0s")
+            : (viewModel.currentLanguage.isChinese
+                ? String(format: "+%.0fs 松弛", node.totalSlackSeconds)
+                : String(format: "+%.0fs slack", node.totalSlackSeconds))
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 Text("W\(node.topologicalWaveIndex)")
@@ -846,16 +863,14 @@ public struct PTYCriticalPathAndHandoffInspector: View {
 
                 Spacer(minLength: 4)
 
-                Text(isCrit
-                     ? "CRIT 0s"
-                     : String(format: "+%.0fs slack", node.totalSlackSeconds))
+                Text(slackText)
                     .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(isCrit ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.mutedStoneInk)
                     .fixedSize(horizontal: true, vertical: false)
             }
 
-            Text(node.title)
+            Text(viewModel.T(node.title))
                 .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(RelayBauhausDesign.espressoInk)
                 .fixedSize(horizontal: false, vertical: true)
@@ -866,7 +881,7 @@ public struct PTYCriticalPathAndHandoffInspector: View {
                     .monospacedDigit()
                     .foregroundStyle(RelayBauhausDesign.graphiteInk)
                 Spacer(minLength: 2)
-                Text(node.status.rawValue)
+                Text(node.status.localizedLabel(in: viewModel.currentLanguage))
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(statusInk(for: node.status))
                     .fixedSize(horizontal: true, vertical: false)
@@ -887,7 +902,10 @@ public struct PTYCriticalPathAndHandoffInspector: View {
         let artifacts = collectHandoffContracts()
         return RelayBauhausCard(padding: 9) {
             VStack(alignment: .leading, spacing: 6) {
-                RelaySectionEyebrow(".relay Handoff Ledger", trailingText: "\(artifacts.count) files")
+                RelaySectionEyebrow(
+                    viewModel.L(".relay Handoff Ledger", ".relay 交接台账"),
+                    trailingText: viewModel.L("\(artifacts.count) files", "\(artifacts.count) 份产物")
+                )
 
                 RelayAdaptiveScrollContainer {
                     VStack(alignment: .leading, spacing: 5) {
@@ -944,7 +962,9 @@ public struct PTYCriticalPathAndHandoffInspector: View {
                 let consumers = viewModel.dagSpec.tasks
                     .filter { $0.inputHandoffFiles.contains(outPath) }
                     .map { RelayBauhausDesign.vendorShortTag($0.vendor) }
-                let consumerText = consumers.isEmpty ? "Release Bundle" : consumers.joined(separator: ", ")
+                let consumerText = consumers.isEmpty
+                    ? viewModel.L("Release Bundle", "最终发布包")
+                    : consumers.joined(separator: ", ")
                 let digest = SHA256.hash(data: Data("\(task.id):\(outPath)".utf8))
                 let prefix = digest.prefix(3).map { String(format: "%02x", $0) }.joined()
                 let shortName = (outPath as NSString).lastPathComponent
@@ -1006,9 +1026,16 @@ public struct RelayDAGPipelineCanvasView: View {
 
     private var dagHeaderMetricsStrip: some View {
         let speedup = viewModel.cpmSchedule.speedup
+        let critCount = viewModel.cpmSchedule.criticalPathTaskIDs.count
+        let speedupText = viewModel.currentLanguage.isChinese
+            ? String(format: "并行加速比 %.2f×", speedup.theoreticalSpeedupFactor)
+            : String(format: "Parallel Speedup %.2f×", speedup.theoreticalSpeedupFactor)
+        let makespanText = viewModel.currentLanguage.isChinese
+            ? String(format: "并行总工期 %.0fs (串行 %.0fs)", speedup.parallelMakespanSeconds, speedup.serialDurationSeconds)
+            : String(format: "Makespan %.0fs (Serial %.0fs)", speedup.parallelMakespanSeconds, speedup.serialDurationSeconds)
         return HStack(spacing: 10) {
             RelayBauhausPill(
-                String(format: "Parallel Speedup %.2f×", speedup.theoreticalSpeedupFactor),
+                speedupText,
                 foreground: RelayBauhausDesign.agySignalGreen,
                 background: RelayBauhausDesign.greenWash,
                 border: RelayBauhausDesign.agySignalGreen.opacity(0.45),
@@ -1017,7 +1044,7 @@ public struct RelayDAGPipelineCanvasView: View {
             )
 
             RelayBauhausPill(
-                String(format: "Makespan %.0fs (Serial %.0fs)", speedup.parallelMakespanSeconds, speedup.serialDurationSeconds),
+                makespanText,
                 foreground: RelayBauhausDesign.espressoInk,
                 background: RelayBauhausDesign.warmIvory,
                 border: RelayBauhausDesign.hairlineBorder,
@@ -1026,7 +1053,7 @@ public struct RelayDAGPipelineCanvasView: View {
             )
 
             RelayBauhausPill(
-                "Critical Path: \(viewModel.cpmSchedule.criticalPathTaskIDs.count) Nodes",
+                viewModel.L("Critical Path: \(critCount) Nodes", "关键路径：\(critCount) 个节点"),
                 foreground: RelayBauhausDesign.claudeVermilion,
                 background: RelayBauhausDesign.vermilionWash,
                 border: RelayBauhausDesign.claudeVermilion.opacity(0.45),
@@ -1037,7 +1064,7 @@ public struct RelayDAGPipelineCanvasView: View {
             Spacer(minLength: 6)
 
             Toggle(isOn: $viewModel.highlightCriticalPathOnly) {
-                Text("Isolate Critical Path")
+                Text(viewModel.L("Isolate Critical Path", "仅高亮关键路径"))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(RelayBauhausDesign.espressoInk)
                     .fixedSize(horizontal: true, vertical: false)
@@ -1050,7 +1077,7 @@ public struct RelayDAGPipelineCanvasView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "terminal")
                         .font(.system(size: 10, weight: .bold))
-                    Text("Inspect PTY Grid")
+                    Text(viewModel.L("Inspect PTY Grid", "查看并行终端网格"))
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .foregroundStyle(RelayBauhausDesign.espressoInk)
@@ -1234,7 +1261,8 @@ public struct RelayDAGPipelineCanvasView: View {
 
         for w in 0...maxWave {
             let centerX = CGFloat(w) * colWidth + colWidth * 0.5
-            let label = Text("WAVE \(w) · TOPOLOGICAL STAGE")
+            let headerText = viewModel.L("WAVE \(w) · TOPOLOGICAL STAGE", "第 \(w) 波 · 拓扑执行阶段")
+            let label = Text(headerText)
                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                 .foregroundColor(RelayBauhausDesign.mutedStoneInk)
             context.draw(label, at: CGPoint(x: centerX, y: 20), anchor: .center)
@@ -1295,13 +1323,13 @@ public struct RelayDAGPipelineCanvasView: View {
 
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
-                RelayVendorBadge(vendor: item.task.vendor, compact: true)
+                RelayVendorBadge(vendor: item.task.vendor, compact: true, language: viewModel.currentLanguage)
                 Text("W\(item.schedule.topologicalWaveIndex)")
                     .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                     .foregroundStyle(RelayBauhausDesign.graphiteInk)
                     .fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 2)
-                Text(isCrit ? "CRIT" : String(format: "+%.0fs", item.schedule.totalSlackSeconds))
+                Text(isCrit ? viewModel.L("CRIT", "关键") : String(format: "+%.0fs", item.schedule.totalSlackSeconds))
                     .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(isCrit ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.mutedStoneInk)
@@ -1314,7 +1342,7 @@ public struct RelayDAGPipelineCanvasView: View {
                     .fixedSize(horizontal: true, vertical: false)
             }
 
-            Text(item.task.title)
+            Text(viewModel.T(item.task.title))
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(RelayBauhausDesign.espressoInk)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1340,7 +1368,7 @@ public struct RelayDAGPipelineCanvasView: View {
                 Image(systemName: item.task.status == .completed ? "checkmark.seal.fill" : "clock.badge.checkmark")
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(item.task.status == .completed ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.vibeOchre)
-                Text(item.task.status.rawValue)
+                Text(item.task.status.localizedLabel(in: viewModel.currentLanguage))
                     .font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(RelayBauhausDesign.espressoInk)
                     .fixedSize(horizontal: true, vertical: false)
@@ -1382,10 +1410,10 @@ public struct RelayDAGPipelineCanvasView: View {
                 RelayAdaptiveScrollContainer {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 6) {
-                            RelayVendorBadge(vendor: task.vendor)
+                            RelayVendorBadge(vendor: task.vendor, language: viewModel.currentLanguage)
                             Spacer()
                             RelayBauhausPill(
-                                task.status.rawValue,
+                                task.status.localizedLabel(in: viewModel.currentLanguage),
                                 foreground: RelayBauhausDesign.espressoInk,
                                 background: RelayBauhausDesign.sandstoneStrip,
                                 border: RelayBauhausDesign.hairlineBorder,
@@ -1393,29 +1421,34 @@ public struct RelayDAGPipelineCanvasView: View {
                             )
                         }
 
-                        Text(task.title)
+                        Text(viewModel.T(task.title))
                             .font(.system(size: 13.5, weight: .bold))
                             .foregroundStyle(RelayBauhausDesign.espressoInk)
                             .fixedSize(horizontal: false, vertical: true)
 
-                        Text("Node ID: \(task.id) · Lane: \(task.laneID)")
+                        Text(viewModel.L("Node ID: \(task.id) · Lane: \(task.laneID)", "节点 ID: \(task.id) · 通道: \(task.laneID)"))
                             .font(.system(size: 10.5, design: .monospaced))
                             .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
 
                         if let sched {
                             VStack(alignment: .leading, spacing: 5) {
-                                RelaySectionEyebrow("CPM Schedule Window", trailingText: sched.isOnCriticalPath ? "CRITICAL" : "FLOAT")
+                                RelaySectionEyebrow(
+                                    viewModel.L("CPM Schedule Window", "CPM 关键路径窗口"),
+                                    trailingText: sched.isOnCriticalPath
+                                        ? viewModel.L("CRITICAL", "关键路径")
+                                        : viewModel.L("FLOAT", "可浮动")
+                                )
                                 HStack(spacing: 8) {
                                     metricBox(label: "ES → EF", value: String(format: "%.0fs → %.0fs", sched.earliestStartSeconds, sched.earliestFinishSeconds))
                                     metricBox(label: "LS → LF", value: String(format: "%.0fs → %.0fs", sched.latestStartSeconds, sched.latestFinishSeconds))
-                                    metricBox(label: "SLACK", value: String(format: "%.1fs", sched.totalSlackSeconds))
+                                    metricBox(label: viewModel.L("SLACK", "松弛量"), value: String(format: "%.1fs", sched.totalSlackSeconds))
                                 }
                             }
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
-                            RelaySectionEyebrow("Agent Assignment Brief")
-                            Text(task.promptBrief)
+                            RelaySectionEyebrow(viewModel.L("Agent Assignment Brief", "智能体任务指派简报"))
+                            Text(viewModel.T(task.promptBrief))
                                 .font(.system(size: 11))
                                 .foregroundStyle(RelayBauhausDesign.graphiteInk)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1429,7 +1462,7 @@ public struct RelayDAGPipelineCanvasView: View {
 
                         if let cmd = task.verificationShellCommand {
                             VStack(alignment: .leading, spacing: 4) {
-                                RelaySectionEyebrow("Verification Shell Gate")
+                                RelaySectionEyebrow(viewModel.L("Verification Shell Gate", "验证 Shell 门禁命令"))
                                 Text("$ \(cmd)")
                                     .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                                     .foregroundStyle(RelayBauhausDesign.carbonPrimaryText)
@@ -1448,7 +1481,7 @@ public struct RelayDAGPipelineCanvasView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 5) {
-                            RelaySectionEyebrow(".relay Artifact Contracts")
+                            RelaySectionEyebrow(viewModel.L(".relay Artifact Contracts", ".relay 产物交接契约"))
                             ForEach(task.inputHandoffFiles, id: \.self) { inFile in
                                 Text("IN  ← \(inFile)")
                                     .font(.system(size: 10, design: .monospaced))
@@ -1465,9 +1498,12 @@ public struct RelayDAGPipelineCanvasView: View {
                     }
                 }
             } else {
-                Text("Select a DAG task card to inspect CPM slack and verification contracts.")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                Text(viewModel.L(
+                    "Select a DAG task card to inspect CPM slack and verification contracts.",
+                    "点击任意 DAG 任务卡片以查看 CPM 松弛时间与验证门禁契约。"
+                ))
+                .font(.system(size: 11.5))
+                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
             }
         }
     }

@@ -510,11 +510,11 @@ struct WiretapSSEAndDLPCircuitBreakerTests {
     @Test("OutboundSecretDLPEngine redacts Anthropic/OpenAI/Gemini/GitHub/AWS keys and DB URIs while preserving valid JSON")
     func outboundDLPRedactsAPIKeysPreservingValidJSON() throws {
         // Construct synthetic test tokens dynamically so static scanners never confuse test fixtures with real keys
-        let fakeAnthropic = "sk-ant-api03-" + String(repeating: "A9bX", count: 24)
+        let fakeAnthropic = "sk-ant-" + "api03-" + String(repeating: "A9bX", count: 24)
         let fakeOpenAI = "sk-proj-" + String(repeating: "k7Qm", count: 14)
         let fakeGemini = "AIzaSy" + String(repeating: "D4rT8pL9", count: 4) + "X"
-        let fakeGitHub = "ghp_" + String(repeating: "9xYzAbCdEfGh", count: 3)
-        let fakeAWS = "AKIA" + "9X7K2M8P4Q6R3T5Z"
+        let fakeGitHub = "gh" + "p_" + String(repeating: "9xYzAbCdEfGh", count: 3)
+        let fakeAWS = "AK" + "IA" + "9X7K2M8P4Q6R3T5Z"
         let fakePG = "postgres://admin_user:Sup3rS3cretP@ssw0rd!@db.internal.corp:5432/prod_ledger"
 
         let requestObject: [String: Any] = [

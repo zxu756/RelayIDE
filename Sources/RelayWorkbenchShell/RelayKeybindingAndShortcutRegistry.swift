@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import RelayModels
 import RelayPluginSDK
@@ -350,6 +351,19 @@ public enum RelayShortcutContextScope: String, Sendable, Codable, Hashable, Case
         }
     }
 
+    public func localizedTitle(in language: RelayLanguage) -> String {
+        switch self {
+        case .globalWorkbench:        return RelayLocalizer.select(language, "Global Workbench", "全局工作台")
+        case .ptyGridFocused:         return RelayLocalizer.select(language, "2×2 PTY Grid", "并行终端网格")
+        case .dagStudioFocused:       return RelayLocalizer.select(language, "Relay DAG Pipeline", "DAG 接力编排")
+        case .mergeStudioFocused:     return RelayLocalizer.select(language, "3-Way Semantic Merge", "三路语义合并")
+        case .territoryMapFocused:    return RelayLocalizer.select(language, "2.5D Territory Map", "领地围栏地图")
+        case .wiretapStudioFocused:   return RelayLocalizer.select(language, "Wiretap & Budget", "Wiretap 预算网关")
+        case .guardrailStudioFocused: return RelayLocalizer.select(language, "Guardrail Plugins", "JSC 编排插件")
+        case .commandPaletteModal:    return RelayLocalizer.select(language, "Command Palette Modal", "命令面板弹窗")
+        }
+    }
+
     /// Determines whether two shortcut scopes can ever be active at the same moment.
     public func overlaps(with other: RelayShortcutContextScope) -> Bool {
         if self == other { return true }
@@ -401,6 +415,34 @@ public struct RelayShortcutBinding: Sendable, Codable, Hashable, Identifiable {
 
     public var glyphBadge: String {
         activeChord.glyphBadge
+    }
+
+    public func localizedTitle(in language: RelayLanguage) -> String {
+        guard language == .zhHans else { return title }
+        switch commandID {
+        case "studio.ptyGrid": return "打开 2×2 多厂商并行终端网格"
+        case "studio.dagPipeline": return "打开 DAG 接力编排与关键路径视图"
+        case "studio.semanticMerge": return "打开三路 AST 语义合并工作台"
+        case "studio.territoryMap": return "打开 2.5D 领地围栏地图"
+        case "studio.wiretapBudget": return "打开 Wiretap 预算网关与火焰图"
+        case "studio.guardrailPlugins": return "打开 JSC 编排插件与演练场"
+        case "workbench.commandPalette": return "打开或关闭模糊命令面板"
+        case "workbench.toggleLanguage": return "切换界面语言 (中文 / EN)"
+        case "pty.broadcastInput": return "向所选智能体终端广播输入"
+        case "merge.runThreeWaySemantic": return "执行三路 AST 语义合并"
+        case "wiretap.tripOrResetCircuitBreaker": return "触发或重置通道预算熔断器"
+        case "journal.undo": return "撤销上一步工作区变更"
+        case "journal.redo": return "重做工作区变更"
+        case "journal.createCheckpoint": return "创建命名工作区检查点"
+        case "workbench.ftsSearch": return "全文检索终端与合并记录 (FTS5)"
+        case "workbench.exportHTMLDossier": return "导出独立双语 HTML 审计档案"
+        case "workbench.toggleRightInspector": return "显示或隐藏右侧检查器"
+        case "workbench.toggleBottomDrawer": return "显示或隐藏底部遥测与检索抽屉"
+        case "guardrail.evalScratchpad": return "运行 JSC 护栏脚本演练场"
+        case "guardrail.exportPolicyPack": return "导出 .relay-guardrails.json 策略包"
+        case "merge.acceptCleanAutoMerged": return "暂存全部无冲突 AST 自动合并块"
+        default: return title
+        }
     }
 }
 
@@ -955,6 +997,14 @@ public final class RelayKeybindingAndShortcutRegistry: ObservableObject {
             defaultChord: .single([.command], "k")
         ),
         RelayShortcutBinding(
+            commandID: "workbench.toggleLanguage",
+            title: "Toggle Language (中文 / EN)",
+            subtitle: "Instantly switch all RelayIDE surfaces between Simplified Chinese and English",
+            category: .studioNavigation,
+            scope: .globalWorkbench,
+            defaultChord: .single([.command, .shift], "l")
+        ),
+        RelayShortcutBinding(
             commandID: "pty.broadcastInput",
             title: "Broadcast Input Across Selected PTY Lanes",
             subtitle: "Open synchronized multi-vendor terminal prompt broadcaster",
@@ -1078,6 +1128,7 @@ public final class RelayKeybindingAndShortcutRegistry: ObservableObject {
 
 @MainActor
 public final class RelayWorkbenchCoordinator: ObservableObject {
+    public let localizer: RelayLocalizer
     public let shellState: RelayWorkbenchShellState
     public let preferences: RelayUserPreferences
     public let commandPalette: RelayCommandPaletteController
@@ -1092,31 +1143,50 @@ public final class RelayWorkbenchCoordinator: ObservableObject {
     public var onRedoRequested: (() -> Void)?
     public var onCreateCheckpointRequested: (() -> Void)?
     public var onExportHTMLDossierRequested: (() -> Void)?
+    public var onLanguageToggled: ((RelayLanguage) -> Void)?
+
+    private var languageCancellable: AnyCancellable?
 
     public init(
+        localizer: RelayLocalizer = RelayLocalizer.shared,
         shellState: RelayWorkbenchShellState = RelayWorkbenchShellState(),
         preferences: RelayUserPreferences = RelayUserPreferences(),
-        commandPalette: RelayCommandPaletteController = RelayCommandPaletteController(),
+        commandPalette: RelayCommandPaletteController? = nil,
         splitWorkspace: RelaySplitWorkspaceController = RelaySplitWorkspaceController(),
         toastCenter: RelayToastCenter = RelayToastCenter(),
         shortcutRegistry: RelayKeybindingAndShortcutRegistry = RelayKeybindingAndShortcutRegistry()
     ) {
+        self.localizer = localizer
         self.shellState = shellState
         self.preferences = preferences
-        self.commandPalette = commandPalette
+        let resolvedPalette = commandPalette ?? RelayCommandPaletteController(
+            catalog: RelayCommandPaletteController.catalog(for: localizer.language)
+        )
+        self.commandPalette = resolvedPalette
         self.splitWorkspace = splitWorkspace
         self.toastCenter = toastCenter
         self.shortcutRegistry = shortcutRegistry
 
-        shortcutRegistry.syncBadges(into: commandPalette)
+        shortcutRegistry.syncBadges(into: resolvedPalette)
 
-        commandPalette.onCommandTriggered = { [weak self] item in
+        resolvedPalette.onCommandTriggered = { [weak self] item in
             self?.dispatchCommand(id: item.id, targetPane: item.targetPane)
         }
         shortcutRegistry.onShortcutTriggered = { [weak self] binding in
             let targetPane = self?.commandPalette.catalog.first(where: { $0.id == binding.commandID })?.targetPane
             self?.dispatchCommand(id: binding.commandID, targetPane: targetPane)
         }
+
+        languageCancellable = localizer.$language
+            .dropFirst()
+            .sink { [weak self] nextLang in
+                guard let self else { return }
+                self.commandPalette.applyLanguage(
+                    nextLang,
+                    badgeOverrides: self.shortcutRegistry.badgeDictionary()
+                )
+                self.objectWillChange.send()
+            }
     }
 
     public func selectStudioPane(_ pane: RelayStudioPane) {
@@ -1145,6 +1215,9 @@ public final class RelayWorkbenchCoordinator: ObservableObject {
         case "workbench.commandPalette":
             commandPalette.togglePresented()
             shellState.isCommandPalettePresented = commandPalette.isPresented
+        case "workbench.toggleLanguage":
+            let next = localizer.toggleLanguage()
+            onLanguageToggled?(next)
         case "pty.broadcastInput":
             selectStudioPane(.ptyGrid)
             splitWorkspace.isBroadcastComposerPresented.toggle()

@@ -8,6 +8,68 @@ import RelayWorkbenchShell
 import RelayWorkspaceStore
 import SwiftUI
 
+// MARK: - Bauhaus Warm Sandpaper Segmented Language Pill (`中文 | EN`)
+
+public struct RelayLanguageTogglePill: View {
+    @ObservedObject public var viewModel: RelayStudioViewModel
+
+    public init(viewModel: RelayStudioViewModel) {
+        self.viewModel = viewModel
+    }
+
+    public var body: some View {
+        let activeLang = viewModel.currentLanguage
+        HStack(spacing: 0) {
+            languageSegment(.zhHans, isSelected: activeLang == .zhHans)
+
+            Rectangle()
+                .fill(RelayBauhausDesign.structuralBorder)
+                .frame(width: 1, height: 14)
+
+            languageSegment(.en, isSelected: activeLang == .en)
+        }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius + 1, style: .continuous)
+                .fill(RelayBauhausDesign.warmSandpaper)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius + 1, style: .continuous)
+                .strokeBorder(RelayBauhausDesign.carbonMatteWell.opacity(0.82), lineWidth: 1)
+        )
+        .fixedSize(horizontal: true, vertical: false)
+        .help("切换语言 / Toggle Language (⇧⌘L)")
+    }
+
+    private func languageSegment(_ lang: RelayLanguage, isSelected: Bool) -> some View {
+        Button {
+            viewModel.setLanguage(lang, postToast: true)
+        } label: {
+            HStack(spacing: 4) {
+                if isSelected {
+                    Circle()
+                        .fill(RelayBauhausDesign.terracottaAccent)
+                        .frame(width: 5, height: 5)
+                }
+                Text(lang.badge)
+                    .font(lang == .en
+                          ? .system(size: 10.5, weight: .bold, design: .monospaced)
+                          : .system(size: 10.5, weight: .bold))
+                    .tracking(0)
+            }
+            .foregroundStyle(isSelected ? RelayBauhausDesign.warmSandpaper : RelayBauhausDesign.carbonMatteWell)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3.5)
+            .background(
+                RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius - 0.5, style: .continuous)
+                    .fill(isSelected ? RelayBauhausDesign.carbonMatteWell : Color.clear)
+            )
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - Complete Bauhaus Warm Sandpaper Workbench Root Chrome
 
 public struct RelayStudioRootWorkbenchView: View {
@@ -28,7 +90,7 @@ public struct RelayStudioRootWorkbenchView: View {
 
                 HStack(spacing: 0) {
                     leftStudioAndWorktreeRail
-                        .frame(width: 218)
+                        .frame(width: 236)
 
                     Rectangle()
                         .fill(RelayBauhausDesign.hairlineBorder)
@@ -49,6 +111,12 @@ public struct RelayStudioRootWorkbenchView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+
+                Rectangle()
+                    .fill(RelayBauhausDesign.hairlineBorder)
+                    .frame(height: 1)
+
+                bottomStudioStatusBar
             }
             .background(RelayBauhausDesign.warmSandpaper)
 
@@ -56,7 +124,8 @@ public struct RelayStudioRootWorkbenchView: View {
             if !viewModel.coordinator.toastCenter.visibleToasts.isEmpty {
                 RelayToastOverlayStack(viewModel: viewModel)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                    .padding(14)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 30)
             }
 
             // ⌘K Fuzzy Command Palette Modal Overlay
@@ -75,7 +144,8 @@ public struct RelayStudioRootWorkbenchView: View {
     // MARK: - Top Bauhaus Header Bar
 
     private var topBauhausHeaderBar: some View {
-        HStack(spacing: 8) {
+        let isZh = viewModel.currentLanguage.isChinese
+        return HStack(spacing: 7) {
             // Brand Emblem + Campaign Title
             HStack(spacing: 8) {
                 ZStack {
@@ -99,14 +169,14 @@ public struct RelayStudioRootWorkbenchView: View {
                             .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
 
-                        Text("MULTI-AGENT WORKBENCH")
+                        Text(viewModel.L("MULTI-AGENT WORKBENCH", "多智能体接力编排工作台"))
                             .font(.system(size: 9.5, weight: .bold))
-                            .tracking(0.6)
+                            .tracking(isZh ? 0 : 0.6)
                             .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                             .fixedSize(horizontal: true, vertical: false)
                     }
 
-                    Text(viewModel.campaignTitle)
+                    Text(viewModel.localizedCampaignTitle)
                         .font(.system(size: 12.5, weight: .bold))
                         .foregroundStyle(RelayBauhausDesign.espressoInk)
                         .fixedSize(horizontal: true, vertical: false)
@@ -122,18 +192,24 @@ public struct RelayStudioRootWorkbenchView: View {
                 background: RelayBauhausDesign.cobaltWash,
                 border: RelayBauhausDesign.codexCobalt.opacity(0.45),
                 symbolName: "point.3.connected.trianglepath.dotted",
-                monospaced: true
+                monospaced: !isZh
             )
 
             // Total Spend USD Pill
             RelayBauhausPill(
-                "Spend \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))",
+                viewModel.L(
+                    "Spend \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))",
+                    "消耗 \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))"
+                ),
                 foreground: RelayBauhausDesign.espressoInk,
                 background: RelayBauhausDesign.warmIvory,
                 border: RelayBauhausDesign.hairlineBorder,
                 symbolName: "dollarsign.circle.fill",
-                monospaced: true
+                monospaced: !isZh
             )
+
+            // Bauhaus `中文 | EN` Live Language Toggle Pill (`⇧⌘L`)
+            RelayLanguageTogglePill(viewModel: viewModel)
 
             // Undo / Redo Architectural Buttons
             HStack(spacing: 3) {
@@ -143,7 +219,7 @@ public struct RelayStudioRootWorkbenchView: View {
                     HStack(spacing: 3) {
                         Image(systemName: "arrow.uturn.backward")
                             .font(.system(size: 10, weight: .bold))
-                        Text("Undo")
+                        Text(viewModel.L("Undo", "撤销"))
                             .font(.system(size: 10.5, weight: .semibold))
                     }
                     .foregroundStyle(RelayBauhausDesign.espressoInk)
@@ -189,8 +265,9 @@ public struct RelayStudioRootWorkbenchView: View {
                 HStack(spacing: 5) {
                     Image(systemName: "command")
                         .font(.system(size: 10, weight: .bold))
-                    Text("Palette ⌘K")
-                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                    Text(viewModel.L("Palette ⌘K", "命令面板 ⌘K"))
+                        .font(.system(size: 10.5, weight: .bold))
+                        .monospacedDigit()
                 }
                 .foregroundStyle(RelayBauhausDesign.espressoInk)
                 .padding(.horizontal, 9)
@@ -214,7 +291,7 @@ public struct RelayStudioRootWorkbenchView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "rectangle.bottomhalf.inset.filled")
                         .font(.system(size: 10.5, weight: .semibold))
-                    Text("Drawer")
+                    Text(viewModel.L("Drawer", "抽屉"))
                         .font(.system(size: 10.5, weight: .semibold))
                 }
                 .foregroundStyle(viewModel.isBottomDrawerPresented ? RelayBauhausDesign.warmIvory : RelayBauhausDesign.espressoInk)
@@ -239,7 +316,7 @@ public struct RelayStudioRootWorkbenchView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "bookmark.fill")
                         .font(.system(size: 10, weight: .bold))
-                    Text("Checkpoint")
+                    Text(viewModel.L("Checkpoint", "快照"))
                         .font(.system(size: 10.5, weight: .bold))
                 }
                 .foregroundStyle(RelayBauhausDesign.warmIvory)
@@ -258,13 +335,82 @@ public struct RelayStudioRootWorkbenchView: View {
         .background(RelayBauhausDesign.sandstoneStrip)
     }
 
+    // MARK: - Bottom Architectural Status Bar
+
+    private var bottomStudioStatusBar: some View {
+        let selectedLane = viewModel.lane(forID: viewModel.selectedLaneID)
+        let activePaneLabel = viewModel.activePane.localizedTitle(in: viewModel.currentLanguage)
+        let autoCount = viewModel.totalAutoMergedDeclarations
+        let conflictCount = viewModel.totalUnresolvedConflicts
+
+        return HStack(spacing: 10) {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(RelayBauhausDesign.agySignalGreen)
+                    .frame(width: 6, height: 6)
+                Text(viewModel.coordinator.shellState.statusBannerText)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(RelayBauhausDesign.espressoInk)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+
+            Text("·")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+
+            if let selectedLane {
+                Text(viewModel.T(selectedLane.displayName))
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+
+            Spacer(minLength: 6)
+
+            Text(
+                viewModel.L(
+                    "AST Auto-Merged: \(autoCount) · Conflicts: \(conflictCount)",
+                    "AST 自动合并：\(autoCount) · 待裁决冲突：\(conflictCount)"
+                )
+            )
+            .font(.system(size: 9.5, weight: .semibold))
+            .monospacedDigit()
+            .foregroundStyle(conflictCount > 0 ? RelayBauhausDesign.terracottaAccent : RelayBauhausDesign.agySignalGreen)
+            .fixedSize(horizontal: true, vertical: false)
+
+            Text("·")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+
+            Text(activePaneLabel)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(RelayBauhausDesign.espressoInk)
+                .fixedSize(horizontal: true, vertical: false)
+
+            Text("·")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+
+            Text("\(viewModel.currentLanguage.displayName) · ⇧⌘L")
+                .font(.system(size: 9.5, weight: .bold))
+                .foregroundStyle(RelayBauhausDesign.terracottaAccent)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(RelayBauhausDesign.sandstoneStrip)
+    }
+
     // MARK: - Left Studio Pane & Isolated Git Worktree Rail
 
     private var leftStudioAndWorktreeRail: some View {
         VStack(alignment: .leading, spacing: 10) {
             // Studio Panes Navigation
             VStack(alignment: .leading, spacing: 5) {
-                RelaySectionEyebrow("Studio Views", trailingText: "⌘1–6")
+                RelaySectionEyebrow(
+                    viewModel.L("Studio Views", "工作台视图"),
+                    trailingText: "⌘1–6"
+                )
 
                 ForEach(Array(RelayStudioPane.allCases.enumerated()), id: \.element.id) { idx, pane in
                     railStudioPaneRow(pane: pane, shortcutDigit: idx + 1)
@@ -276,7 +422,10 @@ public struct RelayStudioRootWorkbenchView: View {
 
             // Isolated Vendor Git Worktrees
             VStack(alignment: .leading, spacing: 5) {
-                RelaySectionEyebrow("Agent Worktrees", trailingText: "\(viewModel.lanes.count) lanes")
+                RelaySectionEyebrow(
+                    viewModel.L("Agent Worktrees", "智能体工作树"),
+                    trailingText: viewModel.L("\(viewModel.lanes.count) lanes", "\(viewModel.lanes.count) 条通道")
+                )
 
                 RelayAdaptiveScrollContainer {
                     VStack(alignment: .leading, spacing: 6) {
@@ -302,11 +451,16 @@ public struct RelayStudioRootWorkbenchView: View {
                         .foregroundStyle(RelayBauhausDesign.espressoInk)
                         .fixedSize(horizontal: true, vertical: false)
                 }
-                Text("\(viewModel.checkpoints.count) checkpoints · 127.0.0.1 proxy")
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
-                    .fixedSize(horizontal: true, vertical: false)
+                Text(
+                    viewModel.L(
+                        "\(viewModel.checkpoints.count) checkpoints · 127.0.0.1 proxy",
+                        "\(viewModel.checkpoints.count) 个快照 · 127.0.0.1 代理"
+                    )
+                )
+                .font(.system(size: 9.5))
+                .monospacedDigit()
+                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                .fixedSize(horizontal: true, vertical: false)
             }
         }
         .padding(10)
@@ -321,7 +475,7 @@ public struct RelayStudioRootWorkbenchView: View {
         return Button {
             viewModel.selectPane(pane)
         } label: {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 Image(systemName: pane.sfSymbolName)
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(isSelected ? RelayBauhausDesign.warmIvory : RelayBauhausDesign.claudeVermilion)
@@ -368,6 +522,9 @@ public struct RelayStudioRootWorkbenchView: View {
     }
 
     private func concisePaneTitle(_ pane: RelayStudioPane) -> String {
+        if viewModel.currentLanguage.isChinese {
+            return pane.localizedTitle(in: .zhHans)
+        }
         switch pane {
         case .ptyGrid:
             return "PTY Grid"
@@ -392,7 +549,7 @@ public struct RelayStudioRootWorkbenchView: View {
             return "\(viewModel.dagSpec.tasks.count)"
         case .semanticMerge:
             let c = viewModel.totalUnresolvedConflicts
-            return c > 0 ? "\(c)!" : "OK"
+            return c > 0 ? "\(c)!" : viewModel.L("OK", "就绪")
         case .territoryMap:
             return "\(viewModel.isometricTiles.count)"
         case .wiretapBudget:
@@ -410,13 +567,13 @@ public struct RelayStudioRootWorkbenchView: View {
         return Button {
             viewModel.selectedLaneID = lane.id
         } label: {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3.5) {
                 HStack(spacing: 5) {
                     RoundedRectangle(cornerRadius: 1.5, style: .continuous)
                         .fill(accent)
                         .frame(width: 6, height: 6)
 
-                    Text(RelayBauhausDesign.vendorStudioName(lane.assignedVendor))
+                    Text(RelayBauhausDesign.vendorStudioName(lane.assignedVendor, language: viewModel.currentLanguage))
                         .font(.system(size: 10.5, weight: .bold))
                         .foregroundStyle(RelayBauhausDesign.espressoInk)
                         .fixedSize(horizontal: true, vertical: false)
@@ -446,8 +603,8 @@ public struct RelayStudioRootWorkbenchView: View {
 
                     Spacer(minLength: 2)
 
-                    Text("\(lane.dirtyFiles.count) files")
-                        .font(.system(size: 9, design: .monospaced))
+                    Text(viewModel.L("\(lane.dirtyFiles.count) files", "\(lane.dirtyFiles.count) 个文件"))
+                        .font(.system(size: 9))
                         .monospacedDigit()
                         .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                         .fixedSize(horizontal: true, vertical: false)
@@ -507,7 +664,7 @@ public struct RelayBottomDrawerView: View {
                         HStack(spacing: 5) {
                             Image(systemName: mode.symbolName)
                                 .font(.system(size: 10, weight: .bold))
-                            Text(mode.rawValue)
+                            Text(mode.localizedTitle(in: viewModel.currentLanguage))
                                 .font(.system(size: 10.5, weight: .bold))
                         }
                         .foregroundStyle(isSelected ? RelayBauhausDesign.warmIvory : RelayBauhausDesign.espressoInk)
@@ -534,14 +691,17 @@ public struct RelayBottomDrawerView: View {
                             .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                         RelayAdaptiveTextField(
-                            "FTS5 BM25 query across transcripts, handoffs & merges",
+                            viewModel.L(
+                                "FTS5 BM25 query across transcripts, handoffs & merges",
+                                "跨终端实录、交接产物与合并记录执行 FTS5 BM25 检索"
+                            ),
                             text: Binding(
                                 get: { viewModel.ftsQueryText },
                                 set: { viewModel.runFTSSearch($0) }
                             ),
                             font: .system(size: 11, design: .monospaced)
                         )
-                        .frame(width: 320)
+                        .frame(width: 340)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3.5)
@@ -592,12 +752,12 @@ public struct RelayBottomDrawerView: View {
         VStack(alignment: .leading, spacing: 5) {
             ForEach(viewModel.ftsSearchResults) { hit in
                 HStack(spacing: 8) {
-                    RelayVendorBadge(vendor: hit.vendor, compact: true)
-                    Text(hit.corpus.displayTitle)
-                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    RelayVendorBadge(vendor: hit.vendor, compact: true, language: viewModel.currentLanguage)
+                    Text(viewModel.T(hit.corpus.displayTitle))
+                        .font(.system(size: 9.5, weight: .bold))
                         .foregroundStyle(RelayBauhausDesign.codexCobalt)
                         .fixedSize(horizontal: true, vertical: false)
-                    Text(hit.title)
+                    Text(viewModel.T(hit.title))
                         .font(.system(size: 10.5, weight: .bold))
                         .foregroundStyle(RelayBauhausDesign.espressoInk)
                         .fixedSize(horizontal: false, vertical: true)
@@ -628,10 +788,10 @@ public struct RelayBottomDrawerView: View {
                     Text(trace.hookKind.rawValue)
                         .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                         .foregroundStyle(RelayBauhausDesign.codexCobalt)
-                    Text(trace.decision.rawValue)
+                    Text(trace.decision == .veto ? viewModel.L("VETO", "拦截") : viewModel.L("ALLOW", "放行"))
                         .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                         .foregroundStyle(trace.decision == .veto ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.agySignalGreen)
-                    Text("\(trace.pluginName) · \(trace.reasonSummary)")
+                    Text("\(viewModel.T(trace.pluginName)) · \(viewModel.T(trace.reasonSummary))")
                         .font(.system(size: 10.5))
                         .foregroundStyle(RelayBauhausDesign.espressoInk)
                         .fixedSize(horizontal: false, vertical: true)
@@ -695,90 +855,116 @@ public struct RelayCommandPaletteModalView: View {
                     viewModel.isCommandPalettePresented = false
                 }
 
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 8) {
-                    Image(systemName: "command")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(RelayBauhausDesign.claudeVermilion)
-
-                    RelayAdaptiveTextField(
-                        "Jump to studio pane, run AST merge, trip circuit, or save checkpoint",
-                        text: $viewModel.commandPaletteQuery,
-                        font: .system(size: 13, weight: .medium)
-                    )
-
-                    Button("ESC") {
-                        viewModel.isCommandPalettePresented = false
-                    }
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .buttonStyle(.plain)
-                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
-                }
-                .padding(12)
-                .background(RelayBauhausDesign.sandstoneStrip)
-
-                Rectangle()
-                    .fill(RelayBauhausDesign.hairlineBorder)
-                    .frame(height: 1)
-
-                RelayAdaptiveScrollContainer {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(filteredActions) { action in
-                            Button {
-                                if let pane = action.targetPane {
-                                    viewModel.selectPane(pane)
-                                }
-                                viewModel.isCommandPalettePresented = false
-                            } label: {
-                                HStack(spacing: 10) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(action.title)
-                                            .font(.system(size: 12, weight: .bold))
-                                            .foregroundStyle(RelayBauhausDesign.espressoInk)
-                                        Text(action.subtitle)
-                                            .font(.system(size: 10.5))
-                                            .foregroundStyle(RelayBauhausDesign.graphiteInk)
-                                    }
-                                    Spacer()
-                                    Text(action.shortcutHint)
-                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                                        .foregroundStyle(RelayBauhausDesign.claudeVermilion)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                                                .fill(RelayBauhausDesign.vermilionWash)
-                                        )
-                                }
-                                .padding(8)
-                                .background(
-                                    RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
-                                        .fill(RelayBauhausDesign.sandstoneStrip.opacity(0.35))
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(10)
-                }
-                .frame(maxHeight: 320)
-            }
-            .frame(width: 560)
-            .background(
-                RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
-                    .fill(RelayBauhausDesign.warmIvory)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
-                    .strokeBorder(RelayBauhausDesign.espressoInk, lineWidth: 1.5)
-            )
+            paletteCardBody
         }
     }
 
-    private var filteredActions: [RelayCommandAction] {
-        viewModel.coordinator.shellState.commandQuery = viewModel.commandPaletteQuery
-        return viewModel.coordinator.shellState.filteredActions()
+    private var paletteCardBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            paletteSearchHeaderBar
+
+            Rectangle()
+                .fill(RelayBauhausDesign.hairlineBorder)
+                .frame(height: 1)
+
+            RelayAdaptiveScrollContainer {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(filteredMatches) { match in
+                        paletteMatchRow(match.item)
+                    }
+                }
+                .padding(10)
+            }
+            .frame(maxHeight: 336)
+        }
+        .frame(width: 580)
+        .background(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                .fill(RelayBauhausDesign.warmIvory)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                .strokeBorder(RelayBauhausDesign.espressoInk, lineWidth: 1.5)
+        )
+    }
+
+    private var paletteSearchHeaderBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "command")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(RelayBauhausDesign.claudeVermilion)
+
+            RelayAdaptiveTextField(
+                viewModel.L(
+                    "Jump to studio pane, toggle language, run AST merge, or save checkpoint",
+                    "跳转视图、切换中英文、执行三路语义合并、触发熔断或保存快照"
+                ),
+                text: $viewModel.commandPaletteQuery,
+                font: .system(size: 13, weight: .medium)
+            )
+
+            Button("ESC") {
+                viewModel.isCommandPalettePresented = false
+            }
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .buttonStyle(.plain)
+            .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+        }
+        .padding(12)
+        .background(RelayBauhausDesign.sandstoneStrip)
+    }
+
+    private func paletteMatchRow(_ item: RelayPaletteCommandItem) -> some View {
+        Button {
+            viewModel.coordinator.dispatchCommand(id: item.id, targetPane: item.targetPane)
+            if let pane = item.targetPane {
+                viewModel.selectPane(pane)
+            }
+            viewModel.isCommandPalettePresented = false
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: item.sfSymbolName)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(RelayBauhausDesign.codexCobalt)
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(RelayBauhausDesign.espressoInk)
+                    Text(item.subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                }
+
+                Spacer()
+
+                Text(item.shortcutBadge)
+                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RelayBauhausDesign.claudeVermilion)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                            .fill(RelayBauhausDesign.vermilionWash)
+                    )
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                    .fill(RelayBauhausDesign.sandstoneStrip.opacity(0.35))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var filteredMatches: [ScoredPaletteCommandMatch] {
+        let palette = viewModel.coordinator.commandPalette
+        if palette.searchQuery != viewModel.commandPaletteQuery {
+            palette.searchQuery = viewModel.commandPaletteQuery
+        }
+        return palette.rankedMatches
     }
 }
 
@@ -800,11 +986,11 @@ public struct RelayPreferencesModalView: View {
             RelayBauhausCard(padding: 16, fill: RelayBauhausDesign.warmIvory, borderColor: RelayBauhausDesign.espressoInk) {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Text("RelayIDE Studio Preferences")
+                        Text(viewModel.L("RelayIDE Studio Preferences", "RelayIDE 工作台偏好设置"))
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(RelayBauhausDesign.espressoInk)
                         Spacer()
-                        Button("Close") {
+                        Button(viewModel.L("Close", "关闭")) {
                             viewModel.isPreferencesModalPresented = false
                         }
                         .buttonStyle(.plain)
@@ -814,8 +1000,31 @@ public struct RelayPreferencesModalView: View {
 
                     Divider().overlay(RelayBauhausDesign.hairlineBorder)
 
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(viewModel.L("Interface Language (⇧⌘L)", "界面语言 (⇧⌘L)"))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(RelayBauhausDesign.espressoInk)
+                            Text(
+                                viewModel.L(
+                                    "Live bilingual switching persisted to UserDefaults",
+                                    "实时切换中英文工作台界面并自动持久化偏好"
+                                )
+                            )
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                        }
+                        Spacer()
+                        RelayLanguageTogglePill(viewModel: viewModel)
+                    }
+
+                    Divider().overlay(RelayBauhausDesign.hairlineBorder)
+
                     Toggle(
-                        "Redact Outbound Secrets in Loopback Proxy by Default",
+                        viewModel.L(
+                            "Redact Outbound Secrets in Loopback Proxy by Default",
+                            "默认在本地回环代理中自动脱敏外发敏感凭据"
+                        ),
                         isOn: Binding(
                             get: { viewModel.coordinator.preferences.snapshot.outboundDLPRedactByDefault },
                             set: { viewModel.coordinator.preferences.snapshot.outboundDLPRedactByDefault = $0 }
@@ -824,7 +1033,10 @@ public struct RelayPreferencesModalView: View {
                     .font(.system(size: 12))
 
                     Toggle(
-                        "Auto-Run 3-Way Semantic AST Merge on .relay Handoff",
+                        viewModel.L(
+                            "Auto-Run 3-Way Semantic AST Merge on .relay Handoff",
+                            "收到 .relay 交接产物时自动执行三路 AST 语义合并"
+                        ),
                         isOn: Binding(
                             get: { viewModel.coordinator.preferences.snapshot.autoRunSemanticMergeOnHandoff },
                             set: { viewModel.coordinator.preferences.snapshot.autoRunSemanticMergeOnHandoff = $0 }
@@ -833,7 +1045,7 @@ public struct RelayPreferencesModalView: View {
                     .font(.system(size: 12))
 
                     HStack {
-                        Text("Global Workspace USD Budget Ceiling")
+                        Text(viewModel.L("Global Workspace USD Budget Ceiling", "工作区全局美元预算上限"))
                             .font(.system(size: 12, weight: .semibold))
                         Spacer()
                         Text(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))
@@ -842,7 +1054,7 @@ public struct RelayPreferencesModalView: View {
                     }
                 }
             }
-            .frame(width: 460)
+            .frame(width: 490)
         }
     }
 }
@@ -905,77 +1117,82 @@ public struct RelayStudioMenuCommands: Commands {
     }
 
     public var body: some Commands {
-        CommandMenu("Studio") {
-            Button("2×2 Multi-Vendor PTY Grid") {
+        CommandMenu(viewModel.L("Studio", "工作台")) {
+            Button(RelayStudioPane.ptyGrid.localizedTitle(in: viewModel.currentLanguage)) {
                 viewModel.selectPane(.ptyGrid)
             }
             .keyboardShortcut("1", modifiers: [.command])
 
-            Button("Topological Relay DAG") {
+            Button(RelayStudioPane.dagPipeline.localizedTitle(in: viewModel.currentLanguage)) {
                 viewModel.selectPane(.dagPipeline)
             }
             .keyboardShortcut("2", modifiers: [.command])
 
-            Button("3-Way Semantic AST Merge Studio") {
+            Button(RelayStudioPane.semanticMerge.localizedTitle(in: viewModel.currentLanguage)) {
                 viewModel.selectPane(.semanticMerge)
             }
             .keyboardShortcut("3", modifiers: [.command])
 
-            Button("2.5D Isometric Coupling & Territory Map") {
+            Button(RelayStudioPane.territoryMap.localizedTitle(in: viewModel.currentLanguage)) {
                 viewModel.selectPane(.territoryMap)
             }
             .keyboardShortcut("4", modifiers: [.command])
 
-            Button("Wiretap Flamechart & USD Spend") {
+            Button(RelayStudioPane.wiretapBudget.localizedTitle(in: viewModel.currentLanguage)) {
                 viewModel.selectPane(.wiretapBudget)
             }
             .keyboardShortcut("5", modifiers: [.command])
 
-            Button("JavaScriptCore Guardrail Plugins") {
+            Button(RelayStudioPane.guardrailPlugins.localizedTitle(in: viewModel.currentLanguage)) {
                 viewModel.selectPane(.guardrailPlugins)
             }
             .keyboardShortcut("6", modifiers: [.command])
 
             Divider()
 
-            Button("Fuzzy Command Palette") {
+            Button(viewModel.L("Fuzzy Command Palette", "模糊命令面板")) {
                 viewModel.isCommandPalettePresented.toggle()
             }
             .keyboardShortcut("k", modifiers: [.command])
 
-            Button("Broadcast Input to PTY Lanes") {
+            Button(viewModel.L("Broadcast Input to PTY Lanes", "向 PTY 终端通道广播输入")) {
                 viewModel.selectPane(.ptyGrid)
                 viewModel.isBroadcastBarExpanded.toggle()
             }
             .keyboardShortcut("b", modifiers: [.command, .shift])
 
-            Button("Toggle Bottom Search & Trace Drawer") {
+            Button(viewModel.L("Toggle Bottom Search & Trace Drawer", "切换底部检索与轨迹抽屉")) {
                 viewModel.isBottomDrawerPresented.toggle()
             }
             .keyboardShortcut("j", modifiers: [.command])
 
+            Button("切换语言 / Toggle Language") {
+                viewModel.toggleLanguage(postToast: true)
+            }
+            .keyboardShortcut("l", modifiers: [.command, .shift])
+
             Divider()
 
-            Button("Studio Preferences") {
+            Button(viewModel.L("Studio Preferences…", "工作台偏好设置…")) {
                 viewModel.isPreferencesModalPresented = true
             }
             .keyboardShortcut(",", modifiers: [.command])
         }
 
-        CommandMenu("Workspace") {
-            Button("Undo Workspace Mutation") {
+        CommandMenu(viewModel.L("Workspace", "工作区")) {
+            Button(viewModel.L("Undo Workspace Mutation", "撤销工作区变更")) {
                 viewModel.performUndo()
             }
             .keyboardShortcut("z", modifiers: [.command])
 
-            Button("Redo Workspace Mutation") {
+            Button(viewModel.L("Redo Workspace Mutation", "重做工作区变更")) {
                 viewModel.performRedo()
             }
             .keyboardShortcut("z", modifiers: [.command, .shift])
 
             Divider()
 
-            Button("Create Named Checkpoint Snapshot") {
+            Button(viewModel.L("Create Named Checkpoint Snapshot", "创建命名检查点快照")) {
                 viewModel.createWorkspaceCheckpoint()
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
@@ -998,13 +1215,20 @@ public enum RelayRetinaScreenshotExporter {
     }
 
     /// Exports all 4 flagship `2720 × 1680` Retina PNG screenshots into `outputDirectory`.
+    /// When `language == .zhHans`, exports `-zh.png` files (`screenshot-*-zh.png`) while keeping English `.png` files untouched.
     @discardableResult
-    public static func exportFlagshipScreenshots(to outputDirectory: URL) throws -> [ExportedScreenshotRecord] {
+    public static func exportFlagshipScreenshots(
+        to outputDirectory: URL,
+        language: RelayLanguage? = nil
+    ) throws -> [ExportedScreenshotRecord] {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
-        let specs: [(fileName: String, configure: (RelayStudioViewModel) -> Void)] = [
+        let resolvedLanguage = language ?? .en
+        let fileExtensionSuffix = (resolvedLanguage == .zhHans) ? "-zh.png" : ".png"
+
+        let specs: [(stem: String, configure: (RelayStudioViewModel) -> Void)] = [
             (
-                "screenshot-pty-grid.png",
+                "screenshot-pty-grid",
                 { vm in
                     vm.selectPane(.ptyGrid)
                     vm.terminalLayoutPreset = .quad2x2
@@ -1014,7 +1238,7 @@ public enum RelayRetinaScreenshotExporter {
                 }
             ),
             (
-                "screenshot-semantic-merge.png",
+                "screenshot-semantic-merge",
                 { vm in
                     vm.selectPane(.semanticMerge)
                     vm.selectedMergeFilePath = "Sources/Auth/AuthSessionManager.swift"
@@ -1023,7 +1247,7 @@ public enum RelayRetinaScreenshotExporter {
                 }
             ),
             (
-                "screenshot-territory-map.png",
+                "screenshot-territory-map",
                 { vm in
                     vm.selectPane(.territoryMap)
                     vm.selectedIsometricModulePath = "Sources/Auth/AuthSessionManager.swift"
@@ -1034,7 +1258,7 @@ public enum RelayRetinaScreenshotExporter {
                 }
             ),
             (
-                "screenshot-wiretap-guardrails.png",
+                "screenshot-wiretap-guardrails",
                 { vm in
                     vm.selectPane(.wiretapBudget)
                     vm.isBottomDrawerPresented = false
@@ -1045,7 +1269,12 @@ public enum RelayRetinaScreenshotExporter {
 
         var exported: [ExportedScreenshotRecord] = []
         for spec in specs {
-            let vm = RelayStudioViewModel(initialPane: .ptyGrid)
+            let fileName = spec.stem + fileExtensionSuffix
+            let isolatedLocalizer = RelayLocalizer(
+                language: resolvedLanguage,
+                persistToUserDefaults: false
+            )
+            let vm = RelayStudioViewModel(initialPane: .ptyGrid, localizer: isolatedLocalizer)
             spec.configure(vm)
             // Ensure zero transient toasts occlude the exported Retina frame
             for t in vm.coordinator.toastCenter.visibleToasts {
@@ -1062,20 +1291,20 @@ public enum RelayRetinaScreenshotExporter {
             renderer.proposedSize = ProposedViewSize(viewportPoints)
 
             guard let cgImage = renderer.cgImage else {
-                throw RelayIDEError.invalidCLIUsage("ImageRenderer failed to rasterize \(spec.fileName)")
+                throw RelayIDEError.invalidCLIUsage("ImageRenderer failed to rasterize \(fileName)")
             }
 
             let rep = NSBitmapImageRep(cgImage: cgImage)
             rep.size = viewportPoints
             guard let pngData = rep.representation(using: .png, properties: [:]) else {
-                throw RelayIDEError.invalidCLIUsage("PNG encoding failed for \(spec.fileName)")
+                throw RelayIDEError.invalidCLIUsage("PNG encoding failed for \(fileName)")
             }
 
-            let fileURL = outputDirectory.appendingPathComponent(spec.fileName)
+            let fileURL = outputDirectory.appendingPathComponent(fileName)
             try pngData.write(to: fileURL, options: [.atomic])
             exported.append(
                 ExportedScreenshotRecord(
-                    fileName: spec.fileName,
+                    fileName: fileName,
                     outputURL: fileURL,
                     pixelWidth: cgImage.width,
                     pixelHeight: cgImage.height

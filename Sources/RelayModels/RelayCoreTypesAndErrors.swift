@@ -43,10 +43,11 @@ public enum AgentVendor: String, Sendable, Codable, Hashable, CaseIterable, Iden
     }
 
     public var defaultExecutableCandidates: [String] {
+        let home = NSHomeDirectory()
         switch self {
         case .claudeCode:
             return [
-                "/Users/xu/.local/bin/claude",
+                (home as NSString).appendingPathComponent(".local/bin/claude"),
                 "/opt/homebrew/bin/claude",
                 "/usr/local/bin/claude"
             ]
@@ -58,13 +59,13 @@ public enum AgentVendor: String, Sendable, Codable, Hashable, CaseIterable, Iden
             ]
         case .antigravity:
             return [
-                "/Users/xu/.antigravity/antigravity/bin/agy",
+                (home as NSString).appendingPathComponent(".antigravity/antigravity/bin/agy"),
                 "/opt/homebrew/bin/agy",
                 "/usr/local/bin/agy"
             ]
         case .mistralVibe:
             return [
-                "/Users/xu/.local/bin/vibe",
+                (home as NSString).appendingPathComponent(".local/bin/vibe"),
                 "/opt/homebrew/bin/vibe"
             ]
         case .customShell:

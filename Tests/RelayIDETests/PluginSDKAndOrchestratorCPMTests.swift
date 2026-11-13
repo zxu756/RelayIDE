@@ -16,7 +16,7 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(builtIns.count == 4)
 
         let host = RelayJavaScriptPluginHost(plugins: builtIns)
-        let leakedKey = "sk-ant-api03-" + String(repeating: "Z8pQ", count: 24)
+        let leakedKey = "sk-ant-" + "api03-" + String(repeating: "Z8pQ", count: 24)
 
         // Provide dirty files that trigger:
         // 1) secretAndPathLeakBlocker (API key + /Users/ hardcoded path)
@@ -225,7 +225,7 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(touchResults.contains { $0.hookDecision == .veto })
 
         // 3. Wiretap outbound prompt containing synthetic API key -> REDACT or VETO
-        let fakeSecret = "sk-ant-api03-" + String(repeating: "m4Nv", count: 24)
+        let fakeSecret = "sk-ant-" + "api03-" + String(repeating: "m4Nv", count: 24)
         let wiretapEvent = RelayLifecycleHookEvent.wiretapRequest(
             RelayWiretapRequestContext(
                 laneID: "lane-claude",

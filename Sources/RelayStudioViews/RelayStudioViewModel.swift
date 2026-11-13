@@ -49,6 +49,8 @@ public enum RelayBauhausDesign {
     public static let mutedStoneInk = Color(relayHex: "#736D65")
 
     /// Bauhaus Signal Vendor Palette
+    /// Burnt Terracotta Accent (`#C2410C`) — signature warm Bauhaus toggle & editorial highlight.
+    public static let terracottaAccent = Color(relayHex: "#C2410C")
     /// Claude Code — Bauhaus Vermilion (`#D94E34`)
     public static let claudeVermilion = Color(relayHex: "#D94E34")
     /// OpenAI Codex — Bauhaus Cobalt (`#2563EB`)
@@ -97,7 +99,7 @@ public enum RelayBauhausDesign {
         }
     }
 
-    public static func vendorStudioName(_ vendor: AgentVendor) -> String {
+    public static func vendorStudioName(_ vendor: AgentVendor, language: RelayLanguage = .en) -> String {
         switch vendor {
         case .claudeCode:
             return "Claude Code"
@@ -108,7 +110,7 @@ public enum RelayBauhausDesign {
         case .mistralVibe:
             return "Mistral Vibe"
         case .customShell:
-            return "Custom Shell"
+            return RelayLocalizer.select(language, "Custom Shell", "验证终端")
         }
     }
 
@@ -239,10 +241,12 @@ public struct RelayBauhausPill: View {
 public struct RelayVendorBadge: View {
     public let vendor: AgentVendor
     public var compact: Bool
+    public var language: RelayLanguage
 
-    public init(vendor: AgentVendor, compact: Bool = false) {
+    public init(vendor: AgentVendor, compact: Bool = false, language: RelayLanguage = .en) {
         self.vendor = vendor
         self.compact = compact
+        self.language = language
     }
 
     public var body: some View {
@@ -252,7 +256,7 @@ public struct RelayVendorBadge: View {
             RoundedRectangle(cornerRadius: 1.5, style: .continuous)
                 .fill(accent)
                 .frame(width: 7, height: 7)
-            Text(compact ? RelayBauhausDesign.vendorShortTag(vendor) : RelayBauhausDesign.vendorStudioName(vendor))
+            Text(compact ? RelayBauhausDesign.vendorShortTag(vendor) : RelayBauhausDesign.vendorStudioName(vendor, language: language))
                 .font(.system(size: 10.5, weight: .bold))
                 .foregroundStyle(accent)
         }
@@ -270,7 +274,7 @@ public struct RelayVendorBadge: View {
     }
 }
 
-/// Tracked uppercase Bauhaus section eyebrow label.
+/// Bauhaus section eyebrow label (tracked uppercase in English; zero letter-tracking in Chinese).
 public struct RelaySectionEyebrow: View {
     public let title: String
     public var trailingText: String?
@@ -281,10 +285,11 @@ public struct RelaySectionEyebrow: View {
     }
 
     public var body: some View {
+        let containsNonASCII = title.unicodeScalars.contains { $0.value > 0x7F }
         HStack(spacing: 6) {
-            Text(title.uppercased())
+            Text(containsNonASCII ? title : title.uppercased())
                 .font(.system(size: 10, weight: .bold))
-                .tracking(0.8)
+                .tracking(containsNonASCII ? 0 : 0.8)
                 .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                 .fixedSize(horizontal: true, vertical: false)
             Spacer(minLength: 4)
@@ -470,6 +475,17 @@ public enum RelayTerminalGridPreset: String, CaseIterable, Identifiable, Sendabl
             return "rectangle.split.2x1"
         }
     }
+
+    public func localizedTitle(in language: RelayLanguage) -> String {
+        switch self {
+        case .quad2x2:
+            return RelayLocalizer.select(language, "2×2 Quad", "2×2 四宫格")
+        case .conductor1Plus3:
+            return RelayLocalizer.select(language, "1+3 Conductor", "1+3 主控视图")
+        case .sideBySide:
+            return RelayLocalizer.select(language, "Side-by-Side", "双栏并排")
+        }
+    }
 }
 
 public enum RelayBottomDrawerMode: String, CaseIterable, Identifiable, Sendable {
@@ -487,6 +503,17 @@ public enum RelayBottomDrawerMode: String, CaseIterable, Identifiable, Sendable 
             return "bolt.shield"
         case .gitWorktrees:
             return "point.3.connected.trianglepath.dotted"
+        }
+    }
+
+    public func localizedTitle(in language: RelayLanguage) -> String {
+        switch self {
+        case .ftsSearch:
+            return RelayLocalizer.select(language, "FTS5 Search", "FTS5 全文检索")
+        case .hookTrace:
+            return RelayLocalizer.select(language, "Hook Trace", "护栏钩子轨迹")
+        case .gitWorktrees:
+            return RelayLocalizer.select(language, "Git Worktrees", "Git 工作树")
         }
     }
 }
@@ -511,6 +538,7 @@ public final class RelayStudioViewModel: ObservableObject {
     public private(set) var database: RelayProjectDatabase
     public private(set) var projectBundleURL: URL
     public private(set) var ownsTemporaryBundleDirectory: Bool
+    public let localizer: RelayLocalizer
     public let orchestrator: MultiVendorDAGOrchestrator
     public let coordinator: RelayWorkbenchCoordinator
     public let conflictEngine: InteractiveConflictResolutionEngine
@@ -624,8 +652,10 @@ public final class RelayStudioViewModel: ObservableObject {
 
     public init(
         projectBundleURL: URL? = nil,
-        initialPane: RelayStudioPane = .ptyGrid
+        initialPane: RelayStudioPane = .ptyGrid,
+        localizer: RelayLocalizer? = nil
     ) {
+        let resolvedLocalizer = localizer ?? RelayLocalizer.shared
         let resolvedBundleURL: URL
         let isTempBundle: Bool
         if let explicitURL = projectBundleURL {
@@ -669,11 +699,17 @@ public final class RelayStudioViewModel: ObservableObject {
             campaign = synth.synthesizeFlagshipCampaign()
         }
 
-        let coord = RelayWorkbenchCoordinator(shellState: RelayWorkbenchShellState(initialPane: initialPane))
+        let coord = RelayWorkbenchCoordinator(
+            localizer: resolvedLocalizer,
+            shellState: RelayWorkbenchShellState(initialPane: initialPane)
+        )
         coord.shellState.activePane = initialPane
         coord.shellState.selectedLaneID = campaign.lanes.first?.id ?? "lane-claude-quic"
         coord.shellState.selectedMergeFilePath = campaign.mergeReports.first?.relativePath ?? "Sources/Auth/AuthSessionManager.swift"
-        coord.shellState.statusBannerText = "Loopback Wiretap 127.0.0.1:43118 · 4 Vendor Worktrees Isolated"
+        coord.shellState.statusBannerText = resolvedLocalizer.L(
+            "Loopback Wiretap 127.0.0.1:43118 · 4 Vendor Worktrees Isolated",
+            "本地回环网关 127.0.0.1:43118 · 4 个智能体工作树已隔离"
+        )
 
         let undoCtrl = RelayUndoRedoController(database: openedDatabase)
         let ftsStore = openedDatabase.makeFTS5SearchStore()
@@ -684,6 +720,7 @@ public final class RelayStudioViewModel: ObservableObject {
         self.database = openedDatabase
         self.projectBundleURL = resolvedBundleURL
         self.ownsTemporaryBundleDirectory = isTempBundle
+        self.localizer = resolvedLocalizer
         self.orchestrator = orch
         self.coordinator = coord
         self.conflictEngine = InteractiveConflictResolutionEngine()
@@ -791,6 +828,19 @@ public final class RelayStudioViewModel: ObservableObject {
     // MARK: - Coordinator Two-Way Observation
 
     private func wireCoordinatorBindings() {
+        localizer.$language
+            .dropFirst()
+            .sink { [weak self] lang in
+                guard let self else { return }
+                self.coordinator.shellState.statusBannerText = RelayLocalizer.select(
+                    lang,
+                    "Loopback Wiretap 127.0.0.1:43118 · 4 Vendor Worktrees Isolated",
+                    "本地回环网关 127.0.0.1:43118 · 4 个智能体工作树已隔离"
+                )
+                self.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
         coordinator.shellState.$activePane
             .dropFirst()
             .sink { [weak self] pane in
@@ -844,6 +894,41 @@ public final class RelayStudioViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Live Bilingual Localization Helpers (`中文 / EN`)
+
+    public var currentLanguage: RelayLanguage {
+        localizer.language
+    }
+
+    public func L(_ en: String, _ zh: String) -> String {
+        localizer.L(en, zh)
+    }
+
+    public func T(_ text: String) -> String {
+        localizer.display(text)
+    }
+
+    public var localizedCampaignTitle: String {
+        localizer.display(campaignTitle)
+    }
+
+    public func setLanguage(_ newLanguage: RelayLanguage, postToast: Bool = false) {
+        let changed = (localizer.language != newLanguage)
+        localizer.setLanguage(newLanguage)
+        if postToast && changed {
+            coordinator.toastCenter.post(
+                severity: .info,
+                title: L("Language: English", "界面语言：简体中文"),
+                detail: L("Switched RelayIDE workbench UI to English (⇧⌘L).", "已将 RelayIDE 工作台界面切换为简体中文 (⇧⌘L)。")
+            )
+        }
+    }
+
+    public func toggleLanguage(postToast: Bool = false) {
+        let next = localizer.language.toggled
+        setLanguage(next, postToast: postToast)
+    }
+
     // MARK: - Computed Studio Summaries
 
     public var totalWorkspaceSpendUSD: Double {
@@ -864,7 +949,10 @@ public final class RelayStudioViewModel: ObservableObject {
 
     public var activeWaveSummaryLabel: String {
         let completed = dagSpec.tasks.filter { $0.status == .completed }.count
-        return "Wave 2/3 · \(completed)/\(dagSpec.tasks.count) Tasks"
+        return L(
+            "Wave 2/3 · \(completed)/\(dagSpec.tasks.count) Tasks",
+            "第 2/3 波 · \(completed)/\(dagSpec.tasks.count) 项任务"
+        )
     }
 
     public var activeMergeReport: ThreeWaySemanticMergeReport? {
@@ -905,10 +993,14 @@ public final class RelayStudioViewModel: ObservableObject {
 
     public func setTerminalLayoutPreset(_ preset: RelayTerminalGridPreset) {
         terminalLayoutPreset = preset
+        let presetLabel = preset.localizedTitle(in: currentLanguage)
         coordinator.toastCenter.post(
             severity: .info,
-            title: "PTY Grid Layout: \(preset.rawValue)",
-            detail: "Updated terminal multiplexer arrangement across \(lanes.count) isolated agent worktrees."
+            title: L("PTY Grid Layout: \(presetLabel)", "终端网格布局：\(presetLabel)"),
+            detail: L(
+                "Updated terminal multiplexer arrangement across \(lanes.count) isolated agent worktrees.",
+                "已更新 \(lanes.count) 个隔离智能体工作树的终端分屏布局。"
+            )
         )
     }
 
@@ -928,13 +1020,13 @@ public final class RelayStudioViewModel: ObservableObject {
             reloadPersistedWorkspaceState()
             coordinator.toastCenter.post(
                 severity: .success,
-                title: "Opened Relay Project Bundle",
+                title: L("Opened Relay Project Bundle", "已打开 Relay 项目包"),
                 detail: bundleURL.lastPathComponent
             )
         } catch {
             coordinator.toastCenter.post(
                 severity: .danger,
-                title: "Failed to Open Project Bundle",
+                title: L("Failed to Open Project Bundle", "打开项目包失败"),
                 detail: error.localizedDescription
             )
         }
@@ -1061,7 +1153,10 @@ public final class RelayStudioViewModel: ObservableObject {
 
         coordinator.toastCenter.post(
             severity: .info,
-            title: "Broadcast Dispatched to \(targets.count) PTY Lanes",
+            title: L(
+                "Broadcast Dispatched to \(targets.count) PTY Lanes",
+                "已向 \(targets.count) 个 PTY 终端通道广播命令"
+            ),
             detail: cmd
         )
     }
@@ -1129,16 +1224,24 @@ public final class RelayStudioViewModel: ObservableObject {
             recomputeCallSiteDiagnostics()
             refreshUndoCheckpointAndFTSState()
 
+            let strategyText = T(strategy.displayTitle)
+            let balancedLabel = outcome.delimiterAudit.isBalanced ? L("PASS", "通过") : L("CHECK", "待核查")
             coordinator.toastCenter.post(
                 severity: .success,
-                title: "Resolved AST Conflict: \(outcome.updatedChunk.symbolName)",
-                detail: "\(strategy.displayTitle) · Balanced braces: \(outcome.delimiterAudit.isBalanced ? "PASS" : "CHECK")"
+                title: L(
+                    "Resolved AST Conflict: \(outcome.updatedChunk.symbolName)",
+                    "已解决 AST 语义冲突：\(outcome.updatedChunk.symbolName)"
+                ),
+                detail: L(
+                    "\(strategyText) · Balanced braces: \(balancedLabel)",
+                    "\(strategyText) · 括号配平校验：\(balancedLabel)"
+                )
             )
 
         case .failure(let error):
             coordinator.toastCenter.post(
                 severity: .danger,
-                title: "Semantic Merge Resolution Failed",
+                title: L("Semantic Merge Resolution Failed", "AST 语义冲突裁决失败"),
                 detail: error.localizedDescription
             )
         }
@@ -1232,8 +1335,11 @@ public final class RelayStudioViewModel: ObservableObject {
             )
             coordinator.toastCenter.post(
                 severity: .success,
-                title: "Circuit Breaker Reset: \(laneID)",
-                detail: "Raised lane ceiling to \(RelayBauhausDesign.formatUSD(raisedCeiling)) and resumed loopback proxy."
+                title: L("Circuit Breaker Reset: \(laneID)", "已恢复预算熔断器：\(laneID)"),
+                detail: L(
+                    "Raised lane ceiling to \(RelayBauhausDesign.formatUSD(raisedCeiling)) and resumed loopback proxy.",
+                    "已将通道上限提升至 \(RelayBauhausDesign.formatUSD(raisedCeiling)) 并恢复本地回环代理。"
+                )
             )
         } else {
             let clampedCeiling = max(0.05, current.spentUSD - 0.01)
@@ -1259,8 +1365,11 @@ public final class RelayStudioViewModel: ObservableObject {
             )
             coordinator.toastCenter.post(
                 severity: .warning,
-                title: "Circuit Breaker Tripped: \(laneID)",
-                detail: "Outbound LLM calls gated with HTTP 429 at 127.0.0.1 loopback proxy."
+                title: L("Circuit Breaker Tripped: \(laneID)", "已触发预算熔断器：\(laneID)"),
+                detail: L(
+                    "Outbound LLM calls gated with HTTP 429 at 127.0.0.1 loopback proxy.",
+                    "本地 127.0.0.1 回环代理已对超额大模型请求返回 HTTP 429 熔断拦截。"
+                )
             )
         }
         refreshUndoCheckpointAndFTSState()
@@ -1361,10 +1470,14 @@ public final class RelayStudioViewModel: ObservableObject {
         )
         refreshUndoCheckpointAndFTSState()
 
+        let pluginDisplay = T(policyPack.entries[idx].manifest.name)
         coordinator.toastCenter.post(
             severity: .info,
-            title: "\(next ? "Enabled" : "Paused") \(policyPack.entries[idx].manifest.name)",
-            detail: "JavaScriptCore sandbox policy updated."
+            title: L(
+                "\(next ? "Enabled" : "Paused") \(pluginDisplay)",
+                "\(next ? "已启用" : "已暂停") \(pluginDisplay)"
+            ),
+            detail: L("JavaScriptCore sandbox policy updated.", "JavaScriptCore 沙箱护栏策略已更新。")
         )
     }
 
@@ -1445,10 +1558,11 @@ public final class RelayStudioViewModel: ObservableObject {
                 guardrailFindings.insert(finding, at: 0)
             }
             try? database.replaceGuardrailFindings(Array(guardrailFindings.prefix(40)))
+            let verdictLabel = evalResult.hookDecision == .veto ? L("VETO", "否决拦截") : L("ALLOW", "放行")
             coordinator.toastCenter.post(
                 severity: evalResult.hookDecision == .veto ? .warning : .success,
-                title: "JSCore Hook Verdict: \(evalResult.hookDecision.rawValue)",
-                detail: String(format: "%@ (%.0f µs)", evalResult.hookReason, evalResult.profile.totalWallMicros)
+                title: L("JSCore Hook Verdict: \(verdictLabel)", "JSCore 钩子裁决：\(verdictLabel)"),
+                detail: String(format: "%@ (%.0f µs)", T(evalResult.hookReason), evalResult.profile.totalWallMicros)
             )
         }
     }
@@ -1461,18 +1575,18 @@ public final class RelayStudioViewModel: ObservableObject {
                 reloadPersistedWorkspaceState()
                 coordinator.toastCenter.post(
                     severity: .info,
-                    title: "Undid Workspace Action",
-                    detail: undoneTitle
+                    title: L("Undid Workspace Action", "已撤销工作区操作"),
+                    detail: T(undoneTitle)
                 )
             } else {
                 coordinator.toastCenter.post(
                     severity: .info,
-                    title: "Undo Stack Empty",
-                    detail: "No prior workspace mutations to revert."
+                    title: L("Undo Stack Empty", "撤销栈为空"),
+                    detail: L("No prior workspace mutations to revert.", "当前没有可回退的工作区变更。")
                 )
             }
         } catch {
-            coordinator.toastCenter.post(severity: .danger, title: "Undo Error", detail: error.localizedDescription)
+            coordinator.toastCenter.post(severity: .danger, title: L("Undo Error", "撤销出错"), detail: error.localizedDescription)
         }
     }
 
@@ -1482,36 +1596,43 @@ public final class RelayStudioViewModel: ObservableObject {
                 reloadPersistedWorkspaceState()
                 coordinator.toastCenter.post(
                     severity: .info,
-                    title: "Redid Workspace Action",
-                    detail: redoneTitle
+                    title: L("Redid Workspace Action", "已重做工作区操作"),
+                    detail: T(redoneTitle)
                 )
             } else {
                 coordinator.toastCenter.post(
                     severity: .info,
-                    title: "Redo Stack Empty",
-                    detail: "No reverted workspace mutations available."
+                    title: L("Redo Stack Empty", "重做栈为空"),
+                    detail: L("No reverted workspace mutations available.", "当前没有可重做的工作区变更。")
                 )
             }
         } catch {
-            coordinator.toastCenter.post(severity: .danger, title: "Redo Error", detail: error.localizedDescription)
+            coordinator.toastCenter.post(severity: .danger, title: L("Redo Error", "重做出错"), detail: error.localizedDescription)
         }
     }
 
     public func createWorkspaceCheckpoint(label: String? = nil, note: String? = nil) {
-        let resolvedLabel = label ?? "Checkpoint #\(checkpoints.count + 1) · \(activePane.rawValue)"
-        let resolvedNote = note ?? "Manual studio snapshot (\(totalUnresolvedConflicts) conflicts, \(RelayBauhausDesign.formatUSD(totalWorkspaceSpendUSD)) spend)"
+        let paneTitle = activePane.localizedTitle(in: currentLanguage)
+        let resolvedLabel = label ?? L(
+            "Checkpoint #\(checkpoints.count + 1) · \(paneTitle)",
+            "快照 #\(checkpoints.count + 1) · \(paneTitle)"
+        )
+        let resolvedNote = note ?? L(
+            "Manual studio snapshot (\(totalUnresolvedConflicts) conflicts, \(RelayBauhausDesign.formatUSD(totalWorkspaceSpendUSD)) spend)",
+            "手动工作区快照 (\(totalUnresolvedConflicts) 处冲突，\(RelayBauhausDesign.formatUSD(totalWorkspaceSpendUSD)) 累计消耗)"
+        )
         do {
             let cp = try checkpointManager.createCheckpoint(label: resolvedLabel, authorNote: resolvedNote)
             refreshUndoCheckpointAndFTSState()
             coordinator.toastCenter.post(
                 severity: .success,
-                title: "Saved Checkpoint Snapshot",
+                title: L("Saved Checkpoint Snapshot", "已保存检查点快照"),
                 detail: "\(cp.label) · sha256 \(cp.stateSHA256Hex.prefix(10))"
             )
         } catch {
             coordinator.toastCenter.post(
                 severity: .danger,
-                title: "Checkpoint Failed",
+                title: L("Checkpoint Failed", "保存检查点失败"),
                 detail: error.localizedDescription
             )
         }
@@ -1523,13 +1644,16 @@ public final class RelayStudioViewModel: ObservableObject {
             reloadPersistedWorkspaceState()
             coordinator.toastCenter.post(
                 severity: .success,
-                title: "Restored Workspace Checkpoint",
-                detail: "Rehydrated lanes, DAG waves, merge chunks, and guardrail policies."
+                title: L("Restored Workspace Checkpoint", "已恢复检查点快照"),
+                detail: L(
+                    "Rehydrated lanes, DAG waves, merge chunks, and guardrail policies.",
+                    "已完整恢复智能体通道、DAG 波次、合并片段与护栏策略。"
+                )
             )
         } catch {
             coordinator.toastCenter.post(
                 severity: .danger,
-                title: "Checkpoint Restore Failed",
+                title: L("Checkpoint Restore Failed", "恢复检查点失败"),
                 detail: error.localizedDescription
             )
         }
@@ -1570,7 +1694,7 @@ public final class RelayStudioViewModel: ObservableObject {
         try html.write(to: outputURL, atomically: true, encoding: .utf8)
         coordinator.toastCenter.post(
             severity: .success,
-            title: "Exported HTML Audit Dossier",
+            title: L("Exported HTML Audit Dossier", "已导出双语 HTML 审计报告"),
             detail: outputURL.path
         )
         return outputURL
@@ -1582,7 +1706,7 @@ public enum RelayHallmarkDossierNormalizer {
     public static func normalize(_ rawHTML: String) -> String {
         var html = rawHTML
 
-        // 1. Add crisp :focus-visible ring (3:1+) and :active state rules
+        // 1. Add crisp :focus-visible ring (3:1+) and :active state rules if missing
         if !html.contains(":focus-visible") {
             let interactiveCSS = """
                 a:focus-visible, button:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
@@ -1602,16 +1726,17 @@ public enum RelayHallmarkDossierNormalizer {
             of: "margin-bottom: 0.35rem;",
             with: "margin: 0.35rem 0 0;"
         )
-        if let regex = try? NSRegularExpression(
-            pattern: #"<div class="kicker">([^<]*)</div>\s*<h1>([^<]*)</h1>"#,
-            options: []
-        ) {
+        if html.contains(#"<div class="kicker">"#),
+           let regex = try? NSRegularExpression(
+               pattern: #"<div class="kicker">([^<]*)</div>\s*<h1>([^<]*)</h1>"#,
+               options: []
+           ) {
             let fullRange = NSRange(html.startIndex..<html.endIndex, in: html)
             html = regex.stringByReplacingMatches(
                 in: html,
                 options: [],
                 range: fullRange,
-                withTemplate: #"<h1>$2</h1>\n        <p class="kicker">$1</p>"#
+                withTemplate: "<h1>$2</h1>\n        <p class=\"kicker\">$1</p>"
             )
         }
 

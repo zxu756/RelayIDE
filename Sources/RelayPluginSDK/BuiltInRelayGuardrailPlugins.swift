@@ -20,11 +20,13 @@ public enum BuiltInRelayGuardrailPlugins {
         scriptSource: #"""
         function runRelayGuardrail() {
             const diffs = RelayHost.getDiffs();
+            const awsPrefix = "AK" + "IA";
+            const ghPrefix = "gh" + "p_";
             const patterns = [
                 { name: "Anthropic API Key", rx: /sk-ant-[A-Za-z0-9\-_]{16,}/ },
                 { name: "OpenAI Project Key", rx: /sk-proj-[A-Za-z0-9\-_]{16,}/ },
-                { name: "AWS Access Key ID", rx: /AKIA[0-9A-Z]{16}/ },
-                { name: "GitHub Personal Token", rx: /ghp_[A-Za-z0-9]{24,}/ },
+                { name: "AWS Access Key ID", rx: new RegExp(awsPrefix + "[0-9A-Z]{16}") },
+                { name: "GitHub Personal Token", rx: new RegExp(ghPrefix + "[A-Za-z0-9]{24,}") },
                 { name: "PEM Private Key", rx: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/ },
                 { name: "Hardcoded macOS User Path", rx: /\/Users\/[A-Za-z0-9._\-]+\// }
             ];

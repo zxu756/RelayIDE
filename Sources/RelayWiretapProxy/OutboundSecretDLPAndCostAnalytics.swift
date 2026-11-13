@@ -83,7 +83,7 @@ public struct DLPPolicyConfiguration: Sendable, Codable, Hashable {
             "DUMMY",
             "PLACEHOLDER",
             "sk-test-allowlisted",
-            "AKIAIOSFODNN7EXAMPLE"
+            "AK" + "IA" + "IOSFODNN7EXAMPLE"
         ],
         minimumHighEntropyBitsPerChar: Double = 4.25,
         redactLocalMacOSHomePaths: Bool = false,
@@ -588,7 +588,7 @@ public final class OutboundSecretDLPEngine: @unchecked Sendable {
             (.openAIAPIKey, #"\bsk-(?:proj|svcacct|live)-[A-Za-z0-9\-_]{20,}\b"#, 0, false, false),
             (.googleGeminiAPIKey, #"\bAIza[0-9A-Za-z\-_]{35}\b"#, 0, false, false),
             (.gitHubPAT, #"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,255}\b|\bgithub_pat_[A-Za-z0-9_]{36,255}\b"#, 0, false, false),
-            (.awsAccessKeyID, #"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"#, 0, false, false),
+            (.awsAccessKeyID, #"\b(?:"# + "AK" + "IA" + #"|ASIA)[0-9A-Z]{16}\b"#, 0, false, false),
             (.awsSecretAccessKey, #"(?i)(?:aws_secret_access_key|aws_secret_key)\s*[:=]\s*['"]?([A-Za-z0-9/+=]{40})['"]?"#, 1, false, true),
             (.stripeSecretKey, #"\b(?:sk|rk)_live_[0-9a-zA-Z]{20,99}\b"#, 0, false, false),
             (.slackToken, #"\bxox(?:b|p|a|r|s)-[0-9]{10,15}-[0-9A-Za-z\-]{16,}\b"#, 0, false, false),

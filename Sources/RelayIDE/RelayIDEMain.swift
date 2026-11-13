@@ -11,6 +11,7 @@ import SwiftUI
 @MainActor
 struct RelayStudioDesktopApp: App {
     @StateObject private var viewModel: RelayStudioViewModel
+    @ObservedObject private var localizer: RelayLocalizer
 
     init() {
         let args = Array(CommandLine.arguments.dropFirst())
@@ -20,15 +21,24 @@ struct RelayStudioDesktopApp: App {
         } else if let directProj = args.first(where: { $0.hasSuffix(".relayproj") }) {
             initialBundleURL = URL(fileURLWithPath: directProj)
         }
-        let vm = RelayStudioViewModel(projectBundleURL: initialBundleURL, initialPane: .ptyGrid)
+        let sharedLocalizer = RelayLocalizer.shared
+        let vm = RelayStudioViewModel(
+            projectBundleURL: initialBundleURL,
+            initialPane: .ptyGrid,
+            localizer: sharedLocalizer
+        )
         _viewModel = StateObject(wrappedValue: vm)
+        self.localizer = sharedLocalizer
 
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
     var body: some Scene {
-        WindowGroup("RelayIDE — Multi-Agent Orchestration Workbench") {
+        WindowGroup(localizer.L(
+            "RelayIDE · Multi-Agent Orchestration Workbench",
+            "RelayIDE · 多智能体接力编排工作台"
+        )) {
             RelayStudioRootWorkbenchView(viewModel: viewModel)
                 .frame(minWidth: 1240, minHeight: 780)
                 .preferredColorScheme(.light)
@@ -69,8 +79,9 @@ enum RelayIDEBootstrap {
 
         // 1. Deterministic 2x Retina Screenshot Export Mode
         if let exportDir = parseExportScreenshotsDirectory(from: filteredArgs) {
+            let cliLang = RelayLocalizer.parseCLILanguageOverride(arguments: filteredArgs)
             do {
-                let records = try runHeadlessRetinaExport(to: exportDir)
+                let records = try runHeadlessRetinaExport(to: exportDir, language: cliLang)
                 for rec in records {
                     print("Exported \(rec.fileName) (\(rec.pixelWidth)x\(rec.pixelHeight) px) -> \(rec.outputURL.path)")
                 }
@@ -82,11 +93,12 @@ enum RelayIDEBootstrap {
         }
 
         // 2. Headless CLI & JSON-RPC 2.0 MCP Server Subcommands
-        if let firstArg = filteredArgs.first, cliSubcommands.contains(firstArg) {
+        let subcommandArgs = stripLeadingLanguageFlags(from: filteredArgs)
+        if let firstArg = subcommandArgs.first, cliSubcommands.contains(firstArg) {
             let runner = RelayCLIRunner()
             do {
                 let output = try await runner.execute(arguments: filteredArgs)
-                if firstArg == "export-html", let htmlOutURL = parseExportHTMLTargetURL(from: filteredArgs) {
+                if firstArg == "export-html", let htmlOutURL = parseExportHTMLTargetURL(from: subcommandArgs) {
                     try RelayHallmarkDossierNormalizer.normalizeFileIfPresent(at: htmlOutURL)
                 }
                 if !output.isEmpty {
@@ -103,9 +115,28 @@ enum RelayIDEBootstrap {
         launchDesktopWorkbench()
     }
 
+    private static func stripLeadingLanguageFlags(from args: [String]) -> [String] {
+        var cleaned: [String] = []
+        var idx = 0
+        while idx < args.count {
+            let tok = args[idx]
+            if tok == "--lang" {
+                idx += 2
+                continue
+            }
+            if tok.hasPrefix("--lang=") {
+                idx += 1
+                continue
+            }
+            cleaned.append(tok)
+            idx += 1
+        }
+        return cleaned
+    }
+
     private static func parseExportScreenshotsDirectory(from args: [String]) -> URL? {
         if let flagIdx = args.firstIndex(of: "--export-screenshots") {
-            let path = (flagIdx + 1 < args.count) ? args[flagIdx + 1] : "./docs"
+            let path = (flagIdx + 1 < args.count && !args[flagIdx + 1].hasPrefix("-")) ? args[flagIdx + 1] : "./docs"
             return URL(fileURLWithPath: path, isDirectory: true)
         }
         for arg in args where arg.hasPrefix("--export-screenshots=") {
@@ -122,7 +153,7 @@ enum RelayIDEBootstrap {
         var idx = 1
         while idx < args.count {
             let token = args[idx]
-            if token == "--project" || token == "-p" {
+            if token == "--project" || token == "-p" || token == "--lang" {
                 idx += 2
                 continue
             }
@@ -135,10 +166,16 @@ enum RelayIDEBootstrap {
     }
 
     @MainActor
-    private static func runHeadlessRetinaExport(to directoryURL: URL) throws -> [RelayRetinaScreenshotExporter.ExportedScreenshotRecord] {
+    private static func runHeadlessRetinaExport(
+        to directoryURL: URL,
+        language: RelayLanguage?
+    ) throws -> [RelayRetinaScreenshotExporter.ExportedScreenshotRecord] {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
-        return try RelayRetinaScreenshotExporter.exportFlagshipScreenshots(to: directoryURL)
+        return try RelayRetinaScreenshotExporter.exportFlagshipScreenshots(
+            to: directoryURL,
+            language: language
+        )
     }
 
     @MainActor

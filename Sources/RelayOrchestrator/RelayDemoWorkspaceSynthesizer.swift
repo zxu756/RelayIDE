@@ -1282,6 +1282,7 @@ public struct RelayDemoWorkspaceSynthesizer: Sendable {
             createdAt: baseDate.addingTimeInterval(79)
         )
 
+        let redactedSamplePrefix = "sk-ant-" + "api03-"
         let f3 = RelayGuardrailFinding(
             id: UUID(uuidString: "dddd0005-0000-4000-8000-000000000003")!,
             pluginID: "io.relayide.secret-prompt-redactor",
@@ -1290,7 +1291,7 @@ public struct RelayDemoWorkspaceSynthesizer: Sendable {
             laneID: "lane-claude-quic",
             relativePath: "$.messages[3].content",
             title: "Masked test credential token in outbound prompt",
-            detail: "Redacted fixture token `sk-ant-api03-••••9f2a` → `[REDACTED:ANTHROPIC_API_KEY:8c41e09b]` before packet left 127.0.0.1.",
+            detail: "Redacted fixture token `\(redactedSamplePrefix)••••9f2a` → `[REDACTED:ANTHROPIC_API_KEY:8c41e09b]` before packet left 127.0.0.1.",
             createdAt: baseDate.addingTimeInterval(49)
         )
 

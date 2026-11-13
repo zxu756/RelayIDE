@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-title-en="RelayIDE v1.1.0 Workspace Dossier: PaymentsCore-Relay" data-title-zh="RelayIDE v1.1.0 工作区审计报告：PaymentsCore-Relay · 支付清结算并行工程">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="RelayIDE multi-vendor coding agent worktree matrix, declaration AST merge ledger, and wiretap spend dossier.">
-  <title>RelayIDE Workspace Dossier: PaymentsCore-Relay</title>
+  <meta name="description" content="RelayIDE v1.1.0 bilingual multi-vendor coding agent worktree matrix, declaration AST merge ledger, and wiretap spend dossier.">
+  <title>RelayIDE v1.1.0 Workspace Dossier: PaymentsCore-Relay</title>
   <style>
     /* Hallmark · v2.0.0 · scope: app · genre: modern-minimal · posture: restrained · shape: app screen · surface: absolute */
     :root {
@@ -12,12 +12,13 @@
       --surface: #FDFCF9;
       --stone: #EAE6DC;
       --rule: #D6D1C4;
-      --ink: #191816;
+      --ink: #18181B;
       --ink-muted: #57534E;
+      --terracotta: #C2410C;
       --vermilion: #DA3C2A;
       --cobalt: #205DD1;
       --emerald: #188B5D;
-      --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
       --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
     }
     *, *::before, *::after { box-sizing: border-box; }
@@ -58,10 +59,51 @@
       min-width: 0;
     }
     .kicker {
-      font-size: 0.82rem;
+      font-size: 0.84rem;
       font-weight: 600;
       color: var(--ink-muted);
       margin: 0.35rem 0 0;
+    }
+    .masthead-controls {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 0.5rem;
+    }
+    .lang-switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 2px;
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: 6px;
+    }
+    .lang-btn {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--ink-muted);
+      font-family: var(--font-sans);
+      font-size: 0.82rem;
+      font-weight: 600;
+      line-height: 1.2;
+      padding: 0.28rem 0.65rem;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+    }
+    .lang-btn:hover:not(.is-active) {
+      color: var(--ink);
+      background: var(--stone);
+    }
+    .lang-btn.is-active {
+      background: var(--ink);
+      color: var(--paper);
+      border-color: var(--terracotta);
+    }
+    .meta-tag {
+      color: var(--ink-muted);
     }
     .ledger-strip {
       display: grid;
@@ -137,6 +179,7 @@
     }
     @media (max-width: 860px) {
       .ledger-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .masthead-controls { align-items: flex-start; }
     }
     a:focus-visible, button:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
       outline: 2px solid var(--cobalt);
@@ -145,78 +188,95 @@
     a:active, button:active, summary:active, [tabindex]:active {
       transform: translateY(1px);
     }
+    button:disabled, [aria-disabled="true"] {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+      }
+    }
   </style>
 </head>
 <body>
   <main class="sheet">
     <header class="masthead">
       <div>
-        <h1>PaymentsCore-Relay</h1>n        <p class="kicker">RelayIDE Multi-Vendor Parallel Engineering Ledger</p>
+        <h1 data-en="PaymentsCore-Relay" data-zh="PaymentsCore-Relay · 支付清结算并行工程">PaymentsCore-Relay</h1>
+        <p class="kicker" data-en="RelayIDE v1.1.0 Multi-Vendor Parallel Engineering Ledger" data-zh="RelayIDE v1.1.0 多智能体并行工程审计台账">RelayIDE v1.1.0 Multi-Vendor Parallel Engineering Ledger</p>
       </div>
-      <div class="mono">Schema v4 · SQLite WAL 77824 B</div>
+      <div class="masthead-controls">
+        <div class="lang-switch" role="group" aria-label="Language switcher">
+          <button type="button" class="lang-btn" data-lang-choice="zh-Hans" aria-pressed="false">中文</button>
+          <button type="button" class="lang-btn is-active" data-lang-choice="en" aria-pressed="true">EN</button>
+        </div>
+        <div class="mono meta-tag" data-en="Schema v4 · SQLite WAL 77824 B" data-zh="架构 v4 · SQLite WAL 77824 字节">Schema v4 · SQLite WAL 77824 B</div>
+      </div>
     </header>
 
     <section class="ledger-strip" aria-label="Workspace summary metrics">
       <div class="ledger-cell">
-        <div class="ledger-label">Repository Root</div>
+        <div class="ledger-label" data-en="Repository Root" data-zh="仓库根目录">Repository Root</div>
         <div class="ledger-val mono">demo-repo</div>
       </div>
       <div class="ledger-cell">
-        <div class="ledger-label">Isolated Lanes</div>
+        <div class="ledger-label" data-en="Isolated Lanes" data-zh="隔离工作树通道">Isolated Lanes</div>
         <div class="ledger-val">4</div>
       </div>
       <div class="ledger-cell">
-        <div class="ledger-label">AST Auto-Merges</div>
+        <div class="ledger-label" data-en="AST Auto-Merges" data-zh="AST 自动合并数">AST Auto-Merges</div>
         <div class="ledger-val">2</div>
       </div>
       <div class="ledger-cell">
-        <div class="ledger-label">Observed Tokens</div>
+        <div class="ledger-label" data-en="Observed Tokens" data-zh="累计观测令牌">Observed Tokens</div>
         <div class="ledger-val">332300</div>
       </div>
       <div class="ledger-cell">
-        <div class="ledger-label">Wiretap Spend</div>
+        <div class="ledger-label" data-en="Wiretap Spend" data-zh="Wiretap 总消耗">Wiretap Spend</div>
         <div class="ledger-val">$0.4939</div>
       </div>
     </section>
 
     <section>
-      <h2>1. Isolated Git Worktree Matrix &amp; File Ownership Scopes</h2>
+      <h2 data-en="1. Isolated Git Worktree Matrix &amp; File Ownership Scopes" data-zh="1. 隔离 Git 工作树矩阵与文件归属围栏">1. Isolated Git Worktree Matrix &amp; File Ownership Scopes</h2>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Lane ID</th>
-              <th>Assigned Agent</th>
-              <th>Branch</th>
-              <th>Allowed Globs</th>
-              <th>Working Tree Deltas</th>
+              <th data-en="Lane ID" data-zh="通道 ID">Lane ID</th>
+              <th data-en="Assigned Agent" data-zh="指派智能体">Assigned Agent</th>
+              <th data-en="Branch" data-zh="Git 分支">Branch</th>
+              <th data-en="Allowed Globs" data-zh="授权路径围栏">Allowed Globs</th>
+              <th data-en="Working Tree Deltas" data-zh="工作树变更">Working Tree Deltas</th>
             </tr>
           </thead>
           <tbody>
             <tr>
   <td class="mono">lane-agy-docs</td>
-  <td><strong>Antigravity (agy)</strong></td>
+  <td><strong><span data-en="Antigravity (agy)" data-zh="Antigravity (agy)">Antigravity (agy)</span></strong></td>
   <td class="mono">relay/lane-agy-docs</td>
   <td class="mono">Sources/Gateway/**, docs/**</td>
   <td class="mono">M Sources/Gateway/CheckoutRouter.swift<br>M docs/ARCHITECTURE.md</td>
 </tr>
 <tr>
   <td class="mono">lane-claude-core</td>
-  <td><strong>Claude Code</strong></td>
+  <td><strong><span data-en="Claude Code" data-zh="Claude Code">Claude Code</span></strong></td>
   <td class="mono">relay/lane-claude-core</td>
   <td class="mono">Sources/Ledger/**</td>
   <td class="mono">M Sources/Ledger/BillingEngine.swift<br>A Sources/Ledger/InvoiceSettlement.swift</td>
 </tr>
 <tr>
   <td class="mono">lane-codex-tax</td>
-  <td><strong>OpenAI Codex</strong></td>
+  <td><strong><span data-en="OpenAI Codex" data-zh="OpenAI Codex">OpenAI Codex</span></strong></td>
   <td class="mono">relay/lane-codex-tax</td>
   <td class="mono">Sources/Ledger/**, Sources/Tax/**</td>
   <td class="mono">M Sources/Ledger/BillingEngine.swift<br>A Sources/Tax/VATJurisdictionTable.swift</td>
 </tr>
 <tr>
   <td class="mono">lane-vibe-tests</td>
-  <td><strong>Mistral Vibe</strong></td>
+  <td><strong><span data-en="Mistral Vibe" data-zh="Mistral Vibe">Mistral Vibe</span></strong></td>
   <td class="mono">relay/lane-vibe-tests</td>
   <td class="mono">Tests/**</td>
   <td class="mono">A Tests/LedgerTests/BillingPropertyTests.swift</td>
@@ -227,16 +287,16 @@
     </section>
 
     <section>
-      <h2>2. Declaration-Level 3-Way Semantic AST Merge Ledger</h2>
+      <h2 data-en="2. Declaration-Level 3-Way Semantic AST Merge Ledger" data-zh="2. 声明级三路 AST 语义合并台账">2. Declaration-Level 3-Way Semantic AST Merge Ledger</h2>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Relative Path</th>
-              <th>Language</th>
-              <th class="num">Auto-Merged</th>
-              <th class="num">Conflicts</th>
-              <th>Resolution Summary</th>
+              <th data-en="Relative Path" data-zh="相对路径">Relative Path</th>
+              <th data-en="Language" data-zh="语言">Language</th>
+              <th class="num" data-en="Auto-Merged" data-zh="自动合并">Auto-Merged</th>
+              <th class="num" data-en="Conflicts" data-zh="语义冲突">Conflicts</th>
+              <th data-en="Resolution Summary" data-zh="合并结论摘要">Resolution Summary</th>
             </tr>
           </thead>
           <tbody>
@@ -245,14 +305,14 @@
   <td>Swift</td>
   <td class="num">0</td>
   <td class="num">1</td>
-  <td>1 Divergent Symbol(s) · Standard AST Pass</td>
+  <td><span data-en="1 Divergent Symbol(s) · Standard AST Pass" data-zh="1 处符号分叉冲突 · 标准 AST 扫描通过">1 Divergent Symbol(s) · Standard AST Pass</span></td>
 </tr>
 <tr>
   <td class="mono">Sources/Ledger/BillingEngine.swift</td>
   <td>Swift</td>
   <td class="num">2</td>
   <td class="num">0</td>
-  <td>Auto-Merged Cleanly · Rescued Git Line Conflict</td>
+  <td><span data-en="Auto-Merged Cleanly · Rescued Git Line Conflict" data-zh="无冲突自动合并 · 已消解 Git 行级冲突">Auto-Merged Cleanly · Rescued Git Line Conflict</span></td>
 </tr>
           </tbody>
         </table>
@@ -260,24 +320,24 @@
     </section>
 
     <section>
-      <h2>3. Loopback Wiretap Token &amp; USD Circuit-Breaker Telemetry</h2>
+      <h2 data-en="3. Loopback Wiretap Token &amp; USD Circuit-Breaker Telemetry" data-zh="3. 本地回环 Wiretap 令牌与美元预算熔断遥测">3. Loopback Wiretap Token &amp; USD Circuit-Breaker Telemetry</h2>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Lane</th>
-              <th>Vendor</th>
-              <th>Model</th>
-              <th class="num">Input</th>
-              <th class="num">Cached</th>
-              <th class="num">Output</th>
-              <th class="num">Cost (USD)</th>
+              <th data-en="Lane" data-zh="通道">Lane</th>
+              <th data-en="Vendor" data-zh="智能体厂商">Vendor</th>
+              <th data-en="Model" data-zh="模型标识">Model</th>
+              <th class="num" data-en="Input" data-zh="输入令牌">Input</th>
+              <th class="num" data-en="Cached" data-zh="缓存命中">Cached</th>
+              <th class="num" data-en="Output" data-zh="输出令牌">Output</th>
+              <th class="num" data-en="Cost (USD)" data-zh="费用 (USD)">Cost (USD)</th>
             </tr>
           </thead>
           <tbody>
             <tr>
   <td class="mono">lane-claude-core</td>
-  <td>Claude Code</td>
+  <td><span data-en="Claude Code" data-zh="Claude Code">Claude Code</span></td>
   <td class="mono">claude-sonnet-4-20250514</td>
   <td class="num">84200</td>
   <td class="num">61000</td>
@@ -286,7 +346,7 @@
 </tr>
 <tr>
   <td class="mono">lane-codex-tax</td>
-  <td>OpenAI Codex</td>
+  <td><span data-en="OpenAI Codex" data-zh="OpenAI Codex">OpenAI Codex</span></td>
   <td class="mono">gpt-5-codex</td>
   <td class="num">68400</td>
   <td class="num">44000</td>
@@ -295,7 +355,7 @@
 </tr>
 <tr>
   <td class="mono">lane-agy-docs</td>
-  <td>Antigravity (agy)</td>
+  <td><span data-en="Antigravity (agy)" data-zh="Antigravity (agy)">Antigravity (agy)</span></td>
   <td class="mono">gemini-2.5-pro</td>
   <td class="num">96500</td>
   <td class="num">72000</td>
@@ -304,7 +364,7 @@
 </tr>
 <tr>
   <td class="mono">lane-vibe-tests</td>
-  <td>Mistral Vibe</td>
+  <td><span data-en="Mistral Vibe" data-zh="Mistral Vibe">Mistral Vibe</span></td>
   <td class="mono">devstral-medium</td>
   <td class="num">54100</td>
   <td class="num">18500</td>
@@ -317,40 +377,90 @@
     </section>
 
     <section>
-      <h2>4. JavaScriptCore Guardrail Plugin Audit</h2>
+      <h2 data-en="4. JavaScriptCore Guardrail Plugin Audit" data-zh="4. JavaScriptCore 编排护栏插件审计">4. JavaScriptCore Guardrail Plugin Audit</h2>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Severity</th>
-              <th>Plugin</th>
-              <th>Scope</th>
-              <th>Finding</th>
+              <th data-en="Severity" data-zh="级别">Severity</th>
+              <th data-en="Plugin" data-zh="护栏插件">Plugin</th>
+              <th data-en="Scope" data-zh="作用范围">Scope</th>
+              <th data-en="Finding" data-zh="审计详情">Finding</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-  <td class="mono">Pass</td>
-  <td>AST Conventional Commit Synthesizer</td>
-  <td class="mono">workspace</td>
-  <td><strong>Synthesized Conventional Commit:</strong> feat(multi-lane): integrate BillingEngine, vatInvariant</td>
+  <td class="mono"><span data-en="Pass" data-zh="通过">Pass</span></td>
+  <td><span data-en="AST Conventional Commit Synthesizer" data-zh="AST 约定式提交生成器">AST Conventional Commit Synthesizer</span></td>
+  <td class="mono"><span data-en="workspace" data-zh="全局工作区">workspace</span></td>
+  <td><strong data-en="Synthesized Conventional Commit:" data-zh="已生成约定式提交建议：">Synthesized Conventional Commit:</strong> <span data-en="feat(multi-lane): integrate BillingEngine, vatInvariant" data-zh="feat(multi-lane): 集成多通道符号 BillingEngine, vatInvariant">feat(multi-lane): integrate BillingEngine, vatInvariant</span></td>
 </tr>
 <tr>
-  <td class="mono">Warning</td>
-  <td>Test Coverage Gate Enforcer</td>
-  <td class="mono">lane-codex-tax</td>
-  <td><strong>Production AST modified without companion Tests/ update:</strong> Lane 'lane-codex-tax' modified 1 AST symbols under Sources/ without touching Tests/.</td>
+  <td class="mono"><span data-en="Warning" data-zh="警告">Warning</span></td>
+  <td><span data-en="Test Coverage Gate Enforcer" data-zh="测试覆盖率门禁守卫">Test Coverage Gate Enforcer</span></td>
+  <td class="mono"><span data-en="lane-codex-tax" data-zh="lane-codex-tax">lane-codex-tax</span></td>
+  <td><strong data-en="Production AST modified without companion Tests/ update:" data-zh="修改生产环境 AST 符号但未同步补充 Tests/ 测试：">Production AST modified without companion Tests/ update:</strong> <span data-en="Lane 'lane-codex-tax' modified 1 AST symbols under Sources/ without touching Tests/." data-zh="通道 'lane-codex-tax' 修改了 Sources/ 下的 1 个 AST 符号，但未同步更新 Tests/ 测试套件。">Lane 'lane-codex-tax' modified 1 AST symbols under Sources/ without touching Tests/.</span></td>
 </tr>
 <tr>
-  <td class="mono">Warning</td>
-  <td>Test Coverage Gate Enforcer</td>
-  <td class="mono">lane-claude-core</td>
-  <td><strong>Production AST modified without companion Tests/ update:</strong> Lane 'lane-claude-core' modified 1 AST symbols under Sources/ without touching Tests/.</td>
+  <td class="mono"><span data-en="Warning" data-zh="警告">Warning</span></td>
+  <td><span data-en="Test Coverage Gate Enforcer" data-zh="测试覆盖率门禁守卫">Test Coverage Gate Enforcer</span></td>
+  <td class="mono"><span data-en="lane-claude-core" data-zh="lane-claude-core">lane-claude-core</span></td>
+  <td><strong data-en="Production AST modified without companion Tests/ update:" data-zh="修改生产环境 AST 符号但未同步补充 Tests/ 测试：">Production AST modified without companion Tests/ update:</strong> <span data-en="Lane 'lane-claude-core' modified 1 AST symbols under Sources/ without touching Tests/." data-zh="通道 'lane-claude-core' 修改了 Sources/ 下的 1 个 AST 符号，但未同步更新 Tests/ 测试套件。">Lane 'lane-claude-core' modified 1 AST symbols under Sources/ without touching Tests/.</span></td>
 </tr>
           </tbody>
         </table>
       </div>
     </section>
   </main>
+  <script>
+    (function () {
+      var STORAGE_KEY = 'io.github.zxu756.RelayIDE.language';
+      function detectPreferredLanguage() {
+        try {
+          var saved = window.localStorage.getItem(STORAGE_KEY);
+          if (saved === 'zh-Hans' || saved === 'en') {
+            return saved;
+          }
+        } catch (_) {}
+        var nav = (navigator.language || '').toLowerCase();
+        return nav.startsWith('zh') ? 'zh-Hans' : 'en';
+      }
+      function applyLanguage(lang) {
+        var isZh = (lang === 'zh-Hans');
+        var root = document.documentElement;
+        root.lang = isZh ? 'zh-Hans' : 'en';
+        var nextTitle = root.getAttribute(isZh ? 'data-title-zh' : 'data-title-en');
+        if (nextTitle) {
+          document.title = nextTitle;
+        }
+        var nodes = document.querySelectorAll('[data-en][data-zh]');
+        for (var i = 0; i < nodes.length; i++) {
+          var el = nodes[i];
+          var val = el.getAttribute(isZh ? 'data-zh' : 'data-en');
+          if (val !== null) {
+            el.textContent = val;
+          }
+        }
+        var buttons = document.querySelectorAll('.lang-btn[data-lang-choice]');
+        for (var j = 0; j < buttons.length; j++) {
+          var btn = buttons[j];
+          var active = (btn.getAttribute('data-lang-choice') === (isZh ? 'zh-Hans' : 'en'));
+          btn.classList.toggle('is-active', active);
+          btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        }
+      }
+      var buttons = document.querySelectorAll('.lang-btn[data-lang-choice]');
+      for (var k = 0; k < buttons.length; k++) {
+        buttons[k].addEventListener('click', function (ev) {
+          var choice = ev.currentTarget.getAttribute('data-lang-choice') || 'en';
+          try {
+            window.localStorage.setItem(STORAGE_KEY, choice);
+          } catch (_) {}
+          applyLanguage(choice);
+        });
+      }
+      applyLanguage(detectPreferredLanguage());
+    })();
+  </script>
 </body>
 </html>

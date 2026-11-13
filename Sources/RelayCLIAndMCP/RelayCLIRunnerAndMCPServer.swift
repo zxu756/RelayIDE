@@ -13,17 +13,19 @@ public struct RelayCLIRunner: Sendable {
     public init() {}
 
     public func execute(arguments: [String]) async throws -> String {
-        guard let subcommand = arguments.first else {
+        let cliLang = RelayLocalizer.parseCLILanguageOverride(arguments: arguments)
+        let normalizedArgs = Self.stripLanguageArguments(from: arguments)
+        guard let subcommand = normalizedArgs.first else {
             return Self.helpBanner
         }
-        let rest = Array(arguments.dropFirst())
+        let rest = Array(normalizedArgs.dropFirst())
 
         switch subcommand {
         case "help", "--help", "-h":
             return Self.helpBanner
 
         case "version", "--version":
-            return "RelayIDE 1.0.0 (macOS arm64 · 3-Way Semantic AST Merger + Wiretap Proxy + POSIX PTY Grid)"
+            return "RelayIDE 1.1.0 (macOS arm64 · 3-Way Semantic AST Merger + Wiretap Proxy + POSIX PTY Grid)"
 
         case "init":
             let bundlePath = optionValue("--project", in: rest) ?? "PaymentsCore.relayproj"
@@ -80,14 +82,17 @@ public struct RelayCLIRunner: Sendable {
             let bundlePath = optionValue("--project", in: rest) ?? "PaymentsCore.relayproj"
             let db = try RelayProjectDatabase(bundleDirectoryURL: URL(fileURLWithPath: bundlePath))
             let findings = try db.allGuardrailFindings()
-            return findings.map { "[\($0.severity.rawValue)] \($0.pluginName): \($0.title) — \($0.detail)" }.joined(separator: "\n")
+            return findings.map { "[\($0.severity.rawValue)] \($0.pluginName): \($0.title) · \($0.detail)" }.joined(separator: "\n")
 
         case "export-html":
             let bundlePath = optionValue("--project", in: rest) ?? "PaymentsCore.relayproj"
-            let outPath = optionValue("--output", in: rest) ?? (rest.first { !$0.hasPrefix("--") } ?? "relay-report.html")
+            let outPath = optionValue("--output", in: rest) ?? positionalOutPath(in: rest) ?? "relay-report.html"
             let db = try RelayProjectDatabase(bundleDirectoryURL: URL(fileURLWithPath: bundlePath))
             let orch = MultiVendorDAGOrchestrator(database: db)
-            let html = try BauhausRelayHTMLReportExporter().exportHTMLDossier(orchestrator: orch)
+            let html = try BauhausRelayHTMLReportExporter().exportHTMLDossier(
+                orchestrator: orch,
+                initialLanguage: cliLang ?? .en
+            )
             try html.write(toFile: outPath, atomically: true, encoding: .utf8)
             return "Exported standalone HTML dossier to \(outPath)"
 
@@ -106,18 +111,54 @@ public struct RelayCLIRunner: Sendable {
         return args[idx + 1]
     }
 
+    private func positionalOutPath(in args: [String]) -> String? {
+        var idx = 0
+        while idx < args.count {
+            let tok = args[idx]
+            if tok == "--project" || tok == "-p" || tok == "--output" {
+                idx += 2
+                continue
+            }
+            if !tok.hasPrefix("-") {
+                return tok
+            }
+            idx += 1
+        }
+        return nil
+    }
+
+    private static func stripLanguageArguments(from args: [String]) -> [String] {
+        var out: [String] = []
+        var idx = 0
+        while idx < args.count {
+            let tok = args[idx]
+            if tok == "--lang" {
+                idx += 2
+                continue
+            }
+            if tok.hasPrefix("--lang=") {
+                idx += 1
+                continue
+            }
+            out.append(tok)
+            idx += 1
+        }
+        return out
+    }
+
     public static let helpBanner = """
-    RelayIDE — Multi-Vendor Coding Agent Parallel Workbench
+    RelayIDE 1.1.0 · Multi-Vendor Coding Agent Parallel Workbench (中文 / EN)
     Commands:
-      init [--project <path.relayproj>] [--seed-demo]   Initialize .relayproj SQLite WAL workspace
-      status [--project <path.relayproj>]               Print JSON workspace statistics
-      lanes [--project <path.relayproj>]                List isolated Git worktree lanes & ownership globs
-      dag-waves [--project <path.relayproj>]            Compute topological execution waves for active DAG
-      semantic-merge <base> <left> <right>              Run declaration-level 3-Way Semantic AST Merge
-      audit-plugins [--project <path.relayproj>]        List JavaScriptCore guardrail findings
-      export-html <out.html> [--project <path>]         Export standalone Bauhaus HTML dossier
-      mcp                                               Start JSON-RPC 2.0 MCP server on stdio
-      --export-screenshots <output-dir>                 Render 2x Retina workbench screenshots
+      init [--project <path.relayproj>] [--seed-demo]       Initialize .relayproj SQLite WAL workspace
+      status [--project <path.relayproj>]                   Print JSON workspace statistics
+      lanes [--project <path.relayproj>]                    List isolated Git worktree lanes & ownership globs
+      dag-waves [--project <path.relayproj>]                Compute topological execution waves for active DAG
+      semantic-merge <base> <left> <right>                  Run declaration-level 3-Way Semantic AST Merge
+      audit-plugins [--project <path.relayproj>]            List JavaScriptCore guardrail findings
+      export-html <out.html> [--project <path>]             Export bilingual standalone Bauhaus HTML dossier
+      mcp                                                   Start JSON-RPC 2.0 MCP server on stdio
+      --export-screenshots <output-dir> [--lang zh|en]      Render 2x Retina workbench screenshots (2720x1680)
+      --lang <zh|en>                                        Override display language (or set RELAYIDE_LANG=zh|en)
     """
 }
 
@@ -140,7 +181,7 @@ public struct RelayMCPServer: Sendable {
             resultPayload = [
                 "protocolVersion": "2024-11-05",
                 "capabilities": ["tools": [String: Any]()],
-                "serverInfo": ["name": "relayide-mcp", "version": "1.0.0"]
+                "serverInfo": ["name": "relayide-mcp", "version": "1.1.0"]
             ]
         case "tools/list":
             resultPayload = [

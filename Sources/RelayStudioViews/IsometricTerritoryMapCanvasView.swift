@@ -40,7 +40,10 @@ public struct IsometricTerritoryMapCanvasView: View {
         return HStack(spacing: 8) {
             // All + Per-Vendor Filter Buttons
             HStack(spacing: 4) {
-                vendorFilterButton(vendor: nil, label: "All (\(viewModel.isometricTiles.count))")
+                vendorFilterButton(
+                    vendor: nil,
+                    label: viewModel.L("All (\(viewModel.isometricTiles.count))", "全部 (\(viewModel.isometricTiles.count))")
+                )
                 ForEach([AgentVendor.claudeCode, .codex, .antigravity, .mistralVibe], id: \.self) { vendor in
                     let count = viewModel.isometricTiles.filter { $0.activeOwnerVendor == vendor }.count
                     vendorFilterButton(
@@ -53,7 +56,7 @@ public struct IsometricTerritoryMapCanvasView: View {
             Spacer(minLength: 6)
 
             Toggle(isOn: $viewModel.showCrossLaneCouplingOnly) {
-                Text("Cross-Lane Arcs Only (\(crossLaneArcCount))")
+                Text(viewModel.L("Cross-Lane Arcs Only (\(crossLaneArcCount))", "仅显示跨通道耦合弧 (\(crossLaneArcCount))"))
                     .font(.system(size: 11, weight: .semibold))
                     .monospacedDigit()
                     .foregroundStyle(RelayBauhausDesign.espressoInk)
@@ -62,7 +65,7 @@ public struct IsometricTerritoryMapCanvasView: View {
             .toggleStyle(.checkbox)
 
             RelayBauhausPill(
-                "\(viewModel.boundaryCollisions.count) Fence Alert",
+                viewModel.L("\(viewModel.boundaryCollisions.count) Fence Alert", "\(viewModel.boundaryCollisions.count) 处围栏越界告警"),
                 foreground: viewModel.boundaryCollisions.isEmpty ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.claudeVermilion,
                 background: viewModel.boundaryCollisions.isEmpty ? RelayBauhausDesign.greenWash : RelayBauhausDesign.vermilionWash,
                 border: (viewModel.boundaryCollisions.isEmpty ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.claudeVermilion).opacity(0.5),
@@ -72,7 +75,7 @@ public struct IsometricTerritoryMapCanvasView: View {
 
             if conflictTowers > 0 {
                 RelayBauhausPill(
-                    "\(conflictTowers) Conflict Beacon",
+                    viewModel.L("\(conflictTowers) Conflict Beacon", "\(conflictTowers) 处冲突信标"),
                     foreground: RelayBauhausDesign.claudeVermilion,
                     background: RelayBauhausDesign.vermilionWash,
                     border: RelayBauhausDesign.claudeVermilion.opacity(0.5),
@@ -178,10 +181,11 @@ public struct IsometricTerritoryMapCanvasView: View {
     }
 
     private var isometricLegendOverlay: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("2.5D ISOMETRIC TERRITORY PROJECTION")
+        let isZh = viewModel.currentLanguage.isChinese
+        return VStack(alignment: .leading, spacing: 5) {
+            Text(viewModel.L("2.5D ISOMETRIC TERRITORY PROJECTION", "2.5D 等轴测智能体领地投影"))
                 .font(.system(size: 9.5, weight: .bold))
-                .tracking(0.75)
+                .tracking(isZh ? 0 : 0.75)
                 .foregroundStyle(RelayBauhausDesign.espressoInk)
                 .fixedSize(horizontal: true, vertical: false)
 
@@ -197,7 +201,7 @@ public struct IsometricTerritoryMapCanvasView: View {
                     Rectangle()
                         .fill(RelayBauhausDesign.claudeVermilion)
                         .frame(width: 14, height: 2.2)
-                    Text("Cross-Lane Dependency Arc")
+                    Text(viewModel.L("Cross-Lane Dependency Arc", "跨通道依赖弧"))
                         .font(.system(size: 9.5, weight: .medium))
                         .foregroundStyle(RelayBauhausDesign.graphiteInk)
                         .fixedSize(horizontal: true, vertical: false)
@@ -206,7 +210,7 @@ public struct IsometricTerritoryMapCanvasView: View {
                     Rectangle()
                         .fill(RelayBauhausDesign.structuralBorder)
                         .frame(width: 14, height: 1.5)
-                    Text("Intra-Lane Arc")
+                    Text(viewModel.L("Intra-Lane Arc", "通道内依赖弧"))
                         .font(.system(size: 9.5, weight: .medium))
                         .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                         .fixedSize(horizontal: true, vertical: false)
@@ -238,10 +242,13 @@ public struct IsometricTerritoryMapCanvasView: View {
 
     private var isometricBottomCaptionOverlay: some View {
         HStack(spacing: 8) {
-            Text("Prism height = LOC & AST declarations · Click any module tower to inspect Ca/Ce/I/D metrics")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(RelayBauhausDesign.graphiteInk)
-                .fixedSize(horizontal: true, vertical: false)
+            Text(viewModel.L(
+                "Prism height = LOC & AST declarations · Click any module tower to inspect Ca/Ce/I/D metrics",
+                "棱柱高度 = 代码行数与 AST 声明数 · 点击任意模块塔查看 Ca/Ce/I/D 架构指标"
+            ))
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(RelayBauhausDesign.graphiteInk)
+            .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
@@ -685,13 +692,16 @@ public struct IsometricTerritoryMapCanvasView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 6) {
                         if let vendor = tower.activeOwnerVendor {
-                            RelayVendorBadge(vendor: vendor)
+                            RelayVendorBadge(vendor: vendor, language: viewModel.currentLanguage)
                         } else {
-                            RelayBauhausPill("SHARED CORE", monospaced: true)
+                            RelayBauhausPill(viewModel.L("SHARED CORE", "共享核心"), monospaced: true)
                         }
                         Spacer(minLength: 4)
                         RelayBauhausPill(
-                            "\(tower.lineCount) LOC · \(tower.declarationCount) decl",
+                            viewModel.L(
+                                "\(tower.lineCount) LOC · \(tower.declarationCount) decl",
+                                "\(tower.lineCount) 行 · \(tower.declarationCount) 声明"
+                            ),
                             foreground: RelayBauhausDesign.graphiteInk,
                             background: RelayBauhausDesign.sandstoneStrip,
                             border: RelayBauhausDesign.hairlineBorder,
@@ -718,8 +728,11 @@ public struct IsometricTerritoryMapCanvasView: View {
                             HStack(spacing: 5) {
                                 Image(systemName: "bolt.trianglebadge.exclamationmark.fill")
                                     .font(.system(size: 10, weight: .bold))
-                                Text("Active AST Merge Conflict · Open Merge Studio")
-                                    .font(.system(size: 10.5, weight: .bold))
+                                Text(viewModel.L(
+                                    "Active AST Merge Conflict · Open Merge Studio",
+                                    "存在 AST 语义合并冲突 · 打开合并视图"
+                                ))
+                                .font(.system(size: 10.5, weight: .bold))
                             }
                             .foregroundStyle(RelayBauhausDesign.warmIvory)
                             .padding(.horizontal, 8)
@@ -737,7 +750,7 @@ public struct IsometricTerritoryMapCanvasView: View {
                         .overlay(RelayBauhausDesign.hairlineBorder)
 
                     RelaySectionEyebrow(
-                        "Robert C. Martin Metrics",
+                        viewModel.L("Robert C. Martin Metrics", "Robert C. Martin 架构指标"),
                         trailingText: distanceZoneLabel(distanceD: distanceD, instability: instability, abstractness: abstractness)
                     )
 
@@ -746,13 +759,13 @@ public struct IsometricTerritoryMapCanvasView: View {
                         HStack(spacing: 6) {
                             martinMetricCell(
                                 code: "Ca",
-                                title: "Afferent In",
+                                title: viewModel.L("Afferent In", "传入耦合"),
                                 value: "\(ca)",
                                 accent: RelayBauhausDesign.codexCobalt
                             )
                             martinMetricCell(
                                 code: "Ce",
-                                title: "Efferent Out",
+                                title: viewModel.L("Efferent Out", "传出耦合"),
                                 value: "\(ce)",
                                 accent: RelayBauhausDesign.vibeOchre
                             )
@@ -760,13 +773,13 @@ public struct IsometricTerritoryMapCanvasView: View {
                         HStack(spacing: 6) {
                             martinMetricCell(
                                 code: "I",
-                                title: "Instability",
+                                title: viewModel.L("Instability", "不稳定性"),
                                 value: String(format: "%.2f", instability),
                                 accent: RelayBauhausDesign.espressoInk
                             )
                             martinMetricCell(
                                 code: "D",
-                                title: "Main Seq Dist",
+                                title: viewModel.L("Main Seq Dist", "主序列距离"),
                                 value: String(format: "%.2f", distanceD),
                                 accent: distanceD > 0.42 ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.agySignalGreen
                             )
@@ -847,14 +860,18 @@ public struct IsometricTerritoryMapCanvasView: View {
             )
 
             VStack(alignment: .leading, spacing: 2.5) {
-                Text(String(format: "Abstractness A = %.2f", abstractness))
+                Text(viewModel.currentLanguage.isChinese
+                     ? String(format: "抽象度 A = %.2f", abstractness)
+                     : String(format: "Abstractness A = %.2f", abstractness))
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(RelayBauhausDesign.espressoInk)
-                Text("Ideal corridor: A + I = 1.00")
+                Text(viewModel.L("Ideal corridor: A + I = 1.00", "理想走廊：A + I = 1.00"))
                     .font(.system(size: 9.5, design: .monospaced))
                     .foregroundStyle(RelayBauhausDesign.graphiteInk)
-                Text(String(format: "Coupling Heat: %.0f%%", (viewModel.selectedIsometricTower?.couplingHeat ?? 0) * 100))
+                Text(viewModel.currentLanguage.isChinese
+                     ? String(format: "耦合热度：%.0f%%", (viewModel.selectedIsometricTower?.couplingHeat ?? 0) * 100)
+                     : String(format: "Coupling Heat: %.0f%%", (viewModel.selectedIsometricTower?.couplingHeat ?? 0) * 100))
                     .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(RelayBauhausDesign.claudeVermilion)
@@ -875,8 +892,8 @@ public struct IsometricTerritoryMapCanvasView: View {
         ) {
             VStack(alignment: .leading, spacing: 7) {
                 RelaySectionEyebrow(
-                    "Ownership Fence Collisions",
-                    trailingText: "\(viewModel.boundaryCollisions.count) active"
+                    viewModel.L("Ownership Fence Collisions", "领地围栏越界冲突"),
+                    trailingText: viewModel.L("\(viewModel.boundaryCollisions.count) active", "\(viewModel.boundaryCollisions.count) 处活跃")
                 )
 
                 RelayAdaptiveScrollContainer {
@@ -894,14 +911,14 @@ public struct IsometricTerritoryMapCanvasView: View {
                                 }
 
                                 HStack(spacing: 5) {
-                                    RelayVendorBadge(vendor: warning.intrudingVendor, compact: true)
-                                    Text("intruded on")
+                                    RelayVendorBadge(vendor: warning.intrudingVendor, compact: true, language: viewModel.currentLanguage)
+                                    Text(viewModel.L("intruded on", "越界修改"))
                                         .font(.system(size: 9.5, weight: .medium))
                                         .foregroundStyle(RelayBauhausDesign.graphiteInk)
-                                    RelayVendorBadge(vendor: warning.rightfulOwnerVendor, compact: true)
+                                    RelayVendorBadge(vendor: warning.rightfulOwnerVendor, compact: true, language: viewModel.currentLanguage)
                                 }
 
-                                Text(warning.summary)
+                                Text(viewModel.T(warning.summary))
                                     .font(.system(size: 10))
                                     .foregroundStyle(RelayBauhausDesign.graphiteInk)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -909,7 +926,7 @@ public struct IsometricTerritoryMapCanvasView: View {
                                 Button {
                                     viewModel.selectedIsometricModulePath = warning.relativePath
                                 } label: {
-                                    Text("Focus Module on Isometric Grid")
+                                    Text(viewModel.L("Focus Module on Isometric Grid", "在等轴测网格中定位该模块"))
                                         .font(.system(size: 10, weight: .bold))
                                         .foregroundStyle(RelayBauhausDesign.claudeVermilion)
                                         .padding(.horizontal, 8)
@@ -957,10 +974,10 @@ public struct IsometricTerritoryMapCanvasView: View {
 
     private func distanceZoneLabel(distanceD: Double, instability: Double, abstractness: Double) -> String {
         if distanceD <= 0.25 {
-            return "MAIN SEQ"
+            return viewModel.L("MAIN SEQ", "主序列带")
         } else if instability < 0.4 && abstractness < 0.3 {
-            return "RIGID CORE"
+            return viewModel.L("RIGID CORE", "刚性核心")
         }
-        return "DRIFT WATCH"
+        return viewModel.L("DRIFT WATCH", "偏移关注")
     }
 }

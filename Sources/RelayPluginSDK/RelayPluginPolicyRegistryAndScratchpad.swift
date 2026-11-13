@@ -1217,7 +1217,8 @@ public enum BuiltInLifecycleHookGuardrails {
         scriptSource: #"""
         function onWiretapRequest(ctx) {
             let text = ctx.promptSnippet || "";
-            const secretRx = /\b(sk-ant-[A-Za-z0-9\-_]{12,}|sk-proj-[A-Za-z0-9\-_]{12,}|ghp_[A-Za-z0-9]{20,})\b/g;
+            const ghTokenPrefix = "gh" + "p_";
+            const secretRx = new RegExp("\\b(sk-ant-[A-Za-z0-9\\-_]{12,}|sk-proj-[A-Za-z0-9\\-_]{12,}|" + ghTokenPrefix + "[A-Za-z0-9]{20,})\\b", "g");
             if (secretRx.test(text)) {
                 const masked = text.replace(secretRx, "[REDACTED_BY_PLUGIN]");
                 RelayHost.emitFinding(

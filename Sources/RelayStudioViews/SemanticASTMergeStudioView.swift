@@ -26,10 +26,13 @@ public struct SemanticASTMergeStudioView: View {
                 crossFileArityDiagnosticsStrip(report: report)
             } else {
                 RelayBauhausCard(padding: 20) {
-                    Text("No 3-Way Semantic AST merge reports loaded in this workspace.")
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Text(viewModel.L(
+                        "No 3-Way Semantic AST merge reports loaded in this workspace.",
+                        "当前工作区尚未加载三路 AST 语义合并报告。"
+                    ))
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
@@ -73,7 +76,9 @@ public struct SemanticASTMergeStudioView: View {
                                 Text(shortFile)
                                     .font(.system(size: 11.5, weight: .bold, design: .monospaced))
 
-                                Text(hasConflict ? "\(item.unresolvedConflictCount) conflict" : "\(item.autoMergedCount) clean")
+                                Text(hasConflict
+                                     ? viewModel.L("\(item.unresolvedConflictCount) conflict", "\(item.unresolvedConflictCount) 处冲突")
+                                     : viewModel.L("\(item.autoMergedCount) clean", "\(item.autoMergedCount) 项无冲突"))
                                     .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                                     .monospacedDigit()
                                     .padding(.horizontal, 5)
@@ -108,7 +113,10 @@ public struct SemanticASTMergeStudioView: View {
 
                 if let report, report.wouldGitLineMergeConflict && report.isCleanlyMerged {
                     RelayBauhausPill(
-                        "Git Line-Diff Would Conflict · AST Auto-Resolved",
+                        viewModel.L(
+                            "Git Line-Diff Would Conflict · AST Auto-Resolved",
+                            "Git 行级合并原本冲突 · AST 已自动消解"
+                        ),
                         foreground: RelayBauhausDesign.agySignalGreen,
                         background: RelayBauhausDesign.greenWash,
                         border: RelayBauhausDesign.agySignalGreen.opacity(0.45),
@@ -122,7 +130,7 @@ public struct SemanticASTMergeStudioView: View {
                         HStack(spacing: 5) {
                             Image(systemName: "wand.and.rays")
                                 .font(.system(size: 10.5, weight: .bold))
-                            Text("Resolve All via Verified Lane")
+                            Text(viewModel.L("Resolve All via Verified Lane", "通过已验证通道一键裁决"))
                                 .font(.system(size: 11, weight: .bold))
                         }
                         .foregroundStyle(RelayBauhausDesign.warmIvory)
@@ -141,27 +149,31 @@ public struct SemanticASTMergeStudioView: View {
             // Summary KPI Row
             HStack(spacing: 8) {
                 mergeBannerKPICard(
-                    title: "Auto-Merged Declarations",
+                    title: viewModel.L("Auto-Merged Declarations", "自动合并声明"),
                     value: "\(autoCount)",
-                    detail: "Disjoint functions, imports & members",
+                    detail: viewModel.L("Disjoint functions, imports & members", "离散函数、导入集合与类型成员"),
                     accent: RelayBauhausDesign.agySignalGreen,
                     wash: RelayBauhausDesign.greenWash,
                     icon: "checkmark.circle.fill"
                 )
 
                 mergeBannerKPICard(
-                    title: "True Intra-Function Conflicts",
+                    title: viewModel.L("True Intra-Function Conflicts", "函数内真实冲突"),
                     value: "\(conflictCount)",
-                    detail: conflictCount > 0 ? "Same AST symbol body diverged" : "All AST symbols reconciled",
+                    detail: conflictCount > 0
+                        ? viewModel.L("Same AST symbol body diverged", "同一 AST 符号函数体发生分叉")
+                        : viewModel.L("All AST symbols reconciled", "全部 AST 符号已调解一致"),
                     accent: conflictCount > 0 ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.agySignalGreen,
                     wash: conflictCount > 0 ? RelayBauhausDesign.vermilionWash : RelayBauhausDesign.greenWash,
                     icon: conflictCount > 0 ? "bolt.trianglebadge.exclamationmark.fill" : "checkmark.shield.fill"
                 )
 
                 mergeBannerKPICard(
-                    title: "Call-Site Arity Checks",
-                    value: "\(arityCount) flagged",
-                    detail: arityCount > 0 ? "Cross-worktree signature drift audited" : "0 broken call sites across lanes",
+                    title: viewModel.L("Call-Site Arity Checks", "跨文件调用签名检查"),
+                    value: viewModel.L("\(arityCount) flagged", "\(arityCount) 处标记"),
+                    detail: arityCount > 0
+                        ? viewModel.L("Cross-worktree signature drift audited", "已审计跨工作树函数签名漂移")
+                        : viewModel.L("0 broken call sites across lanes", "跨通道 0 处损坏调用点"),
                     accent: arityCount > 0 ? RelayBauhausDesign.vibeOchre : RelayBauhausDesign.codexCobalt,
                     wash: arityCount > 0 ? RelayBauhausDesign.ochreWash : RelayBauhausDesign.cobaltWash,
                     icon: "link.badge.plus"
@@ -236,7 +248,7 @@ public struct SemanticASTMergeStudioView: View {
         return HStack(alignment: .top, spacing: 8) {
             // Left Worktree Column: Claude Code
             worktreeSidePaneColumn(
-                headerTitle: "Left Worktree · Claude Code",
+                headerTitle: viewModel.L("Left Worktree · Claude Code", "左侧工作树 · Claude Code"),
                 laneID: report.leftLaneID,
                 vendor: .claudeCode,
                 chunks: orderedChunks,
@@ -248,7 +260,7 @@ public struct SemanticASTMergeStudioView: View {
 
             // Right Worktree Column: OpenAI Codex
             worktreeSidePaneColumn(
-                headerTitle: "Right Worktree · OpenAI Codex",
+                headerTitle: viewModel.L("Right Worktree · OpenAI Codex", "右侧工作树 · OpenAI Codex"),
                 laneID: report.rightLaneID,
                 vendor: .codex,
                 chunks: orderedChunks,
@@ -347,12 +359,14 @@ public struct SemanticASTMergeStudioView: View {
 
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
-                Text(chunk.kind.rawValue.uppercased())
+                Text(viewModel.currentLanguage.isChinese
+                     ? chunk.kind.localizedLabel(in: .zhHans)
+                     : chunk.kind.rawValue.uppercased())
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                     .fixedSize(horizontal: true, vertical: false)
 
-                Text(chunk.symbolName)
+                Text(viewModel.T(chunk.symbolName))
                     .font(.system(size: 10.5, weight: .bold, design: .monospaced))
                     .foregroundStyle(RelayBauhausDesign.espressoInk)
                     .fixedSize(horizontal: false, vertical: true)
@@ -372,18 +386,21 @@ public struct SemanticASTMergeStudioView: View {
             }
 
             if let source = rawCode, !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                RecessedASTCodeSnippetWell(sourceCode: source, maxLines: 7)
+                RecessedASTCodeSnippetWell(sourceCode: source, maxLines: 7, language: viewModel.currentLanguage)
             } else {
-                Text("// Declaration not present in \(RelayBauhausDesign.vendorStudioName(vendor)) worktree")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(7)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
-                            .fill(RelayBauhausDesign.sandstoneStrip.opacity(0.55))
-                    )
+                Text(viewModel.L(
+                    "// Declaration not present in \(RelayBauhausDesign.vendorStudioName(vendor, language: .en)) worktree",
+                    "// 该声明未出现在 \(RelayBauhausDesign.vendorStudioName(vendor, language: .zhHans)) 工作树"
+                ))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                        .fill(RelayBauhausDesign.sandstoneStrip.opacity(0.55))
+                )
             }
         }
         .padding(7)
@@ -411,29 +428,29 @@ public struct SemanticASTMergeStudioView: View {
         isLeftSide: Bool
     ) -> (label: String, fg: Color, bg: Color) {
         if chunk.resolution.isConflict {
-            return ("DIVERGED", RelayBauhausDesign.claudeVermilion, RelayBauhausDesign.vermilionWash)
+            return (viewModel.L("DIVERGED", "已分叉"), RelayBauhausDesign.claudeVermilion, RelayBauhausDesign.vermilionWash)
         }
         switch chunk.resolution {
         case .leftAddedDeclaration:
             return isLeftSide
-                ? ("ADDED", RelayBauhausDesign.agySignalGreen, RelayBauhausDesign.greenWash)
-                : ("ABSENT", RelayBauhausDesign.mutedStoneInk, RelayBauhausDesign.sandstoneStrip)
+                ? (viewModel.L("ADDED", "新增"), RelayBauhausDesign.agySignalGreen, RelayBauhausDesign.greenWash)
+                : (viewModel.L("ABSENT", "未包含"), RelayBauhausDesign.mutedStoneInk, RelayBauhausDesign.sandstoneStrip)
         case .rightAddedDeclaration:
             return isLeftSide
-                ? ("ABSENT", RelayBauhausDesign.mutedStoneInk, RelayBauhausDesign.sandstoneStrip)
-                : ("ADDED", RelayBauhausDesign.agySignalGreen, RelayBauhausDesign.greenWash)
+                ? (viewModel.L("ABSENT", "未包含"), RelayBauhausDesign.mutedStoneInk, RelayBauhausDesign.sandstoneStrip)
+                : (viewModel.L("ADDED", "新增"), RelayBauhausDesign.agySignalGreen, RelayBauhausDesign.greenWash)
         case .leftModifiedOnly:
             return isLeftSide
-                ? ("MODIFIED", RelayBauhausDesign.claudeVermilion, RelayBauhausDesign.vermilionWash)
-                : ("BASE", RelayBauhausDesign.mutedStoneInk, RelayBauhausDesign.sandstoneStrip)
+                ? (viewModel.L("MODIFIED", "已修改"), RelayBauhausDesign.claudeVermilion, RelayBauhausDesign.vermilionWash)
+                : (viewModel.L("BASE", "基线"), RelayBauhausDesign.mutedStoneInk, RelayBauhausDesign.sandstoneStrip)
         case .rightModifiedOnly:
             return isLeftSide
-                ? ("BASE", RelayBauhausDesign.mutedStoneInk, RelayBauhausDesign.sandstoneStrip)
-                : ("MODIFIED", RelayBauhausDesign.codexCobalt, RelayBauhausDesign.cobaltWash)
+                ? (viewModel.L("BASE", "基线"), RelayBauhausDesign.mutedStoneInk, RelayBauhausDesign.sandstoneStrip)
+                : (viewModel.L("MODIFIED", "已修改"), RelayBauhausDesign.codexCobalt, RelayBauhausDesign.cobaltWash)
         case .autoMergedImportSetUnion:
-            return ("IMPORT UNION", RelayBauhausDesign.agySignalGreen, RelayBauhausDesign.greenWash)
+            return (viewModel.L("IMPORT UNION", "导入并集"), RelayBauhausDesign.agySignalGreen, RelayBauhausDesign.greenWash)
         default:
-            return ("SYNCED", RelayBauhausDesign.agySignalGreen, RelayBauhausDesign.greenWash)
+            return (viewModel.L("SYNCED", "已同步"), RelayBauhausDesign.agySignalGreen, RelayBauhausDesign.greenWash)
         }
     }
 
@@ -451,14 +468,16 @@ public struct SemanticASTMergeStudioView: View {
                     .fill(cleanState ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.claudeVermilion)
                     .frame(width: 4, height: 14)
 
-                Text("Merged Semantic AST Output")
+                Text(viewModel.L("Merged Semantic AST Output", "三路 AST 语义合并输出"))
                     .font(.system(size: 11.5, weight: .bold))
                     .foregroundStyle(RelayBauhausDesign.espressoInk)
                     .fixedSize(horizontal: true, vertical: false)
 
                 Spacer(minLength: 4)
 
-                Text(cleanState ? "READY TO COMMIT" : "\(report.unresolvedConflictCount) CONFLICT")
+                Text(cleanState
+                     ? viewModel.L("READY TO COMMIT", "可安全提交")
+                     : viewModel.L("\(report.unresolvedConflictCount) CONFLICT", "\(report.unresolvedConflictCount) 处冲突"))
                     .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(cleanState ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.claudeVermilion)
@@ -506,8 +525,10 @@ public struct SemanticASTMergeStudioView: View {
         let isConflict = chunk.resolution.isConflict
         let isUnchanged = (chunk.resolution == .unchanged)
         let badgeLabel = isConflict
-            ? "INTRA-FUNCTION CONFLICT"
-            : (isUnchanged ? "UNCHANGED BASE" : "CLEAN AUTO-MERGE")
+            ? viewModel.L("INTRA-FUNCTION CONFLICT", "函数内语义冲突")
+            : (isUnchanged
+                ? viewModel.L("UNCHANGED BASE", "无变更基线")
+                : viewModel.L("CLEAN AUTO-MERGE", "无冲突自动合并"))
         let badgeColor = isConflict
             ? RelayBauhausDesign.claudeVermilion
             : (isUnchanged ? RelayBauhausDesign.graphiteInk : RelayBauhausDesign.agySignalGreen)
@@ -538,18 +559,22 @@ public struct SemanticASTMergeStudioView: View {
 
                 Spacer(minLength: 4)
 
-                Text(chunk.symbolName)
+                Text(viewModel.T(chunk.symbolName))
                     .font(.system(size: 10.5, weight: .bold, design: .monospaced))
                     .foregroundStyle(RelayBauhausDesign.espressoInk)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text(chunk.explanation)
+            Text(viewModel.T(chunk.explanation))
                 .font(.system(size: 10))
                 .foregroundStyle(RelayBauhausDesign.graphiteInk)
                 .fixedSize(horizontal: false, vertical: true)
 
-            RecessedASTCodeSnippetWell(sourceCode: chunk.resolvedSource, maxLines: isConflict ? 7 : 6)
+            RecessedASTCodeSnippetWell(
+                sourceCode: chunk.resolvedSource,
+                maxLines: isConflict ? 7 : 6,
+                language: viewModel.currentLanguage
+            )
 
             if isConflict {
                 conflictStrategyActionRow(chunkID: chunk.id)
@@ -570,28 +595,29 @@ public struct SemanticASTMergeStudioView: View {
     }
 
     private func conflictStrategyActionRow(chunkID: UUID) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("ONE-CLICK AST RESOLUTION STRATEGY")
+        let isZh = viewModel.currentLanguage.isChinese
+        return VStack(alignment: .leading, spacing: 5) {
+            Text(viewModel.L("ONE-CLICK AST RESOLUTION STRATEGY", "一键 AST 语义冲突裁决策略"))
                 .font(.system(size: 9, weight: .bold))
-                .tracking(0.6)
+                .tracking(isZh ? 0 : 0.6)
                 .foregroundStyle(RelayBauhausDesign.claudeVermilion)
                 .fixedSize(horizontal: true, vertical: false)
 
             HStack(spacing: 5) {
                 strategyButton(
-                    label: "Accept Left",
+                    label: viewModel.L("Accept Left", "采纳左侧"),
                     accent: RelayBauhausDesign.claudeVermilion,
                     chunkID: chunkID,
                     strategy: .acceptLeft
                 )
                 strategyButton(
-                    label: "Accept Right",
+                    label: viewModel.L("Accept Right", "采纳右侧"),
                     accent: RelayBauhausDesign.codexCobalt,
                     chunkID: chunkID,
                     strategy: .acceptRight
                 )
                 strategyButton(
-                    label: "Accept Both",
+                    label: viewModel.L("Accept Both", "双侧合并"),
                     accent: RelayBauhausDesign.espressoInk,
                     chunkID: chunkID,
                     strategy: .acceptBothOrdered
@@ -604,9 +630,12 @@ public struct SemanticASTMergeStudioView: View {
                 HStack(spacing: 5) {
                     Image(systemName: "checkmark.seal.fill")
                         .font(.system(size: 10, weight: .bold))
-                    Text("Prefer Verified Lane (18/18 Tests + 0 Fence Violations)")
-                        .font(.system(size: 10, weight: .bold))
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(viewModel.L(
+                        "Prefer Verified Lane (18/18 Tests + 0 Fence Violations)",
+                        "优先采纳验证通过通道 (18/18 测试通过 + 0 越界)"
+                    ))
+                    .font(.system(size: 10, weight: .bold))
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 .foregroundStyle(RelayBauhausDesign.warmIvory)
                 .padding(.horizontal, 8)
@@ -669,7 +698,7 @@ public struct SemanticASTMergeStudioView: View {
         ) {
             HStack(alignment: .center, spacing: 10) {
                 RelayBauhausPill(
-                    "CrossFileBrokenCallSiteDetector",
+                    viewModel.L("CrossFileBrokenCallSiteDetector", "跨文件调用签名检测器"),
                     foreground: collisions.isEmpty ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.vibeOchre,
                     background: RelayBauhausDesign.warmIvory,
                     border: collisions.isEmpty ? RelayBauhausDesign.agySignalGreen.opacity(0.5) : RelayBauhausDesign.vibeOchre.opacity(0.6),
@@ -686,33 +715,42 @@ public struct SemanticASTMergeStudioView: View {
                                 .foregroundStyle(RelayBauhausDesign.espressoInk)
                                 .fixedSize(horizontal: true, vertical: false)
 
-                            Text("Symbol `\(first.symbolName)` altered by `\(first.modifiedByLane)` while `\(first.callerLane)` calls stale arity")
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundStyle(RelayBauhausDesign.espressoInk)
-                                .fixedSize(horizontal: false, vertical: true)
+                            Text(viewModel.L(
+                                "Symbol `\(first.symbolName)` altered by `\(first.modifiedByLane)` while `\(first.callerLane)` calls stale arity",
+                                "符号 `\(first.symbolName)` 被 `\(first.modifiedByLane)` 修改，而 `\(first.callerLane)` 仍调用旧参数签名"
+                            ))
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(RelayBauhausDesign.espressoInk)
+                            .fixedSize(horizontal: false, vertical: true)
                         }
 
-                        Text("Old: \(first.oldSignature)   →   New: \(first.newSignature)")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(RelayBauhausDesign.graphiteInk)
-                            .fixedSize(horizontal: false, vertical: true)
+                        Text(viewModel.L(
+                            "Old: \(first.oldSignature)   →   New: \(first.newSignature)",
+                            "旧签名: \(first.oldSignature)   →   新签名: \(first.newSignature)"
+                        ))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 4)
                     RelayBauhausPill(
-                        "\(collisions.count) Arity Alert",
+                        viewModel.L("\(collisions.count) Arity Alert", "\(collisions.count) 处签名告警"),
                         foreground: RelayBauhausDesign.claudeVermilion,
                         background: RelayBauhausDesign.vermilionWash,
                         border: RelayBauhausDesign.claudeVermilion.opacity(0.5),
                         monospaced: true
                     )
                 } else {
-                    Text("All cross-file call sites match reconciled declaration parameter arities, external labels, and async/throws effects.")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(RelayBauhausDesign.graphiteInk)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(viewModel.L(
+                        "All cross-file call sites match reconciled declaration parameter arities, external labels, and async/throws effects.",
+                        "所有跨文件调用点均匹配合并后的声明参数个数、外部标签与 async/throws 效应。"
+                    ))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                    .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                     RelayBauhausPill(
-                        "0 Arity Drift",
+                        viewModel.L("0 Arity Drift", "0 签名漂移"),
                         foreground: RelayBauhausDesign.agySignalGreen,
                         background: RelayBauhausDesign.greenWash,
                         border: RelayBauhausDesign.agySignalGreen.opacity(0.45),
@@ -729,10 +767,12 @@ public struct SemanticASTMergeStudioView: View {
 public struct RecessedASTCodeSnippetWell: View {
     public let sourceCode: String
     public var maxLines: Int
+    public var language: RelayLanguage
 
-    public init(sourceCode: String, maxLines: Int = 10) {
+    public init(sourceCode: String, maxLines: Int = 10, language: RelayLanguage = .en) {
         self.sourceCode = sourceCode
         self.maxLines = maxLines
+        self.language = language
     }
 
     public var body: some View {
@@ -761,7 +801,9 @@ public struct RecessedASTCodeSnippetWell: View {
             }
 
             if hiddenCount > 0 {
-                Text("  + \(hiddenCount) additional lines in declaration body")
+                Text(language.isChinese
+                     ? "  + 另有 \(hiddenCount) 行声明体代码已折叠"
+                     : "  + \(hiddenCount) additional lines in declaration body")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(Color(relayHex: "#A1A1AA"))

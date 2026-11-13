@@ -35,7 +35,7 @@ public struct WiretapBudgetStudioView: View {
 
         return HStack(spacing: 8) {
             RelayBauhausPill(
-                "Loopback Proxy 127.0.0.1:43118",
+                viewModel.L("Loopback Proxy 127.0.0.1:43118", "本地回环代理 127.0.0.1:43118"),
                 foreground: RelayBauhausDesign.agySignalGreen,
                 background: RelayBauhausDesign.greenWash,
                 border: RelayBauhausDesign.agySignalGreen.opacity(0.5),
@@ -44,7 +44,10 @@ public struct WiretapBudgetStudioView: View {
             )
 
             RelayBauhausPill(
-                "Total Spend \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))",
+                viewModel.L(
+                    "Total Spend \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))",
+                    "总消耗 \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))"
+                ),
                 foreground: RelayBauhausDesign.espressoInk,
                 background: RelayBauhausDesign.warmIvory,
                 border: RelayBauhausDesign.hairlineBorder,
@@ -53,7 +56,10 @@ public struct WiretapBudgetStudioView: View {
             )
 
             RelayBauhausPill(
-                "Cache Saved \(RelayBauhausDesign.formatUSD(analytics.totalCacheSavingsUSD))",
+                viewModel.L(
+                    "Cache Saved \(RelayBauhausDesign.formatUSD(analytics.totalCacheSavingsUSD))",
+                    "缓存节省 \(RelayBauhausDesign.formatUSD(analytics.totalCacheSavingsUSD))"
+                ),
                 foreground: RelayBauhausDesign.codexCobalt,
                 background: RelayBauhausDesign.cobaltWash,
                 border: RelayBauhausDesign.codexCobalt.opacity(0.45),
@@ -62,7 +68,9 @@ public struct WiretapBudgetStudioView: View {
             )
 
             RelayBauhausPill(
-                String(format: "Burn $%.2f/hr", analytics.workspaceBurnRateUSDPerHour),
+                viewModel.currentLanguage.isChinese
+                    ? String(format: "速率 $%.2f/时", analytics.workspaceBurnRateUSDPerHour)
+                    : String(format: "Burn $%.2f/hr", analytics.workspaceBurnRateUSDPerHour),
                 foreground: RelayBauhausDesign.graphiteInk,
                 background: RelayBauhausDesign.warmIvory,
                 border: RelayBauhausDesign.hairlineBorder,
@@ -73,7 +81,7 @@ public struct WiretapBudgetStudioView: View {
 
             if trippedCount > 0 {
                 RelayBauhausPill(
-                    "\(trippedCount) Circuit Tripped (HTTP 429)",
+                    viewModel.L("\(trippedCount) Circuit Tripped (HTTP 429)", "\(trippedCount) 路熔断拦截 (HTTP 429)"),
                     foreground: RelayBauhausDesign.claudeVermilion,
                     background: RelayBauhausDesign.vermilionWash,
                     border: RelayBauhausDesign.claudeVermilion.opacity(0.55),
@@ -88,7 +96,7 @@ public struct WiretapBudgetStudioView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "applescript.fill")
                         .font(.system(size: 10, weight: .bold))
-                    Text("JSCore Guardrails")
+                    Text(viewModel.L("JSCore Guardrails", "JSCore 编排护栏"))
                         .font(.system(size: 11, weight: .bold))
                 }
                 .foregroundStyle(RelayBauhausDesign.espressoInk)
@@ -125,16 +133,28 @@ public struct WiretapBudgetStudioView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     RelaySectionEyebrow(
-                        "HTTP/SSE Wiretap Timeline Flamechart",
-                        trailingText: "\(viewModel.wiretapSpanRecords.count) turns · \(Int(viewModel.flamechartTimeline.horizonDurationMs / 1000))s window"
+                        viewModel.L("HTTP/SSE Wiretap Timeline Flamechart", "HTTP/SSE Wiretap 时序火焰图"),
+                        trailingText: viewModel.L(
+                            "\(viewModel.wiretapSpanRecords.count) turns · \(Int(viewModel.flamechartTimeline.horizonDurationMs / 1000))s window",
+                            "\(viewModel.wiretapSpanRecords.count) 轮请求 · \(Int(viewModel.flamechartTimeline.horizonDurationMs / 1000))s 窗口"
+                        )
                     )
 
                     Spacer(minLength: 8)
 
                     HStack(spacing: 10) {
-                        flameLegendSwatch(color: RelayBauhausDesign.structuralBorder, label: "TTFT Prefill")
-                        flameLegendSwatch(color: RelayBauhausDesign.codexCobalt, label: "SSE Token Stream")
-                        flameLegendSwatch(color: RelayBauhausDesign.claudeVermilion, label: "HTTP 429 Circuit Gate")
+                        flameLegendSwatch(
+                            color: RelayBauhausDesign.structuralBorder,
+                            label: viewModel.L("TTFT Prefill", "TTFT 首字预填充")
+                        )
+                        flameLegendSwatch(
+                            color: RelayBauhausDesign.codexCobalt,
+                            label: viewModel.L("SSE Token Stream", "SSE 令牌流")
+                        )
+                        flameLegendSwatch(
+                            color: RelayBauhausDesign.claudeVermilion,
+                            label: viewModel.L("HTTP 429 Circuit Gate", "HTTP 429 熔断门禁")
+                        )
                     }
                 }
 
@@ -230,7 +250,7 @@ public struct WiretapBudgetStudioView: View {
             dot.addRoundedRect(in: CGRect(x: 8, y: rowCenterY - 4, width: 6, height: 8), cornerSize: CGSize(width: 1.5, height: 1.5))
             context.fill(dot, with: .color(vendorColor))
 
-            let trackTitle = Text("\(RelayBauhausDesign.vendorStudioName(lane.assignedVendor))")
+            let trackTitle = Text(RelayBauhausDesign.vendorStudioName(lane.assignedVendor, language: viewModel.currentLanguage))
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(RelayBauhausDesign.espressoInk)
             context.draw(trackTitle, at: CGPoint(x: 20, y: rowCenterY - 5), anchor: .leading)
@@ -316,9 +336,9 @@ public struct WiretapBudgetStudioView: View {
         ) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 5) {
-                    RelayVendorBadge(vendor: account.vendor, compact: false)
+                    RelayVendorBadge(vendor: account.vendor, compact: false, language: viewModel.currentLanguage)
                     Spacer(minLength: 4)
-                    Text(account.circuitOpen ? "TRIPPED" : "CLOSED")
+                    Text(account.circuitOpen ? viewModel.L("TRIPPED", "已熔断") : viewModel.L("CLOSED", "正常闭合"))
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .foregroundStyle(account.circuitOpen ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.agySignalGreen)
                         .padding(.horizontal, 5)
@@ -335,10 +355,13 @@ public struct WiretapBudgetStudioView: View {
                         .font(.system(size: 14, weight: .bold, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(account.circuitOpen ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.espressoInk)
-                    Text("/ \(RelayBauhausDesign.formatUSD(account.ceilingUSD)) cap")
-                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                        .monospacedDigit()
-                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                    Text(viewModel.L(
+                        "/ \(RelayBauhausDesign.formatUSD(account.ceilingUSD)) cap",
+                        "/ \(RelayBauhausDesign.formatUSD(account.ceilingUSD)) 上限"
+                    ))
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                     Spacer(minLength: 2)
                     Text(String(format: "%.0f%%", (account.spentUSD / max(0.01, account.ceilingUSD)) * 100.0))
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
@@ -359,7 +382,9 @@ public struct WiretapBudgetStudioView: View {
                 .frame(height: 6)
 
                 HStack(spacing: 6) {
-                    Text(String(format: "Cache %.0f%%", cachePct))
+                    Text(viewModel.currentLanguage.isChinese
+                         ? String(format: "缓存 %.0f%%", cachePct)
+                         : String(format: "Cache %.0f%%", cachePct))
                         .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(RelayBauhausDesign.graphiteInk)
@@ -380,7 +405,9 @@ public struct WiretapBudgetStudioView: View {
                     HStack(spacing: 4) {
                         Image(systemName: account.circuitOpen ? "arrow.counterclockwise.circle.fill" : "power.dotted")
                             .font(.system(size: 10, weight: .bold))
-                        Text(account.circuitOpen ? "Reset Circuit (+Cap)" : "Trip Circuit Breaker")
+                        Text(account.circuitOpen
+                             ? viewModel.L("Reset Circuit (+Cap)", "恢复熔断 (+提额)")
+                             : viewModel.L("Trip Circuit Breaker", "触发预算熔断"))
                             .font(.system(size: 10, weight: .bold))
                     }
                     .foregroundStyle(account.circuitOpen ? RelayBauhausDesign.warmIvory : RelayBauhausDesign.espressoInk)
@@ -418,19 +445,22 @@ public struct WiretapBudgetStudioView: View {
         RelayBauhausCard(padding: 9) {
             VStack(alignment: .leading, spacing: 6) {
                 RelaySectionEyebrow(
-                    "Outbound Secret DLP Loopback Audit",
-                    trailingText: "\(viewModel.dlpAuditEvents.count) inspected payloads"
+                    viewModel.L("Outbound Secret DLP Loopback Audit", "外发敏感凭据 DLP 回环审计"),
+                    trailingText: viewModel.L(
+                        "\(viewModel.dlpAuditEvents.count) inspected payloads",
+                        "已检 \(viewModel.dlpAuditEvents.count) 份载荷"
+                    )
                 )
 
                 // Crisp Table Column Header
                 HStack(spacing: 8) {
-                    Text("LANE")
-                        .frame(width: 64, alignment: .leading)
-                    Text("SECRET CATEGORY & MASKED SAMPLE")
+                    Text(viewModel.L("LANE", "通道"))
+                        .frame(width: 68, alignment: .leading)
+                    Text(viewModel.L("SECRET CATEGORY & MASKED SAMPLE", "凭据类别与脱敏样本"))
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("SCAN")
+                    Text(viewModel.L("SCAN", "耗时"))
                         .frame(width: 54, alignment: .trailing)
-                    Text("VERDICT")
+                    Text(viewModel.L("VERDICT", "裁决"))
                         .frame(width: 96, alignment: .trailing)
                 }
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -458,16 +488,18 @@ public struct WiretapBudgetStudioView: View {
         let badge = dlpOutcomeBadge(event.outcome)
 
         return HStack(spacing: 8) {
-            RelayVendorBadge(vendor: event.vendor, compact: true)
-                .frame(width: 64, alignment: .leading)
+            RelayVendorBadge(vendor: event.vendor, compact: true, language: viewModel.currentLanguage)
+                .frame(width: 68, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 1.5) {
-                Text(firstMatch?.category.displayTitle ?? "Outbound Prompt JSON (\(event.providerHost))")
+                Text(firstMatch.map { viewModel.T($0.category.displayTitle) }
+                     ?? viewModel.L("Outbound Prompt JSON (\(event.providerHost))", "外发提示词 JSON (\(event.providerHost))"))
                     .font(.system(size: 10.5, weight: .bold))
                     .foregroundStyle(RelayBauhausDesign.espressoInk)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text(firstMatch.map { "\($0.maskedSample) · sha:\($0.secretFingerprintHex)" } ?? "0 credential patterns matched · forwarded intact")
+                Text(firstMatch.map { "\($0.maskedSample) · sha:\($0.secretFingerprintHex)" }
+                     ?? viewModel.L("0 credential patterns matched · forwarded intact", "0 项凭据命中 · 原样转发"))
                     .font(.system(size: 9.5, design: .monospaced))
                     .foregroundStyle(RelayBauhausDesign.graphiteInk)
                     .fixedSize(horizontal: false, vertical: true)
@@ -508,13 +540,13 @@ public struct WiretapBudgetStudioView: View {
     private func dlpOutcomeBadge(_ outcome: DLPInspectionOutcome) -> (label: String, fg: Color, bg: Color) {
         switch outcome {
         case .blockedBeforeLoopbackExit:
-            return ("BLOCKED", RelayBauhausDesign.claudeVermilion, RelayBauhausDesign.vermilionWash)
+            return (viewModel.L("BLOCKED", "已阻断"), RelayBauhausDesign.claudeVermilion, RelayBauhausDesign.vermilionWash)
         case .sanitizedAndForwarded:
-            return ("REDACTED", RelayBauhausDesign.vibeOchre, RelayBauhausDesign.ochreWash)
+            return (viewModel.L("REDACTED", "已脱敏"), RelayBauhausDesign.vibeOchre, RelayBauhausDesign.ochreWash)
         case .auditedPass:
-            return ("AUDITED", RelayBauhausDesign.codexCobalt, RelayBauhausDesign.cobaltWash)
+            return (viewModel.L("AUDITED", "已审计"), RelayBauhausDesign.codexCobalt, RelayBauhausDesign.cobaltWash)
         case .cleanPass:
-            return ("CLEAN PASS", RelayBauhausDesign.agySignalGreen, RelayBauhausDesign.greenWash)
+            return (viewModel.L("CLEAN PASS", "安全放行"), RelayBauhausDesign.agySignalGreen, RelayBauhausDesign.greenWash)
         }
     }
 
@@ -523,8 +555,8 @@ public struct WiretapBudgetStudioView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     RelaySectionEyebrow(
-                        "JavaScriptCore Guardrail Ledger",
-                        trailingText: "\(viewModel.guardrailFindings.count) events"
+                        viewModel.L("JavaScriptCore Guardrail Ledger", "JavaScriptCore 护栏审计台账"),
+                        trailingText: viewModel.L("\(viewModel.guardrailFindings.count) events", "\(viewModel.guardrailFindings.count) 条事件")
                     )
                 }
 
@@ -536,7 +568,7 @@ public struct WiretapBudgetStudioView: View {
 
                             VStack(alignment: .leading, spacing: 2.5) {
                                 HStack(spacing: 5) {
-                                    Text(finding.severity.rawValue)
+                                    Text(finding.severity.localizedBadge(in: viewModel.currentLanguage))
                                         .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                                         .foregroundStyle(sevColor)
                                         .padding(.horizontal, 5)
@@ -547,13 +579,13 @@ public struct WiretapBudgetStudioView: View {
                                         )
                                         .fixedSize(horizontal: true, vertical: false)
 
-                                    Text(finding.title)
+                                    Text(viewModel.T(finding.title))
                                         .font(.system(size: 10, weight: .bold))
                                         .foregroundStyle(RelayBauhausDesign.espressoInk)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
 
-                                Text("\(finding.pluginID.replacingOccurrences(of: "io.relayide.", with: "")) · \(finding.laneID ?? "workspace")")
+                                Text("\(finding.pluginID.replacingOccurrences(of: "io.relayide.", with: "")) · \(finding.laneID ?? viewModel.L("workspace", "全局工作区"))")
                                     .font(.system(size: 9, design: .monospaced))
                                     .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -614,7 +646,10 @@ public struct GuardrailPluginStudioView: View {
 
         return HStack(spacing: 8) {
             RelayBauhausPill(
-                "Policy Pack: \(viewModel.policyPack.formatVersion)",
+                viewModel.L(
+                    "Policy Pack: \(viewModel.policyPack.formatVersion)",
+                    "策略包：\(viewModel.policyPack.formatVersion)"
+                ),
                 foreground: RelayBauhausDesign.espressoInk,
                 background: RelayBauhausDesign.warmIvory,
                 border: RelayBauhausDesign.hairlineBorder,
@@ -623,7 +658,10 @@ public struct GuardrailPluginStudioView: View {
             )
 
             RelayBauhausPill(
-                "\(enabledCount)/\(viewModel.policyPack.entries.count) Plugins Active",
+                viewModel.L(
+                    "\(enabledCount)/\(viewModel.policyPack.entries.count) Plugins Active",
+                    "\(enabledCount)/\(viewModel.policyPack.entries.count) 个插件已启用"
+                ),
                 foreground: RelayBauhausDesign.agySignalGreen,
                 background: RelayBauhausDesign.greenWash,
                 border: RelayBauhausDesign.agySignalGreen.opacity(0.45),
@@ -631,7 +669,9 @@ public struct GuardrailPluginStudioView: View {
             )
 
             RelayBauhausPill(
-                String(format: "VM Budget %.0f µs", viewModel.policyPack.defaultExecutionBudgetMicros),
+                viewModel.currentLanguage.isChinese
+                    ? String(format: "VM 预算 %.0f µs", viewModel.policyPack.defaultExecutionBudgetMicros)
+                    : String(format: "VM Budget %.0f µs", viewModel.policyPack.defaultExecutionBudgetMicros),
                 foreground: RelayBauhausDesign.codexCobalt,
                 background: RelayBauhausDesign.cobaltWash,
                 border: RelayBauhausDesign.codexCobalt.opacity(0.45),
@@ -643,7 +683,7 @@ public struct GuardrailPluginStudioView: View {
 
             if blockerCount > 0 {
                 RelayBauhausPill(
-                    "\(blockerCount) Active Veto Finding",
+                    viewModel.L("\(blockerCount) Active Veto Finding", "\(blockerCount) 项活跃否决拦截"),
                     foreground: RelayBauhausDesign.claudeVermilion,
                     background: RelayBauhausDesign.vermilionWash,
                     border: RelayBauhausDesign.claudeVermilion.opacity(0.55),
@@ -658,7 +698,7 @@ public struct GuardrailPluginStudioView: View {
                 HStack(spacing: 5) {
                     Image(systemName: "play.fill")
                         .font(.system(size: 10, weight: .bold))
-                    Text("Evaluate Hook")
+                    Text(viewModel.L("Evaluate Hook", "执行钩子演练"))
                         .font(.system(size: 11, weight: .bold))
                 }
                 .foregroundStyle(RelayBauhausDesign.warmIvory)
@@ -690,7 +730,7 @@ public struct GuardrailPluginStudioView: View {
         RelayBauhausCard(padding: 10) {
             VStack(alignment: .leading, spacing: 8) {
                 RelaySectionEyebrow(
-                    "Capability-Gated JSCore Plugins",
+                    viewModel.L("Capability-Gated JSCore Plugins", "能力门禁 JSCore 编排插件"),
                     trailingText: "p50 / p95 µs"
                 )
 
@@ -722,7 +762,7 @@ public struct GuardrailPluginStudioView: View {
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 VStack(alignment: .leading, spacing: 1.5) {
-                    Text(manifest.name)
+                    Text(viewModel.T(manifest.name))
                         .font(.system(size: 11.5, weight: .bold))
                         .foregroundStyle(RelayBauhausDesign.espressoInk)
                         .fixedSize(horizontal: false, vertical: true)
@@ -737,7 +777,7 @@ public struct GuardrailPluginStudioView: View {
                 pluginStatusToggleButton(entry: entry)
             }
 
-            Text(manifest.summary)
+            Text(viewModel.T(manifest.summary))
                 .font(.system(size: 10))
                 .foregroundStyle(RelayBauhausDesign.graphiteInk)
                 .fixedSize(horizontal: false, vertical: true)
@@ -763,7 +803,7 @@ public struct GuardrailPluginStudioView: View {
     private func pluginStatusToggleButton(entry: RelayPolicyPackPluginEntry) -> some View {
         let manifest = entry.manifest
         let isEnabled = manifest.isEnabled
-        let labelText = isEnabled ? "ACTIVE" : "PAUSED"
+        let labelText = isEnabled ? viewModel.L("ACTIVE", "已启用") : viewModel.L("PAUSED", "已暂停")
         let fgColor: Color = isEnabled ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.mutedStoneInk
         let bgColor: Color = isEnabled ? RelayBauhausDesign.greenWash : RelayBauhausDesign.sandstoneStrip
         let strokeColor: Color = isEnabled
@@ -799,7 +839,7 @@ public struct GuardrailPluginStudioView: View {
         let latencyText = String(format: "p50 %.0fµs · p95 %.0fµs", latency.p50Micros, latency.p95Micros)
         return HStack(spacing: 5) {
             ForEach(manifest.capabilities, id: \.self) { cap in
-                Text(cap.rawValue)
+                Text(cap.localizedLabel(in: viewModel.currentLanguage))
                     .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
                     .foregroundStyle(RelayBauhausDesign.graphiteInk)
                     .padding(.horizontal, 5)
@@ -827,7 +867,7 @@ public struct GuardrailPluginStudioView: View {
         RelayBauhausCard(padding: 10) {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
-                    RelaySectionEyebrow("Live JavaScriptCore Hook Scratchpad")
+                    RelaySectionEyebrow(viewModel.L("Live JavaScriptCore Hook Scratchpad", "实时 JavaScriptCore 钩子演练台"))
 
                     Picker("", selection: $viewModel.scratchpadHookKind) {
                         ForEach(RelayLifecycleHookKind.allCases) { kind in
@@ -840,13 +880,13 @@ public struct GuardrailPluginStudioView: View {
                 }
 
                 HStack(spacing: 6) {
-                    Text("EVENT SUBJECT")
+                    Text(viewModel.L("EVENT SUBJECT", "事件输入"))
                         .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                         .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                         .fixedSize(horizontal: true, vertical: false)
 
                     RelayAdaptiveTextField(
-                        "Command or file path to test against hook",
+                        viewModel.L("Command or file path to test against hook", "输入待测试的 Shell 命令或文件路径"),
                         text: $viewModel.scratchpadSubjectInput,
                         font: .system(size: 11, design: .monospaced)
                     )
@@ -864,7 +904,7 @@ public struct GuardrailPluginStudioView: View {
                     Button {
                         viewModel.evaluateScratchpadHook(postToast: true)
                     } label: {
-                        Text("Run in JSCore")
+                        Text(viewModel.L("Run in JSCore", "在 JSCore 中运行"))
                             .font(.system(size: 10.5, weight: .bold))
                             .foregroundStyle(RelayBauhausDesign.warmIvory)
                             .padding(.horizontal, 10)
@@ -894,21 +934,26 @@ public struct GuardrailPluginStudioView: View {
                     let isVeto = (eval.hookDecision == .veto)
                     HStack(spacing: 8) {
                         RelayBauhausPill(
-                            "Verdict: \(eval.hookDecision.rawValue)",
+                            viewModel.L(
+                                "Verdict: \(eval.hookDecision.rawValue)",
+                                "裁决：\(localizedVerdictLabel(eval.hookDecision))"
+                            ),
                             foreground: isVeto ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.agySignalGreen,
                             background: isVeto ? RelayBauhausDesign.vermilionWash : RelayBauhausDesign.greenWash,
                             border: (isVeto ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.agySignalGreen).opacity(0.55),
                             monospaced: true
                         )
 
-                        Text(eval.hookReason)
+                        Text(viewModel.T(eval.hookReason))
                             .font(.system(size: 10.5, weight: .semibold))
                             .foregroundStyle(RelayBauhausDesign.espressoInk)
                             .fixedSize(horizontal: false, vertical: true)
 
                         Spacer(minLength: 4)
 
-                        Text(String(format: "VM %.0f µs (compile %.0f µs)", eval.profile.totalWallMicros, eval.profile.scriptCompileMicros))
+                        Text(viewModel.currentLanguage.isChinese
+                             ? String(format: "VM 耗时 %.0f µs (编译 %.0f µs)", eval.profile.totalWallMicros, eval.profile.scriptCompileMicros)
+                             : String(format: "VM %.0f µs (compile %.0f µs)", eval.profile.totalWallMicros, eval.profile.scriptCompileMicros))
                             .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                             .monospacedDigit()
                             .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
@@ -919,14 +964,24 @@ public struct GuardrailPluginStudioView: View {
         }
     }
 
+    private func localizedVerdictLabel(_ decision: RelayHookVerdictDecision) -> String {
+        switch decision {
+        case .allow: return viewModel.L("ALLOW", "放行")
+        case .advisory: return viewModel.L("ADVISORY", "提示")
+        case .warn: return viewModel.L("WARN", "告警")
+        case .redact: return viewModel.L("REDACT", "脱敏")
+        case .veto: return viewModel.L("VETO", "否决拦截")
+        }
+    }
+
     // MARK: - Right Bottom: Active RelayGuardrailFinding Ledger
 
     private var guardrailFindingsAndTraceLedger: some View {
         RelayBauhausCard(padding: 10) {
             VStack(alignment: .leading, spacing: 6) {
                 RelaySectionEyebrow(
-                    "Active RelayGuardrailFinding Audit Ledger",
-                    trailingText: "\(viewModel.guardrailFindings.count) findings"
+                    viewModel.L("Active RelayGuardrailFinding Audit Ledger", "活跃护栏审计台账"),
+                    trailingText: viewModel.L("\(viewModel.guardrailFindings.count) findings", "\(viewModel.guardrailFindings.count) 条记录")
                 )
 
                 RelayAdaptiveScrollContainer {
@@ -936,7 +991,7 @@ public struct GuardrailPluginStudioView: View {
                             let sevWash = RelayBauhausDesign.severityWash(finding.severity)
 
                             HStack(alignment: .top, spacing: 8) {
-                                Text(finding.severity.rawValue)
+                                Text(finding.severity.localizedBadge(in: viewModel.currentLanguage))
                                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                                     .foregroundStyle(sevColor)
                                     .padding(.horizontal, 6)
@@ -949,18 +1004,18 @@ public struct GuardrailPluginStudioView: View {
 
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 6) {
-                                        Text(finding.title)
+                                        Text(viewModel.T(finding.title))
                                             .font(.system(size: 11, weight: .bold))
                                             .foregroundStyle(RelayBauhausDesign.espressoInk)
                                             .fixedSize(horizontal: false, vertical: true)
                                         Spacer(minLength: 4)
-                                        Text(finding.laneID ?? "workspace")
+                                        Text(finding.laneID ?? viewModel.L("workspace", "全局工作区"))
                                             .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                                             .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                                             .fixedSize(horizontal: true, vertical: false)
                                     }
 
-                                    Text(finding.detail)
+                                    Text(viewModel.T(finding.detail))
                                         .font(.system(size: 10))
                                         .foregroundStyle(RelayBauhausDesign.graphiteInk)
                                         .fixedSize(horizontal: false, vertical: true)
