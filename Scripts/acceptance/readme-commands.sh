@@ -36,11 +36,18 @@ if [[ -n "${RELAY_SWIFT_JOBS:-}" ]]; then
     SWIFT_JOBS_ARGS="-j ${RELAY_SWIFT_JOBS}"
 fi
 
+# Recorded before anything is written. reports/ is left out because --record rewrites it.
+if [[ -z "$(git status --porcelain -- . ':(exclude)reports')" ]]; then
+    TREE_STATE="working tree clean outside reports/"
+else
+    TREE_STATE="working tree has uncommitted changes outside reports/"
+fi
+
 run_readme_verification() {
     echo "================================================================"
     echo "RelayIDE README.md & README.zh-CN.md command replay"
     echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    echo "Commit:    $(git rev-parse --short HEAD) (working tree $([[ -z "$(git status --porcelain)" ]] && echo clean || echo 'has uncommitted changes'))"
+    echo "Commit:    $(git rev-parse --short HEAD) (${TREE_STATE})"
     echo "================================================================"
 
     # shellcheck disable=SC2086

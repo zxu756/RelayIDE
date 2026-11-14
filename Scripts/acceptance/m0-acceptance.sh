@@ -38,11 +38,18 @@ if [[ -n "${RELAY_SWIFT_JOBS:-}" ]]; then
     SWIFT_JOBS_ARGS="-j ${RELAY_SWIFT_JOBS}"
 fi
 
+# Recorded before anything is written. reports/ is left out because --record rewrites it.
+if [[ -z "$(git status --porcelain -- . ':(exclude)reports')" ]]; then
+    TREE_STATE="working tree clean outside reports/"
+else
+    TREE_STATE="working tree has uncommitted changes outside reports/"
+fi
+
 run_suite() {
     echo "================================================================"
     echo "RelayIDE M0 Acceptance Suite"
     echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    echo "Commit:    $(git rev-parse --short HEAD) (branch: $(git rev-parse --abbrev-ref HEAD); working tree $([[ -z "$(git status --porcelain)" ]] && echo clean || echo 'has uncommitted changes'))"
+    echo "Commit:    $(git rev-parse --short HEAD) (branch: $(git rev-parse --abbrev-ref HEAD); ${TREE_STATE})"
     echo "Tools:     $(git --version); $(/usr/bin/python3 --version 2>&1); node $(node --version 2>/dev/null || echo 'not found'); $(/usr/bin/xcrun swiftc --version 2>&1 | head -1)"
     echo "================================================================"
 
