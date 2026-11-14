@@ -4,7 +4,7 @@ import RelayWorkspaceStore
 import SQLite3
 import Testing
 
-@Suite("SQLite WAL v1->v4 Migrations, Integrity, CRUD, FTS5 BM25 Search, Checkpoints & Undo Journal")
+@Suite("SQLite WAL v1->v4 Migrations, Integrity, CRUD, FTS5 BM25 Search, Checkpoints & Undo Journal", .timeLimit(.minutes(1)))
 struct WorkspaceStoreFTSAndUndoTests {
 
     // MARK: - Isolated Temp Bundle Helper

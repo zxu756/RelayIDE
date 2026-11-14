@@ -310,6 +310,7 @@ public struct RelayDemoWorkspaceSynthesizer: Sendable {
         try database.setMeta(key: "workspace_name", value: campaign.campaignTitle)
         try database.setMeta(key: "repository_path", value: campaign.repositoryPath)
         try database.setMeta(key: "global_budget_ceiling_usd", value: String(format: "%.2f", campaign.dagSpec.globalBudgetCeilingUSD))
+        try database.setMeta(key: "is_demo_workspace", value: "1")
 
         for lane in campaign.lanes {
             try database.saveLane(lane)

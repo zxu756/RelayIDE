@@ -6,7 +6,7 @@ import RelayWorkbenchShell
 import RelayWorkspaceStore
 import Testing
 
-@Suite("Headless CLI Subcommands, JSON-RPC 2.0 MCP Server, HTML Dossier & Bauhaus Workbench Shell")
+@Suite("Headless CLI Subcommands, JSON-RPC 2.0 MCP Server, HTML Dossier & Bauhaus Workbench Shell", .timeLimit(.minutes(1)))
 struct CLIMCPAndWorkbenchShellTests {
 
     // MARK: - Isolated Temp Directory & UserDefaults Helpers
@@ -692,5 +692,219 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(html.contains("navigator.language"))
         #expect(html.contains("隔离 Git 工作树矩阵与文件归属围栏"))
         #expect(!html.contains("\u{2014}"))
+    }
+
+    // MARK: - 18. M0 Honesty Contracts: Nonexistent `--project`, `[DEMO]` Markers, Syntax Gate & Exit Codes
+
+    @Test("RelayCLIRunner rejects nonexistent --project without creating directories in both EN and ZH, and status succeeds on empty init")
+    func cliRunnerRejectsNonexistentProjectWithoutCreatingDirectory() async throws {
+        let tempDir = try makeIsolatedTempDirectory(prefix: "relay-cli-missing-proj")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let missingPath = tempDir.appendingPathComponent("DoesNotExist.relayproj").path
+        let cli = RelayCLIRunner()
+
+        for subcmd in ["status", "lanes", "dag-waves", "audit-plugins", "mcp"] {
+            let resEN = await cli.executeCommand(arguments: [subcmd, "--project", missingPath, "--lang", "en"])
+            #expect(resEN.exitCode != 0)
+            #expect(!resEN.stderr.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: missingPath))
+
+            let resZH = await cli.executeCommand(arguments: [subcmd, "--project", missingPath, "--lang", "zh"])
+            #expect(resZH.exitCode != 0)
+            #expect(resZH.stderr.contains("不存在") || resZH.stderr.contains("未找到"))
+            #expect(!FileManager.default.fileExists(atPath: missingPath))
+        }
+
+        // Empty workspace initialized WITHOUT --seed-demo succeeds on status & lanes with 0 lanes and no [DEMO] tag
+        let emptyBundle = tempDir.appendingPathComponent("CleanEmpty.relayproj").path
+        let initEmpty = await cli.executeCommand(arguments: ["init", "--project", emptyBundle, "--lang", "en"])
+        #expect(initEmpty.exitCode == 0)
+        #expect(!initEmpty.stdout.contains("[DEMO]"))
+
+        let statusEmpty = await cli.executeCommand(arguments: ["status", "--project", emptyBundle])
+        #expect(statusEmpty.exitCode == 0)
+        let stats = try JSONDecoder().decode(RelayWorkspaceStats.self, from: Data(statusEmpty.stdout.utf8))
+        #expect(stats.activeLaneCount == 0)
+
+        let lanesEmpty = await cli.executeCommand(arguments: ["lanes", "--project", emptyBundle])
+        #expect(lanesEmpty.exitCode == 0)
+        #expect(lanesEmpty.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    @Test("RelayCLIRunner and BauhausRelayHTMLReportExporter mark --seed-demo outputs with [DEMO] / [演示数据] and experimental help warnings")
+    func cliRunnerDemoMarkersAndBilingualHelpExperimentalWarning() async throws {
+        let tempDir = try makeIsolatedTempDirectory(prefix: "relay-cli-demo-markers")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let cli = RelayCLIRunner()
+        let helpEN = await cli.executeCommand(arguments: ["--help", "--lang", "en"])
+        #expect(helpEN.exitCode == 0)
+        #expect(helpEN.stdout.contains("EXPERIMENTAL: known to corrupt output on Python"))
+
+        let helpZH = await cli.executeCommand(arguments: ["--help", "--lang", "zh"])
+        #expect(helpZH.exitCode == 0)
+        #expect(helpZH.stdout.contains("【实验性】已知会在 Python 代码上损坏输出"))
+
+        let demoENPath = tempDir.appendingPathComponent("DemoEN.relayproj").path
+        let initEN = await cli.executeCommand(arguments: ["init", "--project", demoENPath, "--seed-demo", "--lang", "en"])
+        #expect(initEN.exitCode == 0)
+        #expect(initEN.stdout.contains("[DEMO]"))
+
+        let demoZHPath = tempDir.appendingPathComponent("DemoZH.relayproj").path
+        let initZH = await cli.executeCommand(arguments: ["init", "--project", demoZHPath, "--seed-demo", "--lang", "zh"])
+        #expect(initZH.exitCode == 0)
+        #expect(initZH.stdout.contains("[演示数据]"))
+
+        let htmlURL = tempDir.appendingPathComponent("demo-report.html")
+        let exportRes = await cli.executeCommand(arguments: ["export-html", htmlURL.path, "--project", demoZHPath, "--lang", "zh"])
+        #expect(exportRes.exitCode == 0)
+        let html = try String(contentsOf: htmlURL, encoding: .utf8)
+        #expect(html.contains("[DEMO]"))
+        #expect(html.contains("[演示数据]"))
+    }
+
+    @Test("semantic-merge CLI and MCP exit 1 on conflicts and exit 3 with empty stdout when language syntax check fails")
+    func semanticMergeConflictExit1AndBrokenPythonSyntaxExit3() async throws {
+        let tempDir = try makeIsolatedTempDirectory(prefix: "relay-cli-merge-gates")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // 1. True Swift conflict -> CLI exit 1 + MCP isError: true
+        let cBase = tempDir.appendingPathComponent("Base.swift")
+        let cLeft = tempDir.appendingPathComponent("Left.swift")
+        let cRight = tempDir.appendingPathComponent("Right.swift")
+        let baseSwift = "public func compute() -> Int {\n    return 1\n}\n"
+        let leftSwift = "public func compute() -> Int {\n    return 10\n}\n"
+        let rightSwift = "public func compute() -> Int {\n    return 20\n}\n"
+        try baseSwift.write(to: cBase, atomically: true, encoding: .utf8)
+        try leftSwift.write(to: cLeft, atomically: true, encoding: .utf8)
+        try rightSwift.write(to: cRight, atomically: true, encoding: .utf8)
+
+        let cli = RelayCLIRunner()
+        let conflictRes = await cli.executeCommand(arguments: ["semantic-merge", cBase.path, cLeft.path, cRight.path, "--lang", "en"])
+        #expect(conflictRes.exitCode == 1)
+        #expect(conflictRes.stdout.contains("<<<<<<<"))
+        #expect(!conflictRes.stderr.isEmpty)
+
+        let mcp = RelayMCPServer()
+        let mcpConflictReq: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 201,
+            "method": "tools/call",
+            "params": [
+                "name": "relay_semantic_merge",
+                "arguments": ["path": "Compute.swift", "base": baseSwift, "left": leftSwift, "right": rightSwift]
+            ]
+        ]
+        let mcpConflictReply = mcp.handleJSONRPCLine(String(decoding: try JSONSerialization.data(withJSONObject: mcpConflictReq), as: UTF8.self))!
+        let mcpConflictRes = (try JSONSerialization.jsonObject(with: Data(mcpConflictReply.utf8)) as? [String: Any])?["result"] as? [String: Any]
+        #expect(mcpConflictRes?["isError"] as? Bool == true)
+
+        // 2. Python triple-quote silent corruption case (R10 / case 09) -> CLI exit 3 with ZERO stdout bytes, MCP isError: true
+        let pBase = tempDir.appendingPathComponent("base.py")
+        let pLeft = tempDir.appendingPathComponent("left.py")
+        let pRight = tempDir.appendingPathComponent("right.py")
+        let pyBaseSrc = """
+        class Tpl:
+            TEXT = \"\"\"
+        def fake():
+            pass
+        \"\"\"
+
+            def real(self):
+                return 1
+
+            def second(self):
+                return 2
+        """
+        let pyLeftSrc = """
+        class Tpl:
+            TEXT = \"\"\"
+        def fake():
+            pass
+        \"\"\"
+
+            def real(self):
+                return 10
+
+            def second(self):
+                return 2
+        """
+        let pyRightSrc = """
+        class Tpl:
+            TEXT = \"\"\"
+        def fake():
+            pass
+        \"\"\"
+
+            def real(self):
+                return 1
+
+            def second(self):
+                return 20
+        """
+        try pyBaseSrc.write(to: pBase, atomically: true, encoding: .utf8)
+        try pyLeftSrc.write(to: pLeft, atomically: true, encoding: .utf8)
+        try pyRightSrc.write(to: pRight, atomically: true, encoding: .utf8)
+
+        let pyResEN = await cli.executeCommand(arguments: ["semantic-merge", pBase.path, pLeft.path, pRight.path, "--lang", "en"])
+        #expect(pyResEN.exitCode == 3)
+        #expect(pyResEN.stdout.isEmpty)
+        #expect(pyResEN.stderr.lowercased().contains("syntax"))
+
+        let pyResZH = await cli.executeCommand(arguments: ["semantic-merge", pBase.path, pLeft.path, pRight.path, "--lang", "zh"])
+        #expect(pyResZH.exitCode == 3)
+        #expect(pyResZH.stdout.isEmpty)
+        #expect(pyResZH.stderr.contains("语法"))
+
+        let mcpPyReq: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 202,
+            "method": "tools/call",
+            "params": [
+                "name": "relay_semantic_merge",
+                "arguments": ["path": "svc.py", "base": pyBaseSrc, "left": pyLeftSrc, "right": pyRightSrc]
+            ]
+        ]
+        let mcpPyReply = mcp.handleJSONRPCLine(String(decoding: try JSONSerialization.data(withJSONObject: mcpPyReq), as: UTF8.self))!
+        let mcpPyRes = (try JSONSerialization.jsonObject(with: Data(mcpPyReply.utf8)) as? [String: Any])?["result"] as? [String: Any]
+        #expect(mcpPyRes?["isError"] as? Bool == true)
+    }
+
+    @Test("RelayMCPServer binds --project ownership rules and RelayUserPreferences disables auto-semantic-merge before M3")
+    @MainActor
+    func mcpProjectBindingAndDefaultSemanticMergeDisabled() async throws {
+        let tempDir = try makeIsolatedTempDirectory(prefix: "relay-mcp-proj")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let bundleURL = tempDir.appendingPathComponent("Bound.relayproj")
+        let db = try RelayProjectDatabase(bundleDirectoryURL: bundleURL)
+        try db.saveLane(
+            ManagedWorktreeLane(
+                id: "lane-auth",
+                displayName: "Auth Lane",
+                assignedVendor: .claudeCode,
+                worktreePath: tempDir.path,
+                branchName: "relay/auth",
+                baseCommitOID: "0000",
+                headCommitOID: "0000",
+                ownershipRule: FileOwnershipRule(allowedGlobs: ["Sources/Auth/**"], forbiddenGlobs: ["Secrets/**"])
+            )
+        )
+
+        let mcp = RelayMCPServer(projectBundleURL: bundleURL)
+        let checkAllowed = #"{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"relay_check_ownership","arguments":{"laneID":"lane-auth","relativePath":"Sources/Auth/Login.swift"}}}"#
+        let replyAllowed = mcp.handleJSONRPCLine(checkAllowed)!
+        let resAllowed = (try JSONSerialization.jsonObject(with: Data(replyAllowed.utf8)) as? [String: Any])?["result"] as? [String: Any]
+        #expect(resAllowed?["isError"] as? Bool == false)
+
+        let checkDenied = #"{"jsonrpc":"2.0","id":302,"method":"tools/call","params":{"name":"relay_check_ownership","arguments":{"laneID":"lane-auth","relativePath":"Sources/Billing/Tax.swift"}}}"#
+        let replyDenied = mcp.handleJSONRPCLine(checkDenied)!
+        let resDenied = (try JSONSerialization.jsonObject(with: Data(replyDenied.utf8)) as? [String: Any])?["result"] as? [String: Any]
+        #expect(resDenied?["isError"] as? Bool == true)
+
+        let defaultSnapshot = RelayUserPreferencesSnapshot()
+        #expect(defaultSnapshot.autoRunSemanticMergeOnHandoff == false)
+        #expect(defaultSnapshot.outboundDLPRedactByDefault == false)
     }
 }

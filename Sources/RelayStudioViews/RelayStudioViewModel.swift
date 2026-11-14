@@ -552,6 +552,7 @@ public final class RelayStudioViewModel: ObservableObject {
     public let scrollbackSearchEngine: TerminalScrollbackSearchEngine
 
     // Published Campaign & Navigation State
+    @Published public private(set) var isDemoMode: Bool = false
     @Published public var campaignTitle: String
     @Published public var repositoryPath: String
     @Published public var baseCommitOID: String
@@ -567,7 +568,7 @@ public final class RelayStudioViewModel: ObservableObject {
     @Published public var terminalLayoutPreset: RelayTerminalGridPreset = .quad2x2
     @Published public var lanes: [ManagedWorktreeLane] = []
     @Published public var gitCommits: [GitCommitNode] = []
-    @Published public var selectedLaneID: String = "lane-claude-quic" {
+    @Published public var selectedLaneID: String = "" {
         didSet {
             if coordinator.shellState.selectedLaneID != selectedLaneID {
                 coordinator.shellState.selectedLaneID = selectedLaneID
@@ -578,21 +579,21 @@ public final class RelayStudioViewModel: ObservableObject {
     @Published public var terminalSearchQuery: String = ""
     @Published public var terminalSearchMatchesByLane: [String: [TerminalScrollbackMatch]] = [:]
     @Published public var activeTerminalSearchMatchIndex: Int = 0
-    @Published public var isBroadcastBarExpanded: Bool = true
+    @Published public var isBroadcastBarExpanded: Bool = false
     @Published public var broadcastTargetLaneIDs: Set<String> = []
-    @Published public var broadcastDraftCommand: String = "swift test --parallel --filter HTTP3TransportAndAuth"
-    @Published public var broadcastSentCount: Int = 2
+    @Published public var broadcastDraftCommand: String = ""
+    @Published public var broadcastSentCount: Int = 0
 
     // Topological DAG & Critical Path State
     @Published public var dagSpec: RelayDAGSpec
     @Published public var cpmSchedule: CPMAnalysisReport
-    @Published public var selectedDAGTaskID: String = "h3-auth-subkeys"
+    @Published public var selectedDAGTaskID: String = ""
     @Published public var highlightCriticalPathOnly: Bool = false
 
     // 3-Way Semantic AST Merge Studio State
     @Published public var mergeReports: [ThreeWaySemanticMergeReport] = []
     @Published public var mergeScenarios: [SynthesizedMergeRevisionTriplet] = []
-    @Published public var selectedMergeFilePath: String = "Sources/Auth/AuthSessionManager.swift" {
+    @Published public var selectedMergeFilePath: String = "" {
         didSet {
             if coordinator.shellState.selectedMergeFilePath != selectedMergeFilePath {
                 coordinator.shellState.selectedMergeFilePath = selectedMergeFilePath
@@ -607,7 +608,7 @@ public final class RelayStudioViewModel: ObservableObject {
     @Published public var isometricTiles: [RelayModels.IsometricModuleTower] = []
     @Published public var isometricCouplingArcs: [IsometricCouplingArc] = []
     @Published public var boundaryCollisions: [TerritoryBoundaryCollisionWarning] = []
-    @Published public var selectedIsometricModulePath: String = "Sources/Auth/AuthSessionManager.swift"
+    @Published public var selectedIsometricModulePath: String = ""
     @Published public var showCrossLaneCouplingOnly: Bool = false
     @Published public var territoryVendorFilter: AgentVendor?
 
@@ -619,7 +620,7 @@ public final class RelayStudioViewModel: ObservableObject {
     @Published public var costAnalytics: WorkspaceCostAnalyticsSnapshot
     @Published public var dlpAuditEvents: [DLPAuditEvent] = []
     @Published public var selectedWiretapSpanID: UUID?
-    @Published public var globalBudgetCeilingUSD: Double = 18.0
+    @Published public var globalBudgetCeilingUSD: Double = 0.0
 
     // JavaScriptCore Guardrail Plugins & Scratchpad State
     @Published public var policyPack: RelayGuardrailsPolicyPack
@@ -628,7 +629,7 @@ public final class RelayStudioViewModel: ObservableObject {
     @Published public var hookTraceEntries: [RelayHookTraceEntry] = []
     @Published public var selectedPluginID: String = "io.relayide.destructive-shell-blocker"
     @Published public var scratchpadHookKind: RelayLifecycleHookKind = .onCommandSpawn
-    @Published public var scratchpadSubjectInput: String = "git reset --hard HEAD~1 && rm -rf Sources/Auth"
+    @Published public var scratchpadSubjectInput: String = "git status"
     @Published public var scratchpadScriptSource: String
     @Published public var lastScratchpadResult: RelayScratchpadEvaluationResult?
 
@@ -638,7 +639,7 @@ public final class RelayStudioViewModel: ObservableObject {
     @Published public var checkpoints: [RelayWorkspaceCheckpointSummary] = []
     @Published public var isBottomDrawerPresented: Bool = false
     @Published public var activeBottomDrawerMode: RelayBottomDrawerMode = .ftsSearch
-    @Published public var ftsQueryText: String = "ZeroCopy passkey HKDF"
+    @Published public var ftsQueryText: String = ""
     @Published public var ftsSearchResults: [FTSSearchHit] = []
     @Published public var ftsCorpusFacets: [FTSCorpusFacetCount] = []
     @Published public var isCommandPalettePresented: Bool = false
@@ -648,68 +649,106 @@ public final class RelayStudioViewModel: ObservableObject {
 
     private var cancellables: Set<AnyCancellable> = []
 
+    private static func makeEmptyDAGSpec() -> RelayDAGSpec {
+        RelayDAGSpec(name: "", repositoryPath: "", tasks: [], globalBudgetCeilingUSD: 0.0)
+    }
+
+    private static func makeEmptyCPMSchedule() -> CPMAnalysisReport {
+        (try? CriticalPathMethodAnalyzer().analyze(tasks: []))
+            ?? CPMAnalysisReport(
+                nodeSchedules: [],
+                criticalPathTaskIDs: [],
+                speedup: ParallelSpeedupMetrics(
+                    serialDurationSeconds: 0,
+                    parallelMakespanSeconds: 0,
+                    theoreticalSpeedupFactor: 1.0,
+                    observedLiveSpeedupFactor: 1.0,
+                    activeVendorLaneCount: 0,
+                    parallelEfficiencyRatio: 1.0,
+                    peakWaveConcurrency: 0,
+                    bottleneckTaskID: nil
+                ),
+                schedulesByLaneID: [:]
+            )
+    }
+
+    private static func makeEmptyCostAnalytics() -> WorkspaceCostAnalyticsSnapshot {
+        WorkspaceCostAnalyticsSnapshot(
+            totalSpentUSD: 0,
+            globalCeilingUSD: 0,
+            totalCacheSavingsUSD: 0,
+            workspaceBurnRateUSDPerHour: 0,
+            projectedGlobalExhaustionSeconds: nil,
+            laneForecasts: [],
+            vendorBreakdowns: [],
+            anomalies: []
+        )
+    }
+
+    private static let defaultScratchpadTemplate = """
+    // Capability-Gated JavaScriptCore Lifecycle Hook (onCommandSpawn)
+    function onCommandSpawn(event) {
+        const cmd = (event.commandLine || "").trim();
+        RelayHost.log("info", "Inspecting PTY command on " + event.laneID + ": " + cmd);
+        if (/git\\s+reset\\s+--hard|rm\\s+-rf\\s+Sources/i.test(cmd)) {
+            RelayHost.emitFinding(
+                "BLOCKER",
+                event.laneID,
+                event.workingDirectory || "Sources",
+                "Blocked destructive shell command",
+                "Vetoed `" + cmd + "` before PTY execve() inside isolated worktree."
+            );
+            return { decision: "VETO", reason: "Destructive history/tree wipe prohibited" };
+        }
+        return { decision: "ALLOW", reason: "Verified safe worktree command" };
+    }
+    """
+
     // MARK: - Initialization
 
     public init(
         projectBundleURL: URL? = nil,
         initialPane: RelayStudioPane = .ptyGrid,
-        localizer: RelayLocalizer? = nil
+        localizer: RelayLocalizer? = nil,
+        loadDemoWorkspace: Bool = false
     ) {
         let resolvedLocalizer = localizer ?? RelayLocalizer.shared
         let resolvedBundleURL: URL
         let isTempBundle: Bool
-        if let explicitURL = projectBundleURL {
-            resolvedBundleURL = explicitURL
-            isTempBundle = false
+        var missingExplicitBundlePath: String?
+        let openedDatabase: RelayProjectDatabase
+
+        if let explicitURL = projectBundleURL, RelayProjectDatabase.bundleExists(at: explicitURL) {
+            do {
+                openedDatabase = try RelayProjectDatabase.openExisting(bundleDirectoryURL: explicitURL)
+                resolvedBundleURL = explicitURL
+                isTempBundle = false
+            } catch {
+                let fallbackRoot = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("relay-studio-session-\(UUID().uuidString)", isDirectory: true)
+                let fallbackURL = fallbackRoot.appendingPathComponent("EmptySession.relayproj", isDirectory: true)
+                openedDatabase = try! RelayProjectDatabase(bundleDirectoryURL: fallbackURL)
+                resolvedBundleURL = fallbackURL
+                isTempBundle = true
+                missingExplicitBundlePath = explicitURL.path
+            }
         } else {
+            if let explicitURL = projectBundleURL {
+                missingExplicitBundlePath = explicitURL.path
+            }
             let tempRoot = FileManager.default.temporaryDirectory
                 .appendingPathComponent("relay-studio-session-\(UUID().uuidString)", isDirectory: true)
-            resolvedBundleURL = tempRoot.appendingPathComponent("ZeroCopyHTTP3.relayproj", isDirectory: true)
+            resolvedBundleURL = tempRoot.appendingPathComponent("EmptySession.relayproj", isDirectory: true)
             isTempBundle = true
-        }
-
-        let openedDatabase: RelayProjectDatabase
-        do {
-            openedDatabase = try RelayProjectDatabase(bundleDirectoryURL: resolvedBundleURL)
-        } catch {
-            let fallbackURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("relay-fallback-\(UUID().uuidString).relayproj", isDirectory: true)
-            openedDatabase = try! RelayProjectDatabase(bundleDirectoryURL: fallbackURL)
+            openedDatabase = try! RelayProjectDatabase(bundleDirectoryURL: resolvedBundleURL)
         }
 
         let orch = MultiVendorDAGOrchestrator(database: openedDatabase)
-        orch.wiretapProxy.ledger.setGlobalCeilingUSD(18.0)
-        let synth = RelayDemoWorkspaceSynthesizer()
-        let campaign: SynthesizedFlagshipCampaign
-        do {
-            let existingLanes = (try? openedDatabase.allLanes()) ?? []
-            if existingLanes.isEmpty {
-                campaign = try synth.populateWorkspaceDatabase(openedDatabase, orchestrator: orch)
-            } else {
-                campaign = synth.synthesizeFlagshipCampaign()
-                for lane in existingLanes {
-                    let pty = orch.ptyGrid.getOrCreateSession(laneID: lane.id, rows: 26, columns: 96)
-                    if let ansi = campaign.ansiTranscriptsByLaneID[lane.id] {
-                        pty.screenBuffer.feed(ansi)
-                    }
-                    orch.ownershipMonitor.registerLane(lane)
-                }
-            }
-        } catch {
-            campaign = synth.synthesizeFlagshipCampaign()
-        }
-
         let coord = RelayWorkbenchCoordinator(
             localizer: resolvedLocalizer,
             shellState: RelayWorkbenchShellState(initialPane: initialPane)
         )
         coord.shellState.activePane = initialPane
-        coord.shellState.selectedLaneID = campaign.lanes.first?.id ?? "lane-claude-quic"
-        coord.shellState.selectedMergeFilePath = campaign.mergeReports.first?.relativePath ?? "Sources/Auth/AuthSessionManager.swift"
-        coord.shellState.statusBannerText = resolvedLocalizer.L(
-            "Loopback Wiretap 127.0.0.1:43118 · 4 Vendor Worktrees Isolated",
-            "本地回环网关 127.0.0.1:43118 · 4 个智能体工作树已隔离"
-        )
 
         let undoCtrl = RelayUndoRedoController(database: openedDatabase)
         let ftsStore = openedDatabase.makeFTS5SearchStore()
@@ -733,89 +772,231 @@ public final class RelayStudioViewModel: ObservableObject {
         self.xtermPalette = Xterm256ColorPalette(theme: .relayBauhausDark)
         self.scrollbackSearchEngine = TerminalScrollbackSearchEngine(excerptContextRadius: 34)
 
-        self.campaignTitle = openedDatabase.getMeta(key: "workspace_name") ?? campaign.campaignTitle
-        self.repositoryPath = openedDatabase.getMeta(key: "repository_path") ?? campaign.repositoryPath
-        self.baseCommitOID = campaign.baseCommitOID
+        self.campaignTitle = ""
+        self.repositoryPath = ""
+        self.baseCommitOID = ""
         self.activePane = initialPane
+        self.dagSpec = Self.makeEmptyDAGSpec()
+        self.cpmSchedule = Self.makeEmptyCPMSchedule()
+        self.flamechartTimeline = WiretapFlamechartBuilder.buildTimeline(from: [])
+        self.costAnalytics = Self.makeEmptyCostAnalytics()
+        self.policyPack = RelayGuardrailsPolicyPack.defaultIndustrialPack()
+        self.scratchpadScriptSource = Self.defaultScratchpadTemplate
 
-        let persistedLanes = (try? openedDatabase.allLanes()) ?? campaign.lanes
-        self.lanes = persistedLanes.isEmpty ? campaign.lanes : persistedLanes
-        self.gitCommits = campaign.gitCommits
-        self.selectedLaneID = campaign.lanes.first?.id ?? "lane-claude-quic"
-        self.broadcastTargetLaneIDs = Set(campaign.lanes.map(\.id))
+        let shouldHydrateDemo = loadDemoWorkspace || (openedDatabase.getMeta(key: "is_demo_workspace") == "1")
+        if shouldHydrateDemo {
+            hydrateDemoCampaignState(seedIfEmpty: isTempBundle && loadDemoWorkspace)
+        } else if !isTempBundle {
+            hydrateRealWorkspaceState()
+        } else {
+            refreshUndoCheckpointAndFTSState()
+            refreshStatusBanner()
+        }
+
+        if let missingPath = missingExplicitBundlePath {
+            let err = RelayIDEError.workspaceBundleNotFound(missingPath)
+            coord.toastCenter.post(
+                severity: .danger,
+                title: resolvedLocalizer.L("Workspace Not Found", "未找到工作区项目包"),
+                detail: err.localizedDescription(in: resolvedLocalizer.language)
+            )
+        }
+
+        wireCoordinatorBindings()
+    }
+
+    private func hydrateRealWorkspaceState() {
+        isDemoMode = false
+        dlpEngine.clearAuditEvents()
+        dlpAuditEvents = []
+        pluginLatencyByID = [:]
+        wiretapSpanRecords = []
+        wiretapAPISpans = []
+        laneBudgetAccounts = []
+        flamechartTimeline = WiretapFlamechartBuilder.buildTimeline(from: [])
+        costAnalytics = Self.makeEmptyCostAnalytics()
+        globalBudgetCeilingUSD = 0.0
+        gitCommits = []
+        terminalSnapshotsByLane = [:]
+        mergeScenarios = []
+        callSiteDiagnostics = []
+        isometricTiles = []
+        isometricCouplingArcs = []
+        boundaryCollisions = []
+        hookTraceEntries = []
+        broadcastDraftCommand = ""
+        broadcastSentCount = 0
+        isBroadcastBarExpanded = false
+        ftsQueryText = ""
+
+        campaignTitle = database.getMeta(key: "workspace_name")
+            ?? projectBundleURL.deletingPathExtension().lastPathComponent
+        repositoryPath = database.getMeta(key: "repository_path") ?? ""
+        baseCommitOID = ""
+
+        lanes = (try? database.allLanes()) ?? []
+        selectedLaneID = lanes.first?.id ?? ""
+        broadcastTargetLaneIDs = Set(lanes.map(\.id))
+
+        let persistedDAGs = (try? database.allDAGs()) ?? []
+        dagSpec = persistedDAGs.first ?? Self.makeEmptyDAGSpec()
+        cpmSchedule = (try? CriticalPathMethodAnalyzer().analyze(tasks: dagSpec.tasks)) ?? Self.makeEmptyCPMSchedule()
+        selectedDAGTaskID = dagSpec.tasks.first?.id ?? ""
+        if dagSpec.globalBudgetCeilingUSD > 0 {
+            globalBudgetCeilingUSD = dagSpec.globalBudgetCeilingUSD
+        }
+
+        mergeReports = (try? database.allMergeReports()) ?? []
+        selectedMergeFilePath = mergeReports.first?.relativePath ?? ""
+        selectedMergeChunkID = mergeReports.first?.chunks.first?.id
+        guardrailFindings = (try? database.allGuardrailFindings()) ?? []
+        policyPack = RelayGuardrailsPolicyPack.defaultIndustrialPack()
+
+        reloadPersistedWorkspaceState()
+        refreshStatusBanner()
+    }
+
+    private func hydrateDemoCampaignState(seedIfEmpty: Bool) {
+        isDemoMode = true
+        orchestrator.wiretapProxy.ledger.setGlobalCeilingUSD(18.0)
+        let synth = RelayDemoWorkspaceSynthesizer()
+        let campaign: SynthesizedFlagshipCampaign
+        let existingLanes = (try? database.allLanes()) ?? []
+        if existingLanes.isEmpty && seedIfEmpty {
+            campaign = (try? synth.populateWorkspaceDatabase(database, orchestrator: orchestrator))
+                ?? synth.synthesizeFlagshipCampaign()
+        } else {
+            campaign = synth.synthesizeFlagshipCampaign()
+            for lane in existingLanes {
+                let pty = orchestrator.ptyGrid.getOrCreateSession(laneID: lane.id, rows: 26, columns: 96)
+                if let ansi = campaign.ansiTranscriptsByLaneID[lane.id] {
+                    pty.screenBuffer.feed(ansi)
+                }
+                orchestrator.ownershipMonitor.registerLane(lane)
+            }
+        }
+
+        campaignTitle = database.getMeta(key: "workspace_name") ?? campaign.campaignTitle
+        repositoryPath = database.getMeta(key: "repository_path") ?? campaign.repositoryPath
+        baseCommitOID = campaign.baseCommitOID
+
+        let persistedLanes = (try? database.allLanes()) ?? []
+        lanes = persistedLanes.isEmpty ? campaign.lanes : persistedLanes
+        gitCommits = campaign.gitCommits
+        selectedLaneID = lanes.first?.id ?? "lane-claude-quic"
+        broadcastTargetLaneIDs = Set(lanes.map(\.id))
+        isBroadcastBarExpanded = true
+        broadcastDraftCommand = "swift test --parallel --filter HTTP3TransportAndAuth"
+        broadcastSentCount = 0
 
         var snapDict: [String: TerminalViewportSnapshot] = [:]
         for snap in campaign.terminalSnapshots {
             snapDict[snap.laneID] = snap
         }
-        for liveSnap in orch.ptyGrid.allSnapshots() {
+        for liveSnap in orchestrator.ptyGrid.allSnapshots() {
             snapDict[liveSnap.laneID] = liveSnap
         }
-        self.terminalSnapshotsByLane = snapDict
+        terminalSnapshotsByLane = snapDict
 
-        let persistedDAGs = (try? openedDatabase.allDAGs()) ?? []
-        self.dagSpec = persistedDAGs.first ?? campaign.dagSpec
-        self.cpmSchedule = campaign.cpmSchedule
-        self.selectedDAGTaskID = campaign.cpmSchedule.criticalPathTaskIDs.dropFirst().first
+        let persistedDAGs = (try? database.allDAGs()) ?? []
+        dagSpec = persistedDAGs.first ?? campaign.dagSpec
+        cpmSchedule = campaign.cpmSchedule
+        selectedDAGTaskID = campaign.cpmSchedule.criticalPathTaskIDs.dropFirst().first
             ?? campaign.dagSpec.tasks.first?.id
             ?? "h3-auth-subkeys"
 
-        let persistedMerges = (try? openedDatabase.allMergeReports()) ?? campaign.mergeReports
+        let persistedMerges = (try? database.allMergeReports()) ?? []
         let activeMerges = persistedMerges.isEmpty ? campaign.mergeReports : persistedMerges
-        self.mergeReports = activeMerges
-        self.mergeScenarios = campaign.mergeScenarios
-        self.selectedMergeFilePath = activeMerges.first?.relativePath ?? "Sources/Auth/AuthSessionManager.swift"
-        self.selectedMergeChunkID = activeMerges.first?.chunks.first(where: { $0.resolution.isConflict })?.id
+        mergeReports = activeMerges
+        mergeScenarios = campaign.mergeScenarios
+        selectedMergeFilePath = activeMerges.first?.relativePath ?? "Sources/Auth/AuthSessionManager.swift"
+        selectedMergeChunkID = activeMerges.first?.chunks.first(where: { $0.resolution.isConflict })?.id
             ?? activeMerges.first?.chunks.first?.id
 
-        self.isometricTiles = campaign.isometricTiles
-        self.isometricCouplingArcs = campaign.isometricCouplingArcs
-        self.boundaryCollisions = campaign.boundaryCollisions
-        self.selectedIsometricModulePath = campaign.isometricTiles.first(where: \.hasMergeConflict)?.relativePath
+        isometricTiles = campaign.isometricTiles
+        isometricCouplingArcs = campaign.isometricCouplingArcs
+        boundaryCollisions = campaign.boundaryCollisions
+        selectedIsometricModulePath = campaign.isometricTiles.first(where: \.hasMergeConflict)?.relativePath
             ?? "Sources/Auth/AuthSessionManager.swift"
 
-        self.wiretapSpanRecords = campaign.wiretapSpanRecords
-        self.wiretapAPISpans = campaign.wiretapSpans
-        self.laneBudgetAccounts = campaign.laneBudgetAccounts
-        self.flamechartTimeline = campaign.flamechartTimeline
-        self.costAnalytics = campaign.costAnalytics
-        self.selectedWiretapSpanID = campaign.wiretapSpanRecords.last?.id
-        self.globalBudgetCeilingUSD = campaign.dagSpec.globalBudgetCeilingUSD
+        wiretapSpanRecords = campaign.wiretapSpanRecords
+        wiretapAPISpans = campaign.wiretapSpans
+        laneBudgetAccounts = campaign.laneBudgetAccounts
+        flamechartTimeline = campaign.flamechartTimeline
+        costAnalytics = campaign.costAnalytics
+        selectedWiretapSpanID = campaign.wiretapSpanRecords.last?.id
+        globalBudgetCeilingUSD = campaign.dagSpec.globalBudgetCeilingUSD
 
-        self.policyPack = campaign.policyPack
-        let persistedFindings = (try? openedDatabase.allGuardrailFindings()) ?? campaign.guardrailFindings
-        self.guardrailFindings = persistedFindings.isEmpty ? campaign.guardrailFindings : persistedFindings
-        self.hookTraceEntries = campaign.hookTraceEntries
+        policyPack = campaign.policyPack
+        let persistedFindings = (try? database.allGuardrailFindings()) ?? []
+        guardrailFindings = persistedFindings.isEmpty ? campaign.guardrailFindings : persistedFindings
+        hookTraceEntries = campaign.hookTraceEntries
+        scratchpadSubjectInput = "git reset --hard HEAD~1 && rm -rf Sources/Auth"
+        ftsQueryText = "ZeroCopy passkey HKDF"
 
-        self.scratchpadScriptSource = """
-        // Capability-Gated JavaScriptCore Lifecycle Hook (onCommandSpawn)
-        function onCommandSpawn(event) {
-            const cmd = (event.commandLine || "").trim();
-            RelayHost.log("info", "Inspecting PTY command on " + event.laneID + ": " + cmd);
-            if (/git\\s+reset\\s+--hard|rm\\s+-rf\\s+Sources/i.test(cmd)) {
-                RelayHost.emitFinding(
-                    "BLOCKER",
-                    event.laneID,
-                    event.workingDirectory || "Sources/Auth",
-                    "Blocked destructive shell command",
-                    "Vetoed `" + cmd + "` before PTY execve() inside isolated worktree."
-                );
-                return { decision: "VETO", reason: "Destructive history/tree wipe prohibited" };
-            }
-            return { decision: "ALLOW", reason: "Verified safe worktree command" };
-        }
-        """
-
-        // Seed deterministic DLP Audit Ledger, Call-Site Diagnostics, Plugin Latencies & FTS5 Results
         seedDeterministicDLPAuditLedger()
         recomputeCallSiteDiagnostics()
         seedDeterministicPluginLatencies()
         for entry in campaign.hookTraceEntries {
-            jsEval.traceBuffer.insertPrebuiltEntry(entry)
+            jsScratchpadEvaluator.traceBuffer.insertPrebuiltEntry(entry)
         }
         refreshUndoCheckpointAndFTSState()
         evaluateScratchpadHook(postToast: false)
-        wireCoordinatorBindings()
+        refreshStatusBanner()
+    }
+
+    public func loadDemoCampaign() {
+        if !ownsTemporaryBundleDirectory {
+            let tempRoot = FileManager.default.temporaryDirectory
+                .appendingPathComponent("relay-demo-session-\(UUID().uuidString)", isDirectory: true)
+            let demoURL = tempRoot.appendingPathComponent("DemoPreview.relayproj", isDirectory: true)
+            if let demoDB = try? RelayProjectDatabase(bundleDirectoryURL: demoURL) {
+                self.database = demoDB
+                self.projectBundleURL = demoURL
+                self.ownsTemporaryBundleDirectory = true
+                self.undoRedoController = RelayUndoRedoController(database: demoDB)
+                self.ftsSearchStore = demoDB.makeFTS5SearchStore()
+                self.checkpointManager = RelayCheckpointJournalManager(database: demoDB)
+            }
+        }
+        hydrateDemoCampaignState(seedIfEmpty: true)
+        coordinator.toastCenter.post(
+            severity: .info,
+            title: L("[DEMO] Loaded Synthetic Preview", "[演示数据] 已载入合成演示工作区"),
+            detail: L(
+                "All lanes, transcripts, spend figures, and merge conflicts in this view are synthetic sample data.",
+                "当前显示的通道、终端输出、预算数字与合并冲突均为合成演示样本数据。"
+            )
+        )
+    }
+
+    public func refreshStatusBanner() {
+        let lang = localizer.language
+        if isDemoMode {
+            coordinator.shellState.statusBannerText = RelayLocalizer.select(
+                lang,
+                "[DEMO] Synthetic 4-lane preview · M0 does not launch coding agents yet",
+                "[演示数据] 4 通道合成预览 · 当前版本（M0）尚不会启动任何 coding agent"
+            )
+        } else if lanes.isEmpty {
+            coordinator.shellState.statusBannerText = RelayLocalizer.select(
+                lang,
+                "Empty workspace · M0 does not launch coding agents yet",
+                "空工作区 · 当前版本（M0）尚不会启动任何 coding agent"
+            )
+        } else if isWiretapProxyRunning {
+            coordinator.shellState.statusBannerText = RelayLocalizer.select(
+                lang,
+                "\(lanes.count) lane(s) loaded · Loopback proxy active on port \(wiretapProxyPort)",
+                "已加载 \(lanes.count) 条通道 · 本地回环代理运行于端口 \(wiretapProxyPort)"
+            )
+        } else {
+            coordinator.shellState.statusBannerText = RelayLocalizer.select(
+                lang,
+                "\(lanes.count) lane(s) loaded · Loopback proxy not started (M4)",
+                "已加载 \(lanes.count) 条通道 · 本地回环代理未启动（排在 M4）"
+            )
+        }
     }
 
     deinit {
@@ -830,13 +1011,9 @@ public final class RelayStudioViewModel: ObservableObject {
     private func wireCoordinatorBindings() {
         localizer.$language
             .dropFirst()
-            .sink { [weak self] lang in
+            .sink { [weak self] _ in
                 guard let self else { return }
-                self.coordinator.shellState.statusBannerText = RelayLocalizer.select(
-                    lang,
-                    "Loopback Wiretap 127.0.0.1:43118 · 4 Vendor Worktrees Isolated",
-                    "本地回环网关 127.0.0.1:43118 · 4 个智能体工作树已隔离"
-                )
+                self.refreshStatusBanner()
                 self.objectWillChange.send()
             }
             .store(in: &cancellables)
@@ -909,12 +1086,28 @@ public final class RelayStudioViewModel: ObservableObject {
     }
 
     public var localizedCampaignTitle: String {
-        localizer.display(campaignTitle)
+        if campaignTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return L("No Workspace Loaded", "尚未加载工作区")
+        }
+        return localizer.display(campaignTitle)
+    }
+
+    public var demoBadgeLabel: String {
+        L("[DEMO] Synthetic Preview", "[演示数据] 合成预览")
+    }
+
+    public var isWiretapProxyRunning: Bool {
+        orchestrator.wiretapProxy.isRunning
+    }
+
+    public var wiretapProxyPort: UInt16 {
+        orchestrator.wiretapProxy.boundPort
     }
 
     public func setLanguage(_ newLanguage: RelayLanguage, postToast: Bool = false) {
         let changed = (localizer.language != newLanguage)
         localizer.setLanguage(newLanguage)
+        refreshStatusBanner()
         if postToast && changed {
             coordinator.toastCenter.post(
                 severity: .info,
@@ -948,10 +1141,19 @@ public final class RelayStudioViewModel: ObservableObject {
     }
 
     public var activeWaveSummaryLabel: String {
+        guard !dagSpec.tasks.isEmpty else {
+            return L("0 Tasks · Idle", "0 项任务 · 空闲")
+        }
         let completed = dagSpec.tasks.filter { $0.status == .completed }.count
+        if isDemoMode {
+            return L(
+                "[DEMO] Wave 2/3 · \(completed)/\(dagSpec.tasks.count) Tasks",
+                "[演示数据] 第 2/3 波 · \(completed)/\(dagSpec.tasks.count) 项任务"
+            )
+        }
         return L(
-            "Wave 2/3 · \(completed)/\(dagSpec.tasks.count) Tasks",
-            "第 2/3 波 · \(completed)/\(dagSpec.tasks.count) 项任务"
+            "\(completed)/\(dagSpec.tasks.count) Tasks",
+            "\(completed)/\(dagSpec.tasks.count) 项任务"
         )
     }
 
@@ -1005,11 +1207,20 @@ public final class RelayStudioViewModel: ObservableObject {
     }
 
     public func openProjectBundle(at bundleURL: URL) {
+        guard RelayProjectDatabase.bundleExists(at: bundleURL) else {
+            let err = RelayIDEError.workspaceBundleNotFound(bundleURL.path)
+            coordinator.toastCenter.post(
+                severity: .danger,
+                title: L("Failed to Open Project Bundle", "打开项目包失败"),
+                detail: err.localizedDescription(in: currentLanguage)
+            )
+            return
+        }
         do {
-            let newDB = try RelayProjectDatabase(bundleDirectoryURL: bundleURL)
-            let existingLanes = try newDB.allLanes()
-            if existingLanes.isEmpty {
-                _ = try RelayDemoWorkspaceSynthesizer().populateWorkspaceDatabase(newDB, orchestrator: orchestrator)
+            let newDB = try RelayProjectDatabase.openExisting(bundleDirectoryURL: bundleURL)
+            if ownsTemporaryBundleDirectory {
+                let oldTempRoot = projectBundleURL.deletingLastPathComponent()
+                try? FileManager.default.removeItem(at: oldTempRoot)
             }
             self.database = newDB
             self.projectBundleURL = bundleURL
@@ -1017,7 +1228,12 @@ public final class RelayStudioViewModel: ObservableObject {
             self.undoRedoController = RelayUndoRedoController(database: newDB)
             self.ftsSearchStore = newDB.makeFTS5SearchStore()
             self.checkpointManager = RelayCheckpointJournalManager(database: newDB)
-            reloadPersistedWorkspaceState()
+
+            if newDB.getMeta(key: "is_demo_workspace") == "1" {
+                hydrateDemoCampaignState(seedIfEmpty: false)
+            } else {
+                hydrateRealWorkspaceState()
+            }
             coordinator.toastCenter.post(
                 severity: .success,
                 title: L("Opened Relay Project Bundle", "已打开 Relay 项目包"),
@@ -1033,20 +1249,42 @@ public final class RelayStudioViewModel: ObservableObject {
     }
 
     public func reloadPersistedWorkspaceState() {
-        if let persistedLanes = try? database.allLanes(), !persistedLanes.isEmpty {
-            lanes = persistedLanes
+        if let persistedLanes = try? database.allLanes() {
+            if isDemoMode {
+                if !persistedLanes.isEmpty {
+                    lanes = persistedLanes
+                }
+            } else {
+                lanes = persistedLanes
+            }
         }
-        if let persistedDAGs = try? database.allDAGs(), let firstDAG = persistedDAGs.first {
-            dagSpec = firstDAG
+        if let persistedDAGs = try? database.allDAGs() {
+            if let firstDAG = persistedDAGs.first {
+                dagSpec = firstDAG
+            } else if !isDemoMode {
+                dagSpec = Self.makeEmptyDAGSpec()
+            }
         }
-        if let persistedMerges = try? database.allMergeReports(), !persistedMerges.isEmpty {
-            mergeReports = persistedMerges
-            if !mergeReports.contains(where: { $0.relativePath == selectedMergeFilePath }) {
+        if let persistedMerges = try? database.allMergeReports() {
+            if isDemoMode {
+                if !persistedMerges.isEmpty {
+                    mergeReports = persistedMerges
+                }
+            } else {
+                mergeReports = persistedMerges
+            }
+            if !mergeReports.isEmpty, !mergeReports.contains(where: { $0.relativePath == selectedMergeFilePath }) {
                 selectedMergeFilePath = mergeReports[0].relativePath
             }
         }
-        if let persistedFindings = try? database.allGuardrailFindings(), !persistedFindings.isEmpty {
-            guardrailFindings = persistedFindings
+        if let persistedFindings = try? database.allGuardrailFindings() {
+            if isDemoMode {
+                if !persistedFindings.isEmpty {
+                    guardrailFindings = persistedFindings
+                }
+            } else {
+                guardrailFindings = persistedFindings
+            }
         }
 
         // Sync per-lane budget ceilings & plugin enablement flags from workspace_meta
@@ -1070,6 +1308,7 @@ public final class RelayStudioViewModel: ObservableObject {
         }
 
         refreshUndoCheckpointAndFTSState()
+        refreshStatusBanner()
     }
 
     // MARK: - PTY Scrollback Search & Broadcast Input (⌘⇧B)
@@ -1135,29 +1374,16 @@ public final class RelayStudioViewModel: ObservableObject {
         let cmd = (explicitCommand ?? broadcastDraftCommand).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cmd.isEmpty else { return }
 
-        let targets = lanes.filter { broadcastTargetLaneIDs.contains($0.id) }
-        guard !targets.isEmpty else { return }
-
-        for lane in targets {
-            let pty = orchestrator.ptyGrid.getOrCreateSession(laneID: lane.id, rows: 26, columns: 96)
-            let ansiEcho = "\r\n\u{1B}[38;2;217;78;52m⌘⇧B broadcast ▸\u{1B}[0m \u{1B}[1m\(cmd)\u{1B}[0m\r\n"
-                + "\u{1B}[32m✔ [\(lane.id)] Executed across isolated worktree (exit 0, 0.19s)\u{1B}[0m\r\n"
-            pty.screenBuffer.feed(ansiEcho)
-            terminalSnapshotsByLane[lane.id] = pty.screenBuffer.snapshot()
-        }
-        broadcastSentCount += 1
-
-        if !terminalSearchQuery.isEmpty {
-            updateTerminalSearch(terminalSearchQuery)
-        }
-
         coordinator.toastCenter.post(
-            severity: .info,
+            severity: .warning,
             title: L(
-                "Broadcast Dispatched to \(targets.count) PTY Lanes",
-                "已向 \(targets.count) 个 PTY 终端通道广播命令"
+                "Broadcast command is not implemented yet (M1)",
+                "广播命令尚未实现（排在 M1）"
             ),
-            detail: cmd
+            detail: L(
+                "M0 does not launch coding agents or execute broadcast commands across worktrees.",
+                "当前版本（M0）尚不启动任何 coding agent，也不向工作树广播执行命令。"
+            )
         )
     }
 
@@ -1319,6 +1545,7 @@ public final class RelayStudioViewModel: ObservableObject {
         guard let idx = laneBudgetAccounts.firstIndex(where: { $0.laneID == laneID }) else { return }
         let current = laneBudgetAccounts[idx]
         let prevCeiling = current.ceilingUSD
+        let proxyLive = isWiretapProxyRunning
 
         if current.circuitOpen {
             let raisedCeiling = max(current.spentUSD + 1.50, current.ceilingUSD + 1.00)
@@ -1333,13 +1560,19 @@ public final class RelayStudioViewModel: ObservableObject {
                 title: "Reset Circuit Breaker · \(laneID) ($\(String(format: "%.2f", raisedCeiling)))",
                 operation: op
             )
+            let detailText = proxyLive
+                ? L(
+                    "Raised lane ceiling to \(RelayBauhausDesign.formatUSD(raisedCeiling)) on active loopback proxy (port \(wiretapProxyPort)).",
+                    "已在运行中的回环代理（端口 \(wiretapProxyPort)）将通道上限提升至 \(RelayBauhausDesign.formatUSD(raisedCeiling))。"
+                )
+                : L(
+                    "Raised in-memory lane ceiling to \(RelayBauhausDesign.formatUSD(raisedCeiling)); loopback proxy is not running (scheduled for M4).",
+                    "已将内存预算上限提升至 \(RelayBauhausDesign.formatUSD(raisedCeiling))；本地回环代理尚未启动（排在 M4）。"
+                )
             coordinator.toastCenter.post(
                 severity: .success,
                 title: L("Circuit Breaker Reset: \(laneID)", "已恢复预算熔断器：\(laneID)"),
-                detail: L(
-                    "Raised lane ceiling to \(RelayBauhausDesign.formatUSD(raisedCeiling)) and resumed loopback proxy.",
-                    "已将通道上限提升至 \(RelayBauhausDesign.formatUSD(raisedCeiling)) 并恢复本地回环代理。"
-                )
+                detail: detailText
             )
         } else {
             let clampedCeiling = max(0.05, current.spentUSD - 0.01)
@@ -1353,7 +1586,7 @@ public final class RelayStudioViewModel: ObservableObject {
             _ = orchestrator.wiretapProxy.ledger.recordBlockedAttempt(
                 laneID: laneID,
                 vendor: current.vendor,
-                providerHost: "api.loopback.wiretap"
+                providerHost: "in-memory-ledger"
             )
 
             let op = RelayJournalOperation.coreMutation(
@@ -1363,13 +1596,19 @@ public final class RelayStudioViewModel: ObservableObject {
                 title: "Trip Circuit Breaker · \(laneID)",
                 operation: op
             )
+            let detailText = proxyLive
+                ? L(
+                    "Active loopback proxy on port \(wiretapProxyPort) will gate subsequent requests for \(laneID).",
+                    "运行于端口 \(wiretapProxyPort) 的回环代理将拦截 \(laneID) 的后续请求。"
+                )
+                : L(
+                    "Updated in-memory budget ceiling only; loopback proxy is not running (scheduled for M4).",
+                    "仅更新内存预算状态；本地回环代理尚未启动（排在 M4）。"
+                )
             coordinator.toastCenter.post(
                 severity: .warning,
                 title: L("Circuit Breaker Tripped: \(laneID)", "已触发预算熔断器：\(laneID)"),
-                detail: L(
-                    "Outbound LLM calls gated with HTTP 429 at 127.0.0.1 loopback proxy.",
-                    "本地 127.0.0.1 回环代理已对超额大模型请求返回 HTTP 429 熔断拦截。"
-                )
+                detail: detailText
             )
         }
         refreshUndoCheckpointAndFTSState()

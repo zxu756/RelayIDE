@@ -1,93 +1,101 @@
-# RelayIDE `v1.1.0`
+# RelayIDE
 
 **[English](README.md)** | **简体中文**
 
-**面向 macOS 的多厂商 AI 编程智能体并行编排工作台、三路 AST 语义合并引擎与 Wiretap 预算熔断网关**
+**面向 macOS 的多智能体接力工作台与工作区存储工具**
 
-![RelayIDE 并行终端网格与关键路径 DAG](docs/screenshot-pty-grid-zh.png)
+`RelayIDE` 是一款原生 macOS SwiftUI 桌面工作台、SQLite 工作区存储库以及 CLI/MCP 命令行工具，用于查看隔离 Git 工作树通道、拓扑任务波次、护栏策略与合并产物。**当前状态（M0）：当前版本尚不会启动任何 coding agent；基于 `agent-relay` 的无界面多智能体真实调度排在 M1。**
 
-`RelayIDE v1.1.0`（纯 Swift 6 编写，包含 11 个隔离的 SwiftPM 核心模块、原生 macOS 桌面工作台与完整 `@Test` 自动化测试套件）是一款专为多智能体协同工程打造的原生 macOS IDE 工作台。它允许开发者在同一代码仓库的隔离 Git 工作树中并行调度 `Claude Code`、`OpenAI Codex`、`Google Antigravity (agy)` 与 `Mistral Vibe`，从根源上消除跨通道文件踩踏、API 预算失控以及传统 Git 行级 diff 产生的虚假合并冲突。
-
----
-
-## 核心特性 (`v1.1.0`)
-
-- **应用内实时 `中文 / EN` 双语无感切换 (`v1.1.0`)**：顶部工具栏内置包豪斯暖砂纸风格（`#F4F2EC` / `#18181B` / `#C2410C`）`中文 | EN` 分段切换胶囊，支持菜单快捷键 `⇧⌘L`、`⌘,` 偏好设置语言选择、CLI `--lang zh|en`（或环境变量 `RELAYIDE_LANG=zh|en`）覆盖以及 macOS 中文系统语言自动识别；所有工作台面板、命令面板与独立 HTML 审计报告均支持零重启即时切换。
-- **四厂商原生 POSIX PTY 终端多路复用网格 (`RelayPTYCore`, `5,836 LOC`)**：直接基于 `posix_openpt(2)` 与 `TIOCSWINSZ` 构建伪终端监管器，内置手写 VT100 / `xterm-256color` / 24 位真彩色终端仿真器、WCAG AA/AAA 对比度自动钳制、Boyer-Moore 回滚搜索、Asciinema v2 `.cast` 录制导出、二叉树分屏网格（`2×2 四象限`、`1+3 主从编排`、`双栏并排`）以及 60 Hz 帧合并渲染。
-- **五语言声明级三路 AST 语义合并引擎 (`RelaySemanticMerge`, `7,983 LOC`)**：手写 `Swift`、`Python`、`TypeScript`、`Rust`、`Go` 五语言声明级解析器与三路语义合并器；当多个智能体在同一文件新增不同函数或离散导入时自动无冲突合并（消解传统 `git merge` / `diff3` 假阳性冲突），并内置 Myers $O(ND)$ + Patience Diff、跨文件调用点参数签名漂移检测以及 Robert C. Martin `(Ca, Ce, I, A, D)` 架构耦合度分析。
-- **Git 工作树底层管道与实时领地围栏守卫 (`RelayWorktreeGit`, `4,208 LOC`)**：为每条智能体通道创建独立 Git 工作树，包含纯 Swift RFC 1950 zlib 松散对象解析器、基于 `CoreServices` `FSEvents` 的毫秒级领地越界监控与自动回滚、`.relay/LOG.md` SHA-256 交接契约校验以及子智能体递归套娃拦截。
-- **本地回环 HTTP/SSE Wiretap 代理与美元预算熔断网关 (`RelayWiretapProxy`, `4,413 LOC`)**：在 `127.0.0.1` 本地解析 Anthropic Messages、OpenAI Responses、Google Gemini 与 Mistral Chat 流式 SSE 令牌，提供保持 JSON 结构完整的外发敏感凭据 DLP 自动脱敏、EWMA 消耗速率预测，以及超额自动返回 HTTP `429` 的通道级美元预算熔断器。
-- **SQLite WAL 持久化、FTS5 全文检索与 `JavaScriptCore` 护栏插件 SDK**：`.relayproj` SQLite3 WAL 模式存储（`v1..v4` 模式迁移）、剥离 ANSI 控制码的 FTS5 `BM25` 全文检索、持久化无限 Undo/Redo 与 SHA-256 工作区快照，以及带微秒级延迟剖析（p50/p95/p99）的能力门禁 `JavaScriptCore` 生命周期护栏沙箱。
+![RelayIDE 合成演示预览](docs/screenshot-pty-grid-zh.png)
+*图 1（`[演示数据]`）：传入 `--demo`（`--export-screenshots`）渲染的四通道合成预览界面。不带 `--demo` 启动 `RelayIDE` 时默认进入空状态：0 条泳道、无终端假输出、无费用数字、无代理地址。*
 
 ---
 
-## 模块架构（11 个 SwiftPM 核心库 + 原生桌面端）
+## 当前可用能力（M0）
 
-| 模块名称 | 代码量 (LOC) | 核心职责 |
-|---|---:|---|
-| `RelayModels` | `1,640` | 多厂商智能体名册、`RelayLocalizer` 实时双语引擎（`zh-Hans` / `en`）、VT100/真彩色单元格模型、Git 工作树归属规则、AST 语义合并与 Wiretap 领域模型 |
-| `RelayPTYCore` | `5,836` | POSIX `posix_openpt` 进程多路复用器、手写 VT100 / `xterm-256color` / TrueColor 仿真器、Boyer-Moore 搜索、`.cast` v2 编解码、二叉分屏树 |
-| `RelayWorktreeGit` | `4,208` | Git 工作树生命周期管理、RFC 1950 zlib 松散对象读取器、`FSEvents` 领地围栏监听器、行内差异解析、`.relay` SHA-256 交接契约 |
-| `RelaySemanticMerge` | `7,983` | 五语言（`Swift`/`Python`/`TS`/`Rust`/`Go`）声明级 AST 解析器、**三路 AST 语义合并引擎**、Myers/Patience Diff3、跨文件调用签名检查、Martin 耦合度指标 |
-| `RelayWorkspaceStore` | `2,939` | `.relayproj` SQLite3 WAL 数据库（`v1..v4`）、FTS5 `BM25` 全文索引库、崩溃安全快照日志、持久化无限撤销/重做栈 |
-| `RelayWiretapProxy` | `4,413` | `127.0.0.1` HTTP/1.1 + 四厂商 SSE 流式令牌解析器、外发敏感凭据 DLP 脱敏引擎、EWMA 速率统计、单通道美元预算熔断器 |
-| `RelayPluginSDK` | `1,833` | 沙箱化 `JavaScriptCore` 编排护栏宿主、p50/p95/p99 微秒级性能剖析、内置生命周期护栏插件、`.relay-guardrails.json` 策略包编解码 |
-| `RelayOrchestrator` | `2,700` | Kahn 拓扑波次调度器、关键路径法（`ES`/`EF`/`LS`/`LF`/松弛时间）分析器、配额故障转移控制器、多智能体演示工程合成器 |
-| `RelayCLIAndMCP` | `710` | 无头 `RelayIDE` `v1.1.0` CLI（`init`、`status`、`lanes`、`dag-waves`、`semantic-merge`、`audit-plugins`、`export-html`、`mcp`）、JSON-RPC 2.0 MCP 服务、双语 HTML 审计报告导出 |
-| `RelayWorkbenchShell` | `2,420` | 包豪斯暖砂纸（`#F4F2EC`）+ 碳黑内嵌（`#18181B`）主题令牌、双语 `⌘K` 模糊子序列命令面板、双键和弦快捷键冲突检测注册表 |
-| `RelayStudioViews` + `RelayIDE` | `7,540` | 双语 2×2 实时 PTY 终端网格、关键路径 DAG 画布、三栏 AST 语义合并工作台、2.5D 等轴测领地耦合地图、Wiretap 火焰图与护栏插件工作台 |
-| `RelayIDETests` | `5,840` | 覆盖 7 大端到端测试套件的 `129` 项 Swift Testing（`@Test`）自动化验证用例 |
+- **默认空启动的 `中文 / EN` 双语桌面工作台**：不带 `--demo` 启动 macOS 桌面端时，界面保持真实空状态（`0` 条通道、空终端缓冲区、无预算金额、无回环代理地址）。支持通过顶部工具栏 `中文 | EN` 胶囊、菜单快捷键 `⇧⌘L`、`⌘,` 偏好设置弹窗、CLI `--lang zh|en` 或环境变量 `RELAYIDE_LANG=zh|en` 实时切换中英文。仅在显式传入 `--demo`（或点击界面中的「载入演示数据」）时才会在临时目录载入带 `[演示数据]` 徽章的合成样本，绝不污染用户的 `.relayproj` 目录。
+- **`.relayproj` SQLite WAL 存储、FTS5 检索与检查点（`RelayWorkspaceStore`）**：持久化保存工作区元数据、通道定义、DAG 拓扑描述、合并报告、护栏审计记录、FTS5 `BM25` 全文检索索引、SHA-256 快照以及 Undo/Redo 历史。所有只读/查询类 CLI 子命令（`status`、`lanes`、`dag-waves`、`audit-plugins`、`export-html`、`mcp --project`）在 `--project <dir>` 不存在时均立即报错并以非 0 状态码退出，不会在后台偷偷创建空目录或数据库。
+- **独立基础库组件（已通过单元测试验证）**：
+  - `RelayPTYCore`：基于 `posix_openpt(2)` 的本地子进程伪终端会话封装、VT100 / `xterm-256color` / 24 位真彩色屏幕缓冲区、Boyer-Moore 历史检索与 `.cast` v2 编解码。
+  - `RelayWorktreeGit`：`git worktree` 创建与工作树差异检查、基于 glob 的文件领地规则匹配（`FileOwnershipRule`）以及 `.relay/LOG.md` 交接日志解析。
+  - `RelayOrchestrator`：Kahn 拓扑波次排序与关键路径法（`ES`/`EF`/`LS`/`LF`/松弛时间）计算器。
+  - `RelayPluginSDK`：沙箱化 `JavaScriptCore` 策略包与钩子演练台求值器（支持 `audit-plugins` 与 GUI 交互演练）。
+  - `RelayWiretapProxy`：独立本地回环 HTTP/1.1 + SSE 流解析器、敏感凭据正则扫描器与内存预算熔断账本。
+- **基于 stdio 的 JSON-RPC 2.0 MCP 服务器（共 `2` 个工具）**：`RelayIDE mcp [--project <dir>]` 通过标准输入/输出暴露 **2 个 MCP 工具**：
+  1. `relay_semantic_merge`（实验性声明级三路合并；存在冲突或未通过语法校验时返回 `isError: true`）。
+  2. `relay_check_ownership`（校验指定相对路径是否符合 `--project` 工作区中对应通道的 `FileOwnershipRule` 领地规则）。
+- **实验性声明级三路合并（`semantic-merge`）**：
+  - **【实验性】已知会在 Python 代码上损坏输出**（例如多行三引号字符串内出现顶格 `def`/`class` 或复杂缩进控制块时）。M3 之前在交接偏好中默认关闭。
+  - 仅在无未决冲突**且**通过宿主机真实语法解析器（`xcrun swiftc -parse`、`python3 -m py_compile` 或 `node --check`）校验时退出码为 `0`；存在冲突标记时退出码为 `1`；语法校验失败时退出码为 `3` 且不在 `stdout` 输出损坏代码。
+- **独立双语 HTML 报告导出（`export-html`）**：从已有 `.relayproj` 导出单文件 `中文 | EN` HTML 报告（当数据源来自 `--seed-demo` 时自动标注 `[DEMO]` / `[演示数据]`）。
 
 ---
 
-## 界面预览（2x Retina 高清截图 `2720 × 1680`）
+## 后续路线图（M0 尚未实现）
 
-| 2×2 多厂商并行终端网格与关键路径 DAG | 声明级三路 AST 语义合并工作台 |
+- **M1（真实多智能体接力运行器）**：实现 `RelayIDE run`，在隔离 Git 工作树中无界面启动真实的 `claude`、`codex`、`agy` 与 `vibe` CLI 进程，通过 `.relay/` 文件完成交接，接入实时 PTY 输出流与真实广播命令（当前在 M0 中触发 `⌘⇧B` 会明确提示「广播命令尚未实现（排在 M1）」）。
+- **M2（Git 工作树自动合入与验证门禁）**：基于 `git merge-tree` / `git merge-file` 完成跑完后的分支安全合入、构建/测试验证门禁与跨通道越界修改核查。
+- **M3（基于真实语法树的语义合并）**：用 `SwiftSyntax` / `tree-sitter` 替代当前基于正则与缩进的声明切分器，通过全量边界用例后再接入合并流水线。
+- **M4（实时回环 Wiretap 代理与外发 DLP 网关）**：将 `LoopbackWiretapProxyServer` 注入子智能体进程的 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` 环境变量，在真实请求链路上执行 HTTP `429` 预算熔断与外发敏感凭据脱敏。
+
+---
+
+## 合成演示界面预览（`--demo`，`[演示数据]` 样本）
+
+以下四张截图均由合成样本数据渲染（`--export-screenshots` 内部启用 `loadDemoWorkspace: true`），窗口顶栏均带有醒目的 `[演示数据]` 标识：
+
+| 2x2 并行终端网格（`[演示数据]`） | 声明级三路合并工作台（`[演示数据]`） |
 |---|---|
-| ![并行终端网格](docs/screenshot-pty-grid-zh.png) | ![三路语义合并](docs/screenshot-semantic-merge-zh.png) |
+| ![并行终端网格演示](docs/screenshot-pty-grid-zh.png) | ![三路语义合并演示](docs/screenshot-semantic-merge-zh.png) |
 
-| 2.5D 等轴测领地耦合与围栏冲突地图 | Wiretap 令牌火焰图、预算熔断与 DLP 审计 |
+| 等轴测领地围栏地图（`[演示数据]`） | Wiretap 遥测与护栏插件（`[演示数据]`） |
 |---|---|
-| ![领地围栏地图](docs/screenshot-territory-map-zh.png) | ![Wiretap 预算网关](docs/screenshot-wiretap-guardrails-zh.png) |
+| ![领地围栏地图演示](docs/screenshot-territory-map-zh.png) | ![Wiretap 与插件演示](docs/screenshot-wiretap-guardrails-zh.png) |
 
 ---
 
-## 安装与使用
+## 构建、验证与使用说明
 
-### Homebrew Cask 一键安装
+> **可执行文件名说明**：从源码通过 SwiftPM 构建生成 `.build/debug/RelayIDE`（运行 `./Scripts/build-app.sh` 生成 `build/RelayIDE.app/Contents/MacOS/RelayIDE`）；通过 Homebrew Cask（`brew install --cask zxu756/tap/relayide`）安装时会将小写命令 `relayide` 软链至 `/opt/homebrew/bin/relayide`。
+
+### 从源码构建与运行验收测试
 
 ```bash
-brew install --cask zxu756/tap/relayide
-```
-
-### 从源码构建与运行测试
-
-```bash
-git clone https://github.com/zxu756/RelayIDE.git
-cd RelayIDE
-swift test --no-parallel
+swift build
+./Scripts/test.sh milestone 0
 ./Scripts/build-app.sh
-open build/RelayIDE.app
 ```
 
-### 命令行工具 (CLI)、双语报告导出与 MCP 服务器
+### 命令行（CLI）与 MCP 服务器用法
 
 ```bash
-# 初始化可复现的四厂商演示工程并导出带「中文 | EN」切换胶囊的独立 HTML 审计报告
-relayide init --project ./demo.relayproj --seed-demo
-relayide status --project ./demo.relayproj
-relayide lanes --project ./demo.relayproj
-relayide dag-waves --project ./demo.relayproj
-relayide semantic-merge base.swift left.swift right.swift
-relayide export-html ./relay-dossier.html --project ./demo.relayproj
+# 1. 初始化空工作区（0 条通道）并查看状态
+.build/debug/RelayIDE init --project /tmp/my-empty.relayproj --lang zh
+.build/debug/RelayIDE status --project /tmp/my-empty.relayproj --lang zh
+.build/debug/RelayIDE lanes --project /tmp/my-empty.relayproj --lang zh
 
-# 指定界面语言启动或导出 2x Retina (2720 × 1680) 中英文工作台截图
-relayide --lang zh
-relayide --export-screenshots ./docs --lang zh
-relayide --export-screenshots ./docs --lang en
+# 2. 显式创建带 [演示数据] 标记的合成演示工作区并导出 HTML 报告
+.build/debug/RelayIDE init --project /tmp/demo.relayproj --seed-demo --lang zh
+.build/debug/RelayIDE dag-waves --project /tmp/demo.relayproj --lang zh
+.build/debug/RelayIDE audit-plugins --project /tmp/demo.relayproj --lang zh
+.build/debug/RelayIDE export-html /tmp/demo-dossier.html --project /tmp/demo.relayproj --lang zh
 
-# 启动基于 stdio 的 JSON-RPC 2.0 MCP 服务器（供外部智能体调用 relay_semantic_merge 与 relay_check_ownership）
-relayide mcp
+# 3. 实验性三路合并（无冲突且语法合法退出 0；有冲突退出 1；语法损坏退出 3）
+.build/debug/RelayIDE semantic-merge base.swift left.swift right.swift --lang zh
+
+# 4. 启动基于 stdio 的 JSON-RPC 2.0 MCP 服务器（共 2 个工具：relay_semantic_merge、relay_check_ownership）
+.build/debug/RelayIDE mcp --project /tmp/my-empty.relayproj --lang zh
+```
+
+### 桌面工作台启动方式
+
+```bash
+# 默认空工作区启动（0 条通道，无合成演示数据）
+build/RelayIDE.app/Contents/MacOS/RelayIDE
+
+# 显式载入 [演示数据] 合成预览（支持中英文参数切换）
+build/RelayIDE.app/Contents/MacOS/RelayIDE --demo --lang zh
+build/RelayIDE.app/Contents/MacOS/RelayIDE --demo --lang en
 ```
 
 ---

@@ -1,0 +1,56 @@
+================================================================
+RelayIDE M0 Acceptance Suite (m0/honest)
+Timestamp: 2026-11-14T00:53:25Z
+Commit:    8dd4871 (branch: m0/honest)
+================================================================
+
+--- Row 1: swift build verification + README.md & README.zh-CN.md opening M0 disclosure ---
+EN para 1: `RelayIDE` is a native macOS SwiftUI workbench, SQLite workspace store, and CLI/MCP utility for inspecting isolated Git worktree lanes, topological task waves, guardrail policies, and merge artifacts. **Current status (M0): This version does not launch coding agents yet; headless multi-agent execution via `agent-relay` is scheduled for M1.**
+ZH para 1: `RelayIDE` 是一款原生 macOS SwiftUI 桌面工作台、SQLite 工作区存储库以及 CLI/MCP 命令行工具，用于查看隔离 Git 工作树通道、拓扑任务波次、护栏策略与合并产物。**当前状态（M0）：当前版本尚不会启动任何 coding agent；基于 `agent-relay` 的无界面多智能体真实调度排在 M1。**
+[PASS] Row 1: swift build succeeded and README.md & README.zh-CN.md state in paragraph 1 that M0 does not launch coding agents yet
+
+--- Row 2: --help, version, status (empty project) exit 0 + [DEMO] / [演示数据] markers (EN + ZH) ---
+version (--lang en): RelayIDE 1.1.0 (macOS arm64 · Workspace Ledger, MCP Ownership Check & Experimental 3-Way Merge; M0 does not launch coding agents yet)
+version (--lang zh): RelayIDE 1.1.0 (macOS arm64 · 工作区台账、MCP 所有权校验与实验性三路合并；M0 尚未接入智能体执行)
+Empty workspace status JSON (--lang en): {"activeLaneCount":0,"totalTokensObserved":0,"totalSpendUSD":0,"taskNodeCount":0,"guardrailFindingCount":0,"semanticAutoMergeCount":0,"undoDepth":0,"unresolvedConflictCount":0,"walBytes":0,"workspaceName":"clean-empty-en","repositoryPath":"","sqliteBytes":69632,"redoDepth":0,"schemaVersion":4}
+Empty workspace status JSON (--lang zh): {"redoDepth":0,"totalTokensObserved":0,"taskNodeCount":0,"undoDepth":0,"workspaceName":"clean-empty-zh","guardrailFindingCount":0,"unresolvedConflictCount":0,"schemaVersion":4,"activeLaneCount":0,"semanticAutoMergeCount":0,"sqliteBytes":69632,"repositoryPath":"","totalSpendUSD":0,"walBytes":0}
+EN seed output: [DEMO] Initialized synthetic demo workspace at /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/demo-en.relayproj (lanes=4, tasks=4, autoMerges=2; worktree paths, commit OIDs, and spend are synthetic preview fixtures)
+ZH seed output: [演示数据] 已在 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/demo-zh.relayproj 初始化合成演示工作区 (lanes=4, tasks=4, autoMerges=2；工作树路径、提交哈希与花费均为合成预览样本)
+[PASS] Row 2: --help, version, status (empty project) exit 0 (EN+ZH) and [DEMO]/[演示数据] markers verified
+
+--- Row 3: Nonexistent --project error & zero directory creation (EN + ZH) ---
+Verified nonexistent --project across 6 subcommands (--lang en, exit=1): last stderr='Workspace project bundle does not exist at '/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/does-not-exist-en-6198.relayproj' (run 'RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/does-not-exist-en-6198.relayproj' first)'
+Verified nonexistent --project across 6 subcommands (--lang zh, exit=1): last stderr='工程目录不存在或未初始化：'/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/does-not-exist-zh-1722.relayproj'（请先运行 'RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/does-not-exist-zh-1722.relayproj'）'
+[PASS] Row 3: Nonexistent --project exits non-zero (1) without creating directory across all 6 project subcommands (EN+ZH)
+
+--- Row 4: semantic-merge syntax validation gate on 09-py-triplequote (EN+ZH + MCP + 19-case sweep) ---
+09-py-triplequote (--lang en): exit=3, stdout_bytes=0, stderr='semantic-merge: Merged output failed syntax check (python3 -m py_compile) and was suppressed to prevent file corruption: Sorry: IndentationError: expected an indented block (merged_check.py, line 13) '
+09-py-triplequote (--lang zh): exit=3, stdout_bytes=0, stderr='semantic-merge: 合并结果未通过语法检查（python3 -m py_compile），已阻止输出以防损坏文件：Sorry: IndentationError: expected an indented block (merged_check.py, line 13) '
+19-case sweep verified (0 silent syntax corruptions): 01-swift-samefunc-difflines=exit(1), 02-swift-both-add-func=exit(0), 03-swift-rename-vs-body=exit(1), 04-swift-string-braces=exit(1), 05-ts-samefunc-difflines=exit(1), 06-ts-both-add-func=exit(1), 07-py-samefunc-difflines=exit(1), 08-py-class-both-add-method=exit(1), 09-py-triplequote=exit(3), 10-py-rename-vs-body=exit(1), 11-ts-rename-vs-body=exit(1), 12-swift-true-conflict=exit(1), 13-swift-control-nobrace-strings=exit(0), 14-py-control-triplequote-nodef=exit(3), 15-py-class-plain-twomethods=exit(1), 16-swift-struct-twomethods=exit(0), 17-ts-class-twomethods=exit(0), 18-ts-control-nobrace=exit(0), 19-py-both-add-toplevel=exit(0)
+[PASS] Row 4: 09-py-triplequote exits 3 with 0 stdout bytes (EN+ZH), and 0/19 harness cases silently corrupt output
+
+--- Row 5: semantic-merge conflict contract on 12-swift-true-conflict (CLI + MCP) ---
+12-swift-true-conflict CLI (--lang en): exit=1, stderr='semantic-merge: Unresolved merge conflicts detected (1 conflict(s))'
+12-swift-true-conflict CLI (--lang zh): exit=1, stderr='semantic-merge: 检测到未解决的合并冲突（共 1 处）'
+MCP 12-swift-true-conflict isError: True
+MCP 09-py-triplequote isError: True
+[PASS] Row 5: 12-swift-true-conflict exits 1 in CLI and returns isError: true in MCP (and 09-py-triplequote returns isError: true)
+
+--- Row 6: MCP tools/list count & tool names vs README.md and README.zh-CN.md ---
+MCP tools/list returned 2 tools: ['relay_semantic_merge', 'relay_check_ownership']
+[PASS] Row 6: MCP tools/list exposes 2 tools (relay_semantic_merge, relay_check_ownership), matching README.md & README.zh-CN.md
+
+--- Row 7 & Row 8: Real GUI process empty launch + open/close empty .relayproj without seeding demo lanes ---
+[PASS] Row 7: Launching GUI without --demo starts cleanly in empty state (verified alongside StudioViewModelAndHonestyTests)
+After GUI open+close (--lang en): lanes='', status={"undoDepth":0,"walBytes":0,"semanticAutoMergeCount":0,"sqliteBytes":143360,"repositoryPath":"","schemaVersion":4,"activeLaneCount":0,"totalTokensObserved":0,"workspaceName":"user-empty-en","guardrailFindingCount":0,"taskNodeCount":0,"totalSpendUSD":0,"redoDepth":0,"unresolvedConflictCount":0}
+After GUI open+close (--lang zh): lanes='', status={"totalTokensObserved":0,"unresolvedConflictCount":0,"redoDepth":0,"semanticAutoMergeCount":0,"totalSpendUSD":0,"activeLaneCount":0,"sqliteBytes":143360,"taskNodeCount":0,"schemaVersion":4,"walBytes":0,"undoDepth":0,"repositoryPath":"","workspaceName":"user-empty-zh","guardrailFindingCount":0}
+[PASS] Row 8: Opening and closing an empty .relayproj in GUI leaves 0 lanes on disk (EN+ZH)
+
+--- Row 9: Repo-wide grep for forbidden fake echo & fake proxy endpoint ---
+Occurrences inside Tests/: 1 -> ['Tests/RelayIDETests/StudioViewModelAndHonestyTests.swift']
+Occurrences outside Tests/: 0
+[PASS] Row 9: Zero occurrences of fake broadcast echo or fake wiretap port outside Tests/
+
+================================================================
+ALL 9 M0 ACCEPTANCE CHECKS PASSED (EN + ZH)
+================================================================

@@ -12,18 +12,31 @@ public final class LoopbackWiretapProxyServer: @unchecked Sendable {
     private var boundPortValue: UInt16 = 0
     private var acceptQueue: DispatchQueue?
     private var isRunningFlag: Bool = false
+    private let socketIOTimeoutSeconds: TimeInterval
+    private let upstreamTimeoutSeconds: TimeInterval
+    private let defaultUpstreamSession: URLSession
     private let upstreamTransport: (@Sendable (URLRequest) async throws -> (Data, HTTPURLResponse))?
 
     public init(
         ledger: BudgetCircuitBreakerLedger = BudgetCircuitBreakerLedger(),
+        socketIOTimeoutSeconds: TimeInterval = 5.0,
+        upstreamTimeoutSeconds: TimeInterval = 15.0,
         upstreamTransport: (@Sendable (URLRequest) async throws -> (Data, HTTPURLResponse))? = nil
     ) {
         self.ledger = ledger
+        self.socketIOTimeoutSeconds = max(0.05, socketIOTimeoutSeconds)
+        self.upstreamTimeoutSeconds = max(0.10, upstreamTimeoutSeconds)
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = max(0.10, upstreamTimeoutSeconds)
+        cfg.timeoutIntervalForResource = max(0.10, upstreamTimeoutSeconds)
+        cfg.waitsForConnectivity = false
+        self.defaultUpstreamSession = URLSession(configuration: cfg)
         self.upstreamTransport = upstreamTransport
     }
 
     deinit {
         stop()
+        defaultUpstreamSession.invalidateAndCancel()
     }
 
     public var boundPort: UInt16 {
@@ -165,6 +178,12 @@ public final class LoopbackWiretapProxyServer: @unchecked Sendable {
         var noSigPipe: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
 
+        let wholeSecs = Int(socketIOTimeoutSeconds.rounded(.down))
+        let microSecs = Int32(((socketIOTimeoutSeconds - Double(wholeSecs)) * 1_000_000.0).rounded())
+        var ioTimeout = timeval(tv_sec: wholeSecs, tv_usec: max(0, microSecs))
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &ioTimeout, socklen_t(MemoryLayout<timeval>.size))
+        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &ioTimeout, socklen_t(MemoryLayout<timeval>.size))
+
         guard let rawRequest = readHTTPRequest(from: fd) else { return }
 
         // Health check endpoint: GET /healthz
@@ -218,7 +237,8 @@ public final class LoopbackWiretapProxyServer: @unchecked Sendable {
             if let customTransport = upstreamTransport {
                 (respData, httpResp) = try await customTransport(urlReq)
             } else {
-                let (d, r) = try await URLSession.shared.data(for: urlReq)
+                urlReq.timeoutInterval = upstreamTimeoutSeconds
+                let (d, r) = try await defaultUpstreamSession.data(for: urlReq)
                 guard let hr = r as? HTTPURLResponse else {
                     throw RelayIDEError.proxyBindFailure(port: boundPort, reason: "Non-HTTP upstream response")
                 }

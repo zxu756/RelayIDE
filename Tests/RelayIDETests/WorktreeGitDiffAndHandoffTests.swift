@@ -4,7 +4,7 @@ import RelayModels
 import RelayWorktreeGit
 import Testing
 
-@Suite("Git Worktree Plumbing, Loose Object Inspector, Diff Parser & Handoff Codec")
+@Suite("Git Worktree Plumbing, Loose Object Inspector, Diff Parser & Handoff Codec", .timeLimit(.minutes(1)))
 struct WorktreeGitDiffAndHandoffTests {
 
     // MARK: - Isolated Temp Directory Helper

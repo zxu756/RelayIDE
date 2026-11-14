@@ -145,7 +145,8 @@ let package = Package(
                 "RelayPluginSDK",
                 "RelayOrchestrator",
                 "RelayCLIAndMCP",
-                "RelayWorkbenchShell"
+                "RelayWorkbenchShell",
+                "RelayStudioViews"
             ]
         )
     ]

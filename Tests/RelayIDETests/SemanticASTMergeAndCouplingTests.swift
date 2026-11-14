@@ -3,7 +3,7 @@ import RelayModels
 import RelaySemanticMerge
 import Testing
 
-@Suite("3-Way Semantic AST Merger, Myers/Diff3, Conflict Resolution, Call-Site & Isometric Coupling")
+@Suite("3-Way Semantic AST Merger, Myers/Diff3, Conflict Resolution, Call-Site & Isometric Coupling", .timeLimit(.minutes(1)))
 struct SemanticASTMergeAndCouplingTests {
 
     // MARK: - 1. Multi-Language Declaration Parsing: Swift & Structural Fingerprints

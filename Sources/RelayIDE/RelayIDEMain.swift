@@ -22,10 +22,12 @@ struct RelayStudioDesktopApp: App {
             initialBundleURL = URL(fileURLWithPath: directProj)
         }
         let sharedLocalizer = RelayLocalizer.shared
+        let loadDemo = args.contains("--demo")
         let vm = RelayStudioViewModel(
             projectBundleURL: initialBundleURL,
             initialPane: .ptyGrid,
-            localizer: sharedLocalizer
+            localizer: sharedLocalizer,
+            loadDemoWorkspace: loadDemo
         )
         _viewModel = StateObject(wrappedValue: vm)
         self.localizer = sharedLocalizer
@@ -96,19 +98,17 @@ enum RelayIDEBootstrap {
         let subcommandArgs = stripLeadingLanguageFlags(from: filteredArgs)
         if let firstArg = subcommandArgs.first, cliSubcommands.contains(firstArg) {
             let runner = RelayCLIRunner()
-            do {
-                let output = try await runner.execute(arguments: filteredArgs)
-                if firstArg == "export-html", let htmlOutURL = parseExportHTMLTargetURL(from: subcommandArgs) {
-                    try RelayHallmarkDossierNormalizer.normalizeFileIfPresent(at: htmlOutURL)
-                }
-                if !output.isEmpty {
-                    print(output)
-                }
-                Darwin.exit(0)
-            } catch {
-                FileHandle.standardError.write(Data("RelayIDE CLI error: \(error.localizedDescription)\n".utf8))
-                Darwin.exit(1)
+            let result = await runner.executeCommand(arguments: filteredArgs)
+            if result.exitCode == 0, firstArg == "export-html", let htmlOutURL = parseExportHTMLTargetURL(from: subcommandArgs) {
+                try? RelayHallmarkDossierNormalizer.normalizeFileIfPresent(at: htmlOutURL)
             }
+            if !result.stdout.isEmpty {
+                print(result.stdout)
+            }
+            if !result.stderr.isEmpty {
+                FileHandle.standardError.write(Data((result.stderr + "\n").utf8))
+            }
+            Darwin.exit(result.exitCode)
         }
 
         // 3. Native macOS AppKit / SwiftUI Desktop Workbench Launch

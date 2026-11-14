@@ -136,9 +136,9 @@ public struct RelayUserPreferencesSnapshot: Sendable, Codable, Hashable {
         maxScrollbackLines: Int = 5_000,
         defaultGlobalBudgetCeilingUSD: Double = 25.0,
         defaultLaneBudgetCeilingUSD: Double = 6.0,
-        autoRunSemanticMergeOnHandoff: Bool = true,
+        autoRunSemanticMergeOnHandoff: Bool = false,
         autoRevertOwnershipViolations: Bool = false,
-        outboundDLPRedactByDefault: Bool = true,
+        outboundDLPRedactByDefault: Bool = false,
         preferCompactChromeDensity: Bool = false,
         respectReducedMotion: Bool = false
     ) {
@@ -624,7 +624,7 @@ public final class RelayCommandPaletteController: ObservableObject {
             RelayPaletteCommandItem(
                 id: "wiretap.tripOrResetCircuitBreaker",
                 title: L("Trip or Reset Selected Lane Budget Circuit Breaker", "触发或重置当前通道预算熔断器"),
-                subtitle: L("Halt outbound LLM API packets or restore lane admission on 127.0.0.1", "在 127.0.0.1 回环网关熔断外发请求或恢复通道准入"),
+                subtitle: L("Toggle in-memory lane budget circuit breaker state (planned proxy gate in M4)", "切换内存级通道预算熔断状态（真实回环网关排在 M4）"),
                 category: .wiretapAndBudget,
                 shortcutBadge: "⇧⌘K",
                 sfSymbolName: "bolt.horizontal.circle",

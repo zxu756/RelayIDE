@@ -115,6 +115,7 @@ public final class MultiVendorDAGOrchestrator: @unchecked Sendable {
 
         try database.setMeta(key: "workspace_name", value: workspaceName)
         try database.setMeta(key: "repository_path", value: demoRepoDir)
+        try database.setMeta(key: "is_demo_workspace", value: "1")
 
         // 1. Register 4 Vendor Worktree Lanes (Claude Code, Codex, Antigravity, Mistral Vibe)
         let lanes: [ManagedWorktreeLane] = [

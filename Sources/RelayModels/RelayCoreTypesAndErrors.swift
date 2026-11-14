@@ -84,7 +84,10 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
     case worktreeAlreadyExists(String)
     case ownershipViolation(laneID: String, path: String, rule: String)
     case cyclicTaskDependency([String])
+    case workspaceBundleNotFound(String)
     case semanticMergeFailure(String)
+    case semanticMergeConflictsDetected(Int)
+    case semanticMergeSyntaxCheckFailed(parser: String, diagnostic: String)
     case proxyBindFailure(port: UInt16, reason: String)
     case budgetCircuitTripped(laneID: String, spentUSD: Double, limitUSD: Double)
     case databaseError(code: Int32, message: String)
@@ -92,33 +95,76 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
     case invalidCLIUsage(String)
 
     public var errorDescription: String? {
+        localizedDescription(in: .en)
+    }
+
+    public func localizedDescription(in language: RelayLanguage) -> String {
+        let isZh = language.isChinese
         switch self {
         case .ptyAllocationFailed(let code, let msg):
-            return "POSIX forkpty failed (errno \(code)): \(msg)"
+            return isZh
+                ? "POSIX forkpty 分配失败 (errno \(code))：\(msg)"
+                : "POSIX forkpty failed (errno \(code)): \(msg)"
         case .processSpawnFailed(let exe, let reason):
-            return "Failed to spawn '\(exe)': \(reason)"
+            return isZh
+                ? "启动子进程 '\(exe)' 失败：\(reason)"
+                : "Failed to spawn '\(exe)': \(reason)"
         case .gitRepositoryNotFound(let path):
-            return "Git repository not found at '\(path)'"
+            return isZh
+                ? "未在 '\(path)' 找到 Git 仓库"
+                : "Git repository not found at '\(path)'"
         case .gitPlumbingFailure(let cmd, let code, let err):
-            return "Git plumbing '\(cmd)' exited with \(code): \(err)"
+            return isZh
+                ? "Git 底层命令 '\(cmd)' 失败（退出码 \(code)）：\(err)"
+                : "Git plumbing '\(cmd)' exited with \(code): \(err)"
         case .worktreeAlreadyExists(let path):
-            return "Managed worktree already exists at '\(path)'"
+            return isZh
+                ? "受管工作树已存在于 '\(path)'"
+                : "Managed worktree already exists at '\(path)'"
         case .ownershipViolation(let lane, let path, let rule):
-            return "Lane '\(lane)' modified forbidden path '\(path)' (rule: \(rule))"
+            return isZh
+                ? "通道 '\(lane)' 修改了越界路径 '\(path)'（规则：\(rule)）"
+                : "Lane '\(lane)' modified forbidden path '\(path)' (rule: \(rule))"
         case .cyclicTaskDependency(let cycle):
-            return "Relay DAG contains a dependency cycle: \(cycle.joined(separator: " -> "))"
+            return isZh
+                ? "Relay DAG 包含循环依赖：\(cycle.joined(separator: " -> "))"
+                : "Relay DAG contains a dependency cycle: \(cycle.joined(separator: " -> "))"
+        case .workspaceBundleNotFound(let path):
+            return isZh
+                ? "工程目录不存在或未初始化：'\(path)'（请先运行 'RelayIDE init --project \(path)'）"
+                : "Workspace project bundle does not exist at '\(path)' (run 'RelayIDE init --project \(path)' first)"
         case .semanticMergeFailure(let msg):
-            return "3-Way Semantic AST Merge failed: \(msg)"
+            return isZh
+                ? "三路语义合并失败：\(msg)"
+                : "3-Way Semantic AST Merge failed: \(msg)"
+        case .semanticMergeConflictsDetected(let count):
+            return isZh
+                ? "检测到未解决的合并冲突（共 \(count) 处）"
+                : "Unresolved merge conflicts detected (\(count) conflict(s))"
+        case .semanticMergeSyntaxCheckFailed(let parser, let diagnostic):
+            return isZh
+                ? "合并结果未通过语法检查（\(parser)），已阻止输出以防损坏文件：\(diagnostic)"
+                : "Merged output failed syntax check (\(parser)) and was suppressed to prevent file corruption: \(diagnostic)"
         case .proxyBindFailure(let port, let reason):
-            return "Wiretap HTTP proxy failed to bind 127.0.0.1:\(port): \(reason)"
+            return isZh
+                ? "回环 HTTP 代理绑定端口 \(port) 失败：\(reason)"
+                : "Wiretap HTTP proxy failed to bind port \(port): \(reason)"
         case .budgetCircuitTripped(let lane, let spent, let limit):
-            return String(format: "Budget circuit tripped for lane '%@' ($%.4f / $%.4f)", lane, spent, limit)
+            return isZh
+                ? String(format: "通道 '%@' 预算熔断已触发 ($%.4f / $%.4f)", lane, spent, limit)
+                : String(format: "Budget circuit tripped for lane '%@' ($%.4f / $%.4f)", lane, spent, limit)
         case .databaseError(let code, let msg):
-            return "Relay SQLite WAL error (\(code)): \(msg)"
+            return isZh
+                ? "Relay SQLite WAL 错误 (\(code))：\(msg)"
+                : "Relay SQLite WAL error (\(code)): \(msg)"
         case .pluginError(let id, let reason):
-            return "Relay plugin '\(id)' error: \(reason)"
+            return isZh
+                ? "Relay 插件 '\(id)' 错误：\(reason)"
+                : "Relay plugin '\(id)' error: \(reason)"
         case .invalidCLIUsage(let msg):
-            return "Invalid CLI arguments: \(msg)"
+            return isZh
+                ? "命令行参数无效：\(msg)"
+                : "Invalid CLI arguments: \(msg)"
         }
     }
 }

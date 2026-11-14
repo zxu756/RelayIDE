@@ -41,22 +41,22 @@ public final class BudgetCircuitBreakerLedger: @unchecked Sendable {
     }
 
     public func checkAdmission(forLane laneID: String) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        let totalSpent = accountsByLane.values.reduce(0.0) { $0 + $1.spentUSD }
-        if totalSpent >= globalCeilingUSD {
-            throw RelayIDEError.budgetCircuitTripped(
-                laneID: laneID,
-                spentUSD: totalSpent,
-                limitUSD: globalCeilingUSD
-            )
-        }
-        if let account = accountsByLane[laneID], (account.circuitOpen || account.spentUSD >= account.ceilingUSD) {
-            throw RelayIDEError.budgetCircuitTripped(
-                laneID: laneID,
-                spentUSD: account.spentUSD,
-                limitUSD: account.ceilingUSD
-            )
+        try lock.withLock {
+            let totalSpent = accountsByLane.values.reduce(0.0) { $0 + $1.spentUSD }
+            if totalSpent >= globalCeilingUSD {
+                throw RelayIDEError.budgetCircuitTripped(
+                    laneID: laneID,
+                    spentUSD: totalSpent,
+                    limitUSD: globalCeilingUSD
+                )
+            }
+            if let account = accountsByLane[laneID], (account.circuitOpen || account.spentUSD >= account.ceilingUSD) {
+                throw RelayIDEError.budgetCircuitTripped(
+                    laneID: laneID,
+                    spentUSD: account.spentUSD,
+                    limitUSD: account.ceilingUSD
+                )
+            }
         }
     }
 

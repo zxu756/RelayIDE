@@ -1,9 +1,10 @@
+import Darwin
 import Foundation
 import RelayModels
 import RelayWiretapProxy
 import Testing
 
-@Suite("Loopback Wiretap Proxy, HTTP/1.1 & Multi-Vendor SSE Dissector, DLP & Burn-Rate Circuit Breaker")
+@Suite("Loopback Wiretap Proxy, HTTP/1.1 & Multi-Vendor SSE Dissector, DLP & Burn-Rate Circuit Breaker", .timeLimit(.minutes(1)))
 struct WiretapSSEAndDLPCircuitBreakerTests {
 
     // MARK: - 1. `HTTP11WireStateMachine` Chunked Transfer Reassembly & Trailers
@@ -477,8 +478,10 @@ struct WiretapSSEAndDLPCircuitBreakerTests {
 
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.connectionProxyDictionary = [:]
-        sessionConfig.timeoutIntervalForRequest = 5.0
+        sessionConfig.timeoutIntervalForRequest = 3.0
+        sessionConfig.timeoutIntervalForResource = 3.0
         let urlSession = URLSession(configuration: sessionConfig)
+        defer { urlSession.invalidateAndCancel() }
 
         // 1. Verify GET /healthz
         let healthURL = URL(string: "http://127.0.0.1:\(port)/healthz")!
@@ -903,5 +906,84 @@ struct WiretapSSEAndDLPCircuitBreakerTests {
 
         #expect(map.values(for: "SET-COOKIE") == ["a=1", "b=2"])
         #expect(map.value(for: "x-custom-trace") == "part1 part2")
+    }
+
+    // MARK: - 20. Bounded Socket & Upstream Timeout Guard (R26 Regression Test)
+
+    @Test("LoopbackWiretapProxyServer enforces bounded socket read timeout and bounded default upstream timeout")
+    func loopbackWiretapProxyEnforcesIdleSocketAndUpstreamTimeoutGuard() async throws {
+        let ledger = BudgetCircuitBreakerLedger(globalCeilingUSD: 10.0)
+        ledger.registerLane(laneID: "lane-timeout", vendor: .codex, ceilingUSD: 0.10)
+        _ = ledger.recordUsage(
+            laneID: "lane-timeout",
+            vendor: .codex,
+            providerHost: "api.openai.com",
+            usage: ExtractedUsagePayload(modelIdentifier: "claude-opus-4-1", inputTokens: 5_000, cachedReadTokens: 0, outputTokens: 5_000),
+            durationMs: 100,
+            statusCode: 200
+        )
+
+        // Start proxy WITHOUT custom upstreamTransport, using short socket & upstream timeouts
+        let proxy = LoopbackWiretapProxyServer(
+            ledger: ledger,
+            socketIOTimeoutSeconds: 0.35,
+            upstreamTimeoutSeconds: 0.50
+        )
+        let port = try proxy.start(port: 0)
+        defer { proxy.stop() }
+
+        // 1. Stalled raw TCP client that sends partial header without CRLFCRLF must be timed out & closed promptly (< 2s)
+        let clientFD = Darwin.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+        #expect(clientFD >= 0)
+        defer { Darwin.close(clientFD) }
+
+        var rcvTimeout = timeval(tv_sec: 2, tv_usec: 0)
+        _ = setsockopt(clientFD, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+        let connectRC = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(clientFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        #expect(connectRC == 0)
+
+        let partial = Array("POST /lane/lane-timeout/codex/http/192.0.2.1/v1/responses HTTP/1.1\r\nHost: 127.0.0.1".utf8)
+        _ = partial.withUnsafeBytes { raw in
+            Darwin.write(clientFD, raw.baseAddress!, raw.count)
+        }
+
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        var drainBuf = [UInt8](repeating: 0, count: 64)
+        let readAfterStall = Darwin.read(clientFD, &drainBuf, drainBuf.count)
+        let elapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000_000.0
+        // Server must time out its read and close clientFD (EOF == 0) well before client's 2.0s SO_RCVTIMEO!
+        #expect(readAfterStall == 0)
+        #expect(elapsedSeconds < 1.6)
+
+        // 2. Tripped circuit against non-routable TEST-NET-1 (192.0.2.1) without custom transport returns HTTP 429 in < 1.5s
+        // (and if checkAdmission is mutated/broken, bounded upstreamTimeoutSeconds fails in ~0.5s with 502 instead of hanging 8+ minutes)
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.connectionProxyDictionary = [:]
+        cfg.timeoutIntervalForRequest = 2.0
+        cfg.timeoutIntervalForResource = 2.0
+        let session = URLSession(configuration: cfg)
+        defer { session.invalidateAndCancel() }
+
+        let reqURL = URL(string: "http://127.0.0.1:\(port)/lane/lane-timeout/codex/http/192.0.2.1/v1/responses")!
+        var req = URLRequest(url: reqURL)
+        req.httpMethod = "POST"
+        req.httpBody = Data(#"{"model":"gpt-5-codex"}"#.utf8)
+
+        let t1 = DispatchTime.now().uptimeNanoseconds
+        let (_, resp) = try await session.data(for: req)
+        let turnElapsed = Double(DispatchTime.now().uptimeNanoseconds - t1) / 1_000_000_000.0
+        #expect((resp as? HTTPURLResponse)?.statusCode == 429)
+        #expect(turnElapsed < 1.5)
     }
 }

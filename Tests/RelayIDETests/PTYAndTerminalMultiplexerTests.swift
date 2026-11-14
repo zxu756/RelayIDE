@@ -4,7 +4,7 @@ import RelayModels
 import RelayPTYCore
 import Testing
 
-@Suite("PTY Multiplexer, VT100 Parser, Palette, Keystrokes & Scrollback")
+@Suite("PTY Multiplexer, VT100 Parser, Palette, Keystrokes & Scrollback", .timeLimit(.minutes(1)))
 struct PTYAndTerminalMultiplexerTests {
 
     // MARK: - 1. VT100 CSI Cursor Addressing, Alternate Screen & Mode Flags

@@ -32,50 +32,61 @@ public struct WiretapBudgetStudioView: View {
     private var wiretapTopTelemetryStrip: some View {
         let analytics = viewModel.costAnalytics
         let trippedCount = viewModel.laneBudgetAccounts.filter(\.circuitOpen).count
+        let proxyRunning = viewModel.isWiretapProxyRunning
 
         return HStack(spacing: 8) {
             RelayBauhausPill(
-                viewModel.L("Loopback Proxy 127.0.0.1:43118", "本地回环代理 127.0.0.1:43118"),
-                foreground: RelayBauhausDesign.agySignalGreen,
-                background: RelayBauhausDesign.greenWash,
-                border: RelayBauhausDesign.agySignalGreen.opacity(0.5),
+                proxyRunning
+                    ? viewModel.L(
+                        "Loopback Proxy Active · Port \(viewModel.wiretapProxyPort)",
+                        "本地回环代理运行中 · 端口 \(viewModel.wiretapProxyPort)"
+                    )
+                    : viewModel.L(
+                        "Loopback Proxy Not Started (Planned M4)",
+                        "本地回环代理未启动（排在 M4）"
+                    ),
+                foreground: proxyRunning ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.graphiteInk,
+                background: proxyRunning ? RelayBauhausDesign.greenWash : RelayBauhausDesign.warmIvory,
+                border: proxyRunning ? RelayBauhausDesign.agySignalGreen.opacity(0.5) : RelayBauhausDesign.hairlineBorder,
                 symbolName: "network.badge.shield.half.filled",
                 monospaced: true
             )
 
-            RelayBauhausPill(
-                viewModel.L(
-                    "Total Spend \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))",
-                    "总消耗 \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))"
-                ),
-                foreground: RelayBauhausDesign.espressoInk,
-                background: RelayBauhausDesign.warmIvory,
-                border: RelayBauhausDesign.hairlineBorder,
-                symbolName: "dollarsign.circle",
-                monospaced: true
-            )
+            if viewModel.isDemoMode || !viewModel.laneBudgetAccounts.isEmpty {
+                RelayBauhausPill(
+                    viewModel.L(
+                        "Total Spend \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))",
+                        "总消耗 \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))"
+                    ),
+                    foreground: RelayBauhausDesign.espressoInk,
+                    background: RelayBauhausDesign.warmIvory,
+                    border: RelayBauhausDesign.hairlineBorder,
+                    symbolName: "dollarsign.circle",
+                    monospaced: true
+                )
 
-            RelayBauhausPill(
-                viewModel.L(
-                    "Cache Saved \(RelayBauhausDesign.formatUSD(analytics.totalCacheSavingsUSD))",
-                    "缓存节省 \(RelayBauhausDesign.formatUSD(analytics.totalCacheSavingsUSD))"
-                ),
-                foreground: RelayBauhausDesign.codexCobalt,
-                background: RelayBauhausDesign.cobaltWash,
-                border: RelayBauhausDesign.codexCobalt.opacity(0.45),
-                symbolName: "bolt.horizontal.circle.fill",
-                monospaced: true
-            )
+                RelayBauhausPill(
+                    viewModel.L(
+                        "Cache Saved \(RelayBauhausDesign.formatUSD(analytics.totalCacheSavingsUSD))",
+                        "缓存节省 \(RelayBauhausDesign.formatUSD(analytics.totalCacheSavingsUSD))"
+                    ),
+                    foreground: RelayBauhausDesign.codexCobalt,
+                    background: RelayBauhausDesign.cobaltWash,
+                    border: RelayBauhausDesign.codexCobalt.opacity(0.45),
+                    symbolName: "bolt.horizontal.circle.fill",
+                    monospaced: true
+                )
 
-            RelayBauhausPill(
-                viewModel.currentLanguage.isChinese
-                    ? String(format: "速率 $%.2f/时", analytics.workspaceBurnRateUSDPerHour)
-                    : String(format: "Burn $%.2f/hr", analytics.workspaceBurnRateUSDPerHour),
-                foreground: RelayBauhausDesign.graphiteInk,
-                background: RelayBauhausDesign.warmIvory,
-                border: RelayBauhausDesign.hairlineBorder,
-                monospaced: true
-            )
+                RelayBauhausPill(
+                    viewModel.currentLanguage.isChinese
+                        ? String(format: "速率 $%.2f/时", analytics.workspaceBurnRateUSDPerHour)
+                        : String(format: "Burn $%.2f/hr", analytics.workspaceBurnRateUSDPerHour),
+                    foreground: RelayBauhausDesign.graphiteInk,
+                    background: RelayBauhausDesign.warmIvory,
+                    border: RelayBauhausDesign.hairlineBorder,
+                    monospaced: true
+                )
+            }
 
             Spacer(minLength: 4)
 
@@ -750,7 +761,6 @@ public struct GuardrailPluginStudioView: View {
         let slug = manifest.id.replacingOccurrences(of: "io.relayide.", with: "")
         let isSelected = (viewModel.selectedPluginID == manifest.id)
         let latency = viewModel.pluginLatencyByID[manifest.id]
-            ?? PluginLatencySummary(p50Micros: 160, p95Micros: 295, invocationCount: 14)
         let cardFill: Color = isSelected
             ? RelayBauhausDesign.cobaltWash.opacity(0.45)
             : RelayBauhausDesign.sandstoneStrip.opacity(0.35)
@@ -833,10 +843,12 @@ public struct GuardrailPluginStudioView: View {
 
     private func pluginCapabilitiesAndLatencyRow(
         entry: RelayPolicyPackPluginEntry,
-        latency: PluginLatencySummary
+        latency: PluginLatencySummary?
     ) -> some View {
         let manifest = entry.manifest
-        let latencyText = String(format: "p50 %.0fµs · p95 %.0fµs", latency.p50Micros, latency.p95Micros)
+        let latencyText = latency.map {
+            String(format: "p50 %.0fµs · p95 %.0fµs", $0.p50Micros, $0.p95Micros)
+        } ?? viewModel.L("No runs recorded", "暂无运行记录")
         return HStack(spacing: 5) {
             ForEach(manifest.capabilities, id: \.self) { cap in
                 Text(cap.localizedLabel(in: viewModel.currentLanguage))

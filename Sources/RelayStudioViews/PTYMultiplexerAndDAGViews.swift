@@ -304,56 +304,101 @@ public struct PTYMultiplexerGridView: View {
     @ViewBuilder
     private var ptyArrangementStage: some View {
         let lanes = viewModel.lanes
-        switch viewModel.terminalLayoutPreset {
-        case .quad2x2:
-            if lanes.count >= 4 {
-                GeometryReader { geo in
-                    let colW = max(180, (geo.size.width - 8) * 0.5)
-                    let rowH = max(120, (geo.size.height - 8) * 0.5)
-                    VStack(spacing: 8) {
-                        HStack(spacing: 8) {
-                            RecessedVT100TerminalPaneView(lane: lanes[0], viewModel: viewModel, maxVisibleRows: 11)
-                                .frame(width: colW, height: rowH)
-                            RecessedVT100TerminalPaneView(lane: lanes[1], viewModel: viewModel, maxVisibleRows: 11)
-                                .frame(width: colW, height: rowH)
-                        }
-                        HStack(spacing: 8) {
-                            RecessedVT100TerminalPaneView(lane: lanes[2], viewModel: viewModel, maxVisibleRows: 11)
-                                .frame(width: colW, height: rowH)
-                            RecessedVT100TerminalPaneView(lane: lanes[3], viewModel: viewModel, maxVisibleRows: 11)
-                                .frame(width: colW, height: rowH)
+        if lanes.isEmpty {
+            emptyWorkspaceStageCard
+        } else {
+            switch viewModel.terminalLayoutPreset {
+            case .quad2x2:
+                if lanes.count >= 4 {
+                    GeometryReader { geo in
+                        let colW = max(180, (geo.size.width - 8) * 0.5)
+                        let rowH = max(120, (geo.size.height - 8) * 0.5)
+                        VStack(spacing: 8) {
+                            HStack(spacing: 8) {
+                                RecessedVT100TerminalPaneView(lane: lanes[0], viewModel: viewModel, maxVisibleRows: 11)
+                                    .frame(width: colW, height: rowH)
+                                RecessedVT100TerminalPaneView(lane: lanes[1], viewModel: viewModel, maxVisibleRows: 11)
+                                    .frame(width: colW, height: rowH)
+                            }
+                            HStack(spacing: 8) {
+                                RecessedVT100TerminalPaneView(lane: lanes[2], viewModel: viewModel, maxVisibleRows: 11)
+                                    .frame(width: colW, height: rowH)
+                                RecessedVT100TerminalPaneView(lane: lanes[3], viewModel: viewModel, maxVisibleRows: 11)
+                                    .frame(width: colW, height: rowH)
+                            }
                         }
                     }
+                } else {
+                    fallbackStack(for: lanes)
                 }
-            } else {
-                fallbackStack(for: lanes)
-            }
 
-        case .conductor1Plus3:
-            if lanes.count >= 4 {
-                let primaryLane = lanes.first(where: { $0.id == viewModel.selectedLaneID }) ?? lanes[0]
-                let secondaryLanes = lanes.filter { $0.id != primaryLane.id }
+            case .conductor1Plus3:
+                if lanes.count >= 4 {
+                    let primaryLane = lanes.first(where: { $0.id == viewModel.selectedLaneID }) ?? lanes[0]
+                    let secondaryLanes = lanes.filter { $0.id != primaryLane.id }
+                    HStack(spacing: 8) {
+                        RecessedVT100TerminalPaneView(lane: primaryLane, viewModel: viewModel, maxVisibleRows: 22)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                        VStack(spacing: 8) {
+                            ForEach(secondaryLanes) { secLane in
+                                RecessedVT100TerminalPaneView(lane: secLane, viewModel: viewModel, maxVisibleRows: 8)
+                            }
+                        }
+                        .frame(width: 340)
+                    }
+                } else {
+                    fallbackStack(for: lanes)
+                }
+
+            case .sideBySide:
                 HStack(spacing: 8) {
-                    RecessedVT100TerminalPaneView(lane: primaryLane, viewModel: viewModel, maxVisibleRows: 22)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    VStack(spacing: 8) {
-                        ForEach(secondaryLanes) { secLane in
-                            RecessedVT100TerminalPaneView(lane: secLane, viewModel: viewModel, maxVisibleRows: 8)
-                        }
+                    ForEach(lanes.prefix(2)) { lane in
+                        RecessedVT100TerminalPaneView(lane: lane, viewModel: viewModel, maxVisibleRows: 22)
                     }
-                    .frame(width: 340)
                 }
-            } else {
-                fallbackStack(for: lanes)
             }
+        }
+    }
 
-        case .sideBySide:
-            HStack(spacing: 8) {
-                ForEach(lanes.prefix(2)) { lane in
-                    RecessedVT100TerminalPaneView(lane: lane, viewModel: viewModel, maxVisibleRows: 22)
+    private var emptyWorkspaceStageCard: some View {
+        RelayBauhausCard(padding: 20) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(viewModel.L("Empty Workspace · 0 Active Lanes", "空工作区 · 当前 0 条通道"))
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(RelayBauhausDesign.espressoInk)
+
+                Text(
+                    viewModel.L(
+                        "This version (M0) does not launch coding agents yet (scheduled for M1 via agent-relay). Launch with --demo or click Load Demo Preview to inspect synthetic sample data.",
+                        "当前版本（M0）尚不会启动任何 coding agent（M1 将基于 agent-relay 接入）。传入 --demo 或点击下方按钮可载入合成演示预览数据。"
+                    )
+                )
+                .font(.system(size: 11.5))
+                .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                .fixedSize(horizontal: false, vertical: true)
+
+                Button {
+                    viewModel.loadDemoCampaign()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "play.rectangle.fill")
+                            .font(.system(size: 11, weight: .bold))
+                        Text(viewModel.L("Load Demo Preview ([DEMO])", "载入合成演示数据 ([演示数据])"))
+                            .font(.system(size: 11.5, weight: .bold))
+                    }
+                    .foregroundStyle(RelayBauhausDesign.warmIvory)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                            .fill(RelayBauhausDesign.claudeVermilion)
+                    )
+                    .fixedSize(horizontal: true, vertical: false)
                 }
+                .buttonStyle(.plain)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
     }
 

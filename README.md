@@ -1,90 +1,101 @@
-# RelayIDE `v1.1.0`
+# RelayIDE
 
 **English** | **[简体中文](README.zh-CN.md)**
 
-**Multi-Vendor Coding Agent Parallel Workbench, 3-Way Semantic AST Merger & Wiretap Budget Proxy for macOS**
+**macOS Workbench & Workspace Store for Multi-Agent Relay Workflows**
 
-![RelayIDE Multiplexer & DAG](docs/screenshot-pty-grid.png)
+`RelayIDE` is a native macOS SwiftUI workbench, SQLite workspace store, and CLI/MCP utility for inspecting isolated Git worktree lanes, topological task waves, guardrail policies, and merge artifacts. **Current status (M0): This version does not launch coding agents yet; headless multi-agent execution via `agent-relay` is scheduled for M1.**
 
-`RelayIDE v1.1.0` (pure Swift 6 across 11 isolated SwiftPM library modules + native macOS desktop executable + automated `@Test` verification suite) is a native macOS workbench for orchestrating multiple AI coding agents (`Claude Code`, `OpenAI Codex`, `Google Antigravity / agy`, and `Mistral Vibe`) concurrently across isolated Git worktrees without stepping on each other's files, blowing API budgets, or drowning in false line-level Git merge conflicts.
-
----
-
-## Highlights (`v1.1.0`)
-
-- **Live In-App `中文 / EN` Bilingual Workbench (`v1.1.0`)**: Instant zero-restart `中文 | EN` switching across every studio surface via the Bauhaus Warm Sandpaper (`#F4F2EC` / `#18181B` / `#C2410C`) toolbar segmented pill, `⇧⌘L` menu shortcut, `⌘,` Preferences selector, `--lang zh|en` / `RELAYIDE_LANG` CLI override, automatic macOS Chinese locale detection, and interactive bilingual HTML audit dossiers.
-- **4-Vendor POSIX PTY Multiplexer (`RelayPTYCore`, `5,836 LOC`)**: Direct `posix_openpt(2)` + `TIOCSWINSZ` pseudo-terminal supervisor paired with a handwritten VT100 / `xterm-256color` / 24-bit TrueColor terminal emulator, WCAG AA/AAA contrast clamping, Boyer-Moore scrollback search, Asciinema v2 `.cast` export, binary split-tree multiplexer (`2×2 Quad`, `1+3 Conductor`, `Side-by-Side`), and 60 Hz frame coalescing.
-- **3-Way Declaration-Level Semantic AST Merger (`RelaySemanticMerge`, `7,983 LOC`)**: Handwritten multi-language (`Swift`, `Python`, `TypeScript`, `Rust`, `Go`) declaration parser and 3-way semantic AST merger that auto-merges disjoint function/method/import edits where classic line-based `diff3` emits bogus conflicts, backed by Myers $O(ND)$ + Patience Diff, cross-file broken call-site arity detection, and Robert C. Martin `(Ca, Ce, I, A, D)` coupling analysis.
-- **Git Worktree Plumbing & Live Territory Guardrails (`RelayWorktreeGit`, `4,208 LOC`)**: Isolated per-lane Git worktrees, pure-Swift RFC 1950 zlib loose object inspector, `CoreServices` `FSEvents` real-time territory ownership enforcement with optional auto-revert, `.relay/LOG.md` SHA-256 handoff contracts, and worker recursion blocking.
-- **Loopback HTTP/SSE Wiretap & Per-Lane USD Circuit Breakers (`RelayWiretapProxy`, `4,413 LOC`)**: Local `127.0.0.1` HTTP/1.1 + SSE stream dissector for Anthropic Messages, OpenAI Responses, Google Gemini, and Mistral Chat streams, structure-preserving outbound secret DLP redaction, EWMA burn-rate forecasting, and automatic HTTP `429` budget circuit breakers.
-- **SQLite WAL Persistence, FTS5 Search & `JavaScriptCore` Guardrail SDK**: `.relayproj` SQLite WAL (`v1..v4` migrations), VT100-stripped FTS5 `BM25` full-text search, persistent Undo/Redo & SHA-256 workspace checkpoints, and a capability-gated `JavaScriptCore` guardrail host with built-in lifecycle plugins and microsecond latency profiling.
+![RelayIDE Synthetic Demo Preview](docs/screenshot-pty-grid.png)
+*Figure 1 (`[DEMO]`): Synthetic 4-lane preview rendered with `--demo` (`--export-screenshots`). Launching `RelayIDE` without `--demo` opens an empty workspace with `0` lanes, no terminal transcripts, no spend figures, and no active proxy.*
 
 ---
 
-## Architecture (11 SwiftPM Modules + Desktop App)
+## What Works Today (M0)
 
-| Module | LOC | Responsibility |
-|---|---:|---|
-| `RelayModels` | `1,640` | Multi-vendor roster, live `RelayLocalizer` (`zh-Hans` / `en`), VT100/TrueColor cell models, Git worktree/ownership globs, declaration AST & 3-Way Semantic Merge types, DAG & Wiretap models |
-| `RelayPTYCore` | `5,836` | POSIX `posix_openpt` process multiplexer, handwritten VT100 / `xterm-256color` / TrueColor emulator, Boyer-Moore search, `.cast` v2 codec, binary split tree |
-| `RelayWorktreeGit` | `4,208` | Git worktree lifecycle, RFC 1950 zlib loose object reader, `FSEvents` territory fence monitor, intraline diff parser, `.relay` SHA-256 handoff codec |
-| `RelaySemanticMerge` | `7,983` | 5-language (`Swift`/`Python`/`TS`/`Rust`/`Go`) declaration AST parser, **3-Way Semantic AST Merger**, Myers/Patience Diff3, broken call-site detector, Martin coupling |
-| `RelayWorkspaceStore` | `2,939` | `.relayproj` SQLite3 WAL (`v1..v4`), FTS5 `BM25` search store, crash-safe checkpoint journal, persistent infinite Undo/Redo |
-| `RelayWiretapProxy` | `4,413` | `127.0.0.1` HTTP/1.1 + 4-vendor SSE token dissector, outbound secret DLP engine, EWMA spend analytics, per-lane USD circuit breakers |
-| `RelayPluginSDK` | `1,833` | Sandboxed `JavaScriptCore` guardrail host, p50/p95/p99 microsecond profiler, built-in lifecycle plugins, `.relay-guardrails.json` policy pack codec |
-| `RelayOrchestrator` | `2,700` | Kahn topological DAG wave scheduler, Critical Path Method (`ES`/`EF`/`LS`/`LF`/slack) analyzer, quota failover controller, demo campaign synthesizer |
-| `RelayCLIAndMCP` | `710` | Headless `RelayIDE` `v1.1.0` CLI (`init`, `status`, `lanes`, `dag-waves`, `semantic-merge`, `audit-plugins`, `export-html`, `mcp`), JSON-RPC 2.0 MCP server, bilingual Hallmark HTML dossier |
-| `RelayWorkbenchShell` | `2,420` | Bauhaus Warm Sandpaper (`#F4F2EC`) + Carbon Matte (`#18181B`) shell tokens, bilingual `⌘K` fuzzy subsequence palette, two-stroke chord keybinding collision registry |
-| `RelayStudioViews` + `RelayIDE` | `7,540` | Bilingual 2×2 Live PTY Grid, Critical-Path DAG Canvas, 3-Pane Semantic AST Merge Studio, 2.5D Isometric Territory Map, Wiretap Flamechart & Guardrail Studio |
-| `RelayIDETests` | `5,840` | `129` automated Swift Testing (`@Test`) verification checks across 7 end-to-end suites |
+- **Empty-by-Default Bilingual Workbench (`中文 / EN`)**: Launching the macOS app without `--demo` starts in an honest empty state (`0` lanes, empty terminal buffers, no spend numbers, and no proxy address). Live `中文 | EN` switching works across the toolbar pill, `⇧⌘L` shortcut, `⌘,` Preferences modal, `--lang zh|en`, and `RELAYIDE_LANG=zh|en`. Passing `--demo` (or clicking **Load Demo**) loads a clearly badged `[DEMO]` synthetic preview in a temporary bundle without touching user `.relayproj` directories.
+- **`.relayproj` SQLite WAL Store, FTS5 Search & Checkpoints (`RelayWorkspaceStore`)**: Persists workspace metadata, lane records, DAG specs, merge reports, guardrail findings, FTS5 `BM25` search documents, SHA-256 checkpoints, and Undo/Redo history. Read-only CLI subcommands (`status`, `lanes`, `dag-waves`, `audit-plugins`, `export-html`, `mcp --project`) fail fast with a non-zero exit code if `--project <dir>` does not exist instead of creating directories behind the user's back.
+- **Standalone Engine Primitives (Unit-Tested Libraries)**:
+  - `RelayPTYCore`: `posix_openpt(2)` child-process PTY session wrapper, VT100 / `xterm-256color` / TrueColor screen buffer, Boyer-Moore scrollback search, and `.cast` v2 transcript codec.
+  - `RelayWorktreeGit`: `git worktree` creation/inspection plumbing, glob territory rule evaluation (`FileOwnershipRule`), and `.relay/LOG.md` handoff parsing.
+  - `RelayOrchestrator`: Kahn topological wave sort and Critical Path Method (`ES`/`EF`/`LS`/`LF`/slack) analyzer.
+  - `RelayPluginSDK`: Sandboxed `JavaScriptCore` policy-pack & hook scratchpad evaluator (`audit-plugins` and interactive GUI scratchpad).
+  - `RelayWiretapProxy`: Standalone loopback HTTP/1.1 + SSE token dissector, regex secret scanner, and in-memory budget circuit-breaker ledger.
+- **Stdio JSON-RPC 2.0 MCP Server (`2` Tools)**: `RelayIDE mcp [--project <dir>]` exposes **2 MCP tools** over stdio:
+  1. `relay_semantic_merge` (experimental declaration-level 3-way merge; returns `isError: true` on conflicts or syntax validation failure).
+  2. `relay_check_ownership` (evaluates whether a relative file path is permitted by a lane's `FileOwnershipRule` in the bound `--project` workspace).
+- **Experimental 3-Way Declaration Merge (`semantic-merge`)**:
+  - **EXPERIMENTAL: known to corrupt output on Python** (for example when unindented `def`/`class` tokens appear inside multiline triple-quoted strings or under indentation-sensitive control blocks). Disabled by default in handoff preferences before M3.
+  - Exits `0` only when there are zero unresolved conflicts **and** the host language syntax parser (`xcrun swiftc -parse`, `python3 -m py_compile`, or `node --check`) validates the merged output; exits `1` when conflict markers remain, and exits `3` with empty `stdout` when syntax verification fails.
+- **Standalone Bilingual HTML Report (`export-html`)**: Exports a single-file `中文 | EN` HTML summary from an existing `.relayproj` (stamped with `[DEMO]` / `[演示数据]` when exported from `--seed-demo` synthetic data).
 
 ---
 
-## Gallery (2x Retina `2720 × 1680`)
+## Planned Roadmap (Not Implemented in M0)
 
-| 2×2 Multi-Vendor PTY Multiplexer Grid | 3-Way Semantic AST Merge Studio |
+- **M1 (Real Multi-Agent Relay Runner)**: `RelayIDE run` spawning real `claude`, `codex`, `agy`, and `vibe` headless CLI workers in isolated Git worktrees via `.relay/` file handoff, live PTY stdout/stderr streaming, and real broadcast command execution (`⌘⇧B` currently reports `"Broadcast command is not implemented yet (M1)"`).
+- **M2 (Post-Run Git Worktree Integration & Verification Gate)**: Deterministic branch integration via `git merge-tree` / `git merge-file`, post-merge build/test verification gate, and automatic territory violation checks across real agent runs.
+- **M3 (Parser-Backed Semantic Merge)**: Replacing regex/indentation declaration heuristics with real AST parsers (`SwiftSyntax` / `tree-sitter`) across edge cases before enabling semantic merge in automated pipelines.
+- **M4 (Live Loopback Wiretap & Outbound DLP Gateway)**: Wiring `LoopbackWiretapProxyServer` into child agent `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` environment variables, enforcing live HTTP `429` budget circuit breakers, and redacting outbound secrets on live network traffic.
+
+---
+
+## Synthetic Demo Gallery (`--demo`, `[DEMO]` Fixtures)
+
+All four views below are rendered from synthetic sample data (`--export-screenshots`, which sets `loadDemoWorkspace: true`) and carry the `[DEMO]` badge in the window header:
+
+| 2x2 PTY Multiplexer Grid (`[DEMO]`) | 3-Way Semantic Merge Studio (`[DEMO]`) |
 |---|---|
-| ![PTY Grid](docs/screenshot-pty-grid.png) | ![Semantic Merge](docs/screenshot-semantic-merge.png) |
+| ![PTY Grid Demo](docs/screenshot-pty-grid.png) | ![Semantic Merge Demo](docs/screenshot-semantic-merge.png) |
 
-| 2.5D Isometric Coupling & Territory Map | Wiretap Token Flamechart & Guardrail Plugins |
+| Isometric Territory Map (`[DEMO]`) | Wiretap Telemetry & Guardrails (`[DEMO]`) |
 |---|---|
-| ![Isometric Map](docs/screenshot-territory-map.png) | ![Wiretap & Plugins](docs/screenshot-wiretap-guardrails.png) |
+| ![Territory Map Demo](docs/screenshot-territory-map.png) | ![Wiretap & Plugins Demo](docs/screenshot-wiretap-guardrails.png) |
 
 ---
 
-## Install & Usage
+## Build, Verify & Usage
 
-### Homebrew Cask
+> **Executable name**: Building from source with SwiftPM produces `.build/debug/RelayIDE` (and `./Scripts/build-app.sh` packages `build/RelayIDE.app/Contents/MacOS/RelayIDE`). Installing via Homebrew Cask (`brew install --cask zxu756/tap/relayide`) links the lowercase `relayide` CLI wrapper into `/opt/homebrew/bin/relayide`.
+
+### Build & Run Tests From Source
 
 ```bash
-brew install --cask zxu756/tap/relayide
-```
-
-### Build & Verify From Source
-
-```bash
-git clone https://github.com/zxu756/RelayIDE.git
-cd RelayIDE
-swift test --no-parallel
+swift build
+./Scripts/test.sh milestone 0
 ./Scripts/build-app.sh
-open build/RelayIDE.app
 ```
 
-### Headless CLI, Bilingual Screenshots & MCP Server
+### Headless CLI & MCP Commands
 
 ```bash
-# Seed a reproducible 4-vendor workspace bundle & export a bilingual HTML audit dossier
-relayide init --project ./demo.relayproj --seed-demo
-relayide dag-waves --project ./demo.relayproj
-relayide semantic-merge base.swift left.swift right.swift
-relayide export-html ./relay-dossier.html --project ./demo.relayproj
+# 1. Initialize an empty workspace (0 lanes) and inspect its status
+.build/debug/RelayIDE init --project /tmp/my-empty.relayproj
+.build/debug/RelayIDE status --project /tmp/my-empty.relayproj
+.build/debug/RelayIDE lanes --project /tmp/my-empty.relayproj
 
-# Export 2x Retina (2720 × 1680) workbench screenshots in English or Simplified Chinese
-relayide --export-screenshots ./docs --lang en
-relayide --export-screenshots ./docs --lang zh
+# 2. Seed an explicit [DEMO] synthetic workspace and export a [DEMO] HTML report
+.build/debug/RelayIDE init --project /tmp/demo.relayproj --seed-demo --lang en
+.build/debug/RelayIDE dag-waves --project /tmp/demo.relayproj --lang en
+.build/debug/RelayIDE audit-plugins --project /tmp/demo.relayproj --lang en
+.build/debug/RelayIDE export-html /tmp/demo-dossier.html --project /tmp/demo.relayproj --lang en
 
-# Launch stdio JSON-RPC 2.0 MCP server (relay_semantic_merge, relay_check_ownership)
-relayide mcp
+# 3. Experimental 3-way merge (exits 0 on clean valid syntax, 1 on conflict, 3 on broken syntax)
+.build/debug/RelayIDE semantic-merge base.swift left.swift right.swift
+
+# 4. Launch stdio JSON-RPC 2.0 MCP server (2 tools: relay_semantic_merge, relay_check_ownership)
+.build/debug/RelayIDE mcp --project /tmp/my-empty.relayproj
+```
+
+### Desktop GUI Launch
+
+```bash
+# Launch empty workbench (0 lanes, no synthetic data)
+build/RelayIDE.app/Contents/MacOS/RelayIDE
+
+# Launch with explicit [DEMO] synthetic preview data in English or Simplified Chinese
+build/RelayIDE.app/Contents/MacOS/RelayIDE --demo --lang en
+build/RelayIDE.app/Contents/MacOS/RelayIDE --demo --lang zh
 ```
 
 ---

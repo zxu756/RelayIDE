@@ -5,7 +5,7 @@ import RelayPluginSDK
 import RelayWorkspaceStore
 import Testing
 
-@Suite("JavaScriptCore Guardrail Plugins, Scratchpad, Policy Packs, DAG Waves, CPM & Failover")
+@Suite("JavaScriptCore Guardrail Plugins, Scratchpad, Policy Packs, DAG Waves, CPM & Failover", .timeLimit(.minutes(1)))
 struct PluginSDKAndOrchestratorCPMTests {
 
     // MARK: - 1. All 4 Built-In Guardrail Plugins Execution & Detection

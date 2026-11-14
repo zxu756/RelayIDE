@@ -15,6 +15,23 @@ public final class RelayProjectDatabase: @unchecked Sendable {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
+    public static func bundleExists(at bundleDirectoryURL: URL) -> Bool {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: bundleDirectoryURL.path, isDirectory: &isDir),
+              isDir.boolValue else {
+            return false
+        }
+        let sqlitePath = bundleDirectoryURL.appendingPathComponent("workspace.sqlite").path
+        return FileManager.default.fileExists(atPath: sqlitePath)
+    }
+
+    public static func openExisting(bundleDirectoryURL: URL) throws -> RelayProjectDatabase {
+        guard bundleExists(at: bundleDirectoryURL) else {
+            throw RelayIDEError.workspaceBundleNotFound(bundleDirectoryURL.path)
+        }
+        return try RelayProjectDatabase(bundleDirectoryURL: bundleDirectoryURL)
+    }
+
     public init(bundleDirectoryURL: URL) throws {
         self.bundleDirectoryURL = bundleDirectoryURL
         try FileManager.default.createDirectory(at: bundleDirectoryURL, withIntermediateDirectories: true)

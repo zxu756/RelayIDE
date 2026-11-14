@@ -185,6 +185,41 @@ public struct RelayStudioRootWorkbenchView: View {
 
             Spacer(minLength: 6)
 
+            if viewModel.isDemoMode {
+                RelayBauhausPill(
+                    viewModel.demoBadgeLabel,
+                    foreground: RelayBauhausDesign.warmIvory,
+                    background: RelayBauhausDesign.claudeVermilion,
+                    border: RelayBauhausDesign.espressoInk,
+                    symbolName: "sparkles.rectangle.stack.fill",
+                    monospaced: !isZh
+                )
+            } else if viewModel.lanes.isEmpty {
+                Button {
+                    viewModel.loadDemoCampaign()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "play.rectangle.fill")
+                            .font(.system(size: 10, weight: .bold))
+                        Text(viewModel.L("Load Demo", "载入演示数据"))
+                            .font(.system(size: 10.5, weight: .bold))
+                    }
+                    .foregroundStyle(RelayBauhausDesign.claudeVermilion)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                            .fill(RelayBauhausDesign.vermilionWash)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                            .strokeBorder(RelayBauhausDesign.claudeVermilion.opacity(0.65), lineWidth: 1)
+                    )
+                    .fixedSize(horizontal: true, vertical: false)
+                }
+                .buttonStyle(.plain)
+            }
+
             // Active Wave Pill
             RelayBauhausPill(
                 viewModel.activeWaveSummaryLabel,
@@ -195,18 +230,20 @@ public struct RelayStudioRootWorkbenchView: View {
                 monospaced: !isZh
             )
 
-            // Total Spend USD Pill
-            RelayBauhausPill(
-                viewModel.L(
-                    "Spend \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))",
-                    "消耗 \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))"
-                ),
-                foreground: RelayBauhausDesign.espressoInk,
-                background: RelayBauhausDesign.warmIvory,
-                border: RelayBauhausDesign.hairlineBorder,
-                symbolName: "dollarsign.circle.fill",
-                monospaced: !isZh
-            )
+            // Total Spend USD Pill (hidden when empty and non-demo so zero fake spend numbers appear)
+            if viewModel.isDemoMode || !viewModel.laneBudgetAccounts.isEmpty {
+                RelayBauhausPill(
+                    viewModel.L(
+                        "Spend \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))",
+                        "消耗 \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))"
+                    ),
+                    foreground: RelayBauhausDesign.espressoInk,
+                    background: RelayBauhausDesign.warmIvory,
+                    border: RelayBauhausDesign.hairlineBorder,
+                    symbolName: "dollarsign.circle.fill",
+                    monospaced: !isZh
+                )
+            }
 
             // Bauhaus `中文 | EN` Live Language Toggle Pill (`⇧⌘L`)
             RelayLanguageTogglePill(viewModel: viewModel)
@@ -452,15 +489,20 @@ public struct RelayStudioRootWorkbenchView: View {
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 Text(
-                    viewModel.L(
-                        "\(viewModel.checkpoints.count) checkpoints · 127.0.0.1 proxy",
-                        "\(viewModel.checkpoints.count) 个快照 · 127.0.0.1 代理"
-                    )
+                    viewModel.isWiretapProxyRunning
+                        ? viewModel.L(
+                            "\(viewModel.checkpoints.count) checkpoints · Proxy :\(viewModel.wiretapProxyPort)",
+                            "\(viewModel.checkpoints.count) 个快照 · 代理端口 \(viewModel.wiretapProxyPort)"
+                        )
+                        : viewModel.L(
+                            "\(viewModel.checkpoints.count) checkpoints · Proxy idle",
+                            "\(viewModel.checkpoints.count) 个快照 · 代理未启动"
+                        )
                 )
                 .font(.system(size: 9.5))
                 .monospacedDigit()
                 .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
-                .fixedSize(horizontal: true, vertical: false)
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(10)
@@ -553,7 +595,7 @@ public struct RelayStudioRootWorkbenchView: View {
         case .territoryMap:
             return "\(viewModel.isometricTiles.count)"
         case .wiretapBudget:
-            return RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)
+            return viewModel.laneBudgetAccounts.isEmpty ? nil : RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)
         case .guardrailPlugins:
             return "\(viewModel.policyPack.entries.count)"
         }
@@ -1022,8 +1064,8 @@ public struct RelayPreferencesModalView: View {
 
                     Toggle(
                         viewModel.L(
-                            "Redact Outbound Secrets in Loopback Proxy by Default",
-                            "默认在本地回环代理中自动脱敏外发敏感凭据"
+                            "Redact Outbound Secrets in Loopback Proxy by Default (Planned M4)",
+                            "默认在本地回环代理中自动脱敏外发敏感凭据（计划于 M4）"
                         ),
                         isOn: Binding(
                             get: { viewModel.coordinator.preferences.snapshot.outboundDLPRedactByDefault },
@@ -1034,8 +1076,8 @@ public struct RelayPreferencesModalView: View {
 
                     Toggle(
                         viewModel.L(
-                            "Auto-Run 3-Way Semantic AST Merge on .relay Handoff",
-                            "收到 .relay 交接产物时自动执行三路 AST 语义合并"
+                            "Auto-Run 3-Way Semantic AST Merge on .relay Handoff (Disabled before M3)",
+                            "收到 .relay 交接产物时自动执行三路 AST 语义合并（M3 前默认关闭）"
                         ),
                         isOn: Binding(
                             get: { viewModel.coordinator.preferences.snapshot.autoRunSemanticMergeOnHandoff },
@@ -1044,13 +1086,15 @@ public struct RelayPreferencesModalView: View {
                     )
                     .font(.system(size: 12))
 
-                    HStack {
-                        Text(viewModel.L("Global Workspace USD Budget Ceiling", "工作区全局美元预算上限"))
-                            .font(.system(size: 12, weight: .semibold))
-                        Spacer()
-                        Text(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
-                            .monospacedDigit()
+                    if viewModel.isDemoMode || viewModel.globalBudgetCeilingUSD > 0 {
+                        HStack {
+                            Text(viewModel.L("Global Workspace USD Budget Ceiling", "工作区全局美元预算上限"))
+                                .font(.system(size: 12, weight: .semibold))
+                            Spacer()
+                            Text(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .monospacedDigit()
+                        }
                     }
                 }
             }
@@ -1274,7 +1318,11 @@ public enum RelayRetinaScreenshotExporter {
                 language: resolvedLanguage,
                 persistToUserDefaults: false
             )
-            let vm = RelayStudioViewModel(initialPane: .ptyGrid, localizer: isolatedLocalizer)
+            let vm = RelayStudioViewModel(
+                initialPane: .ptyGrid,
+                localizer: isolatedLocalizer,
+                loadDemoWorkspace: true
+            )
             spec.configure(vm)
             // Ensure zero transient toasts occlude the exported Retina frame
             for t in vm.coordinator.toastCenter.visibleToasts {
