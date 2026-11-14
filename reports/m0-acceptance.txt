@@ -1,7 +1,7 @@
 ================================================================
 RelayIDE M0 Acceptance Suite
-Timestamp: 2026-11-14T06:35:18Z
-Commit:    eb9032c (branch: m0/honest; working tree clean outside reports/)
+Timestamp: 2026-11-14T06:43:13Z
+Commit:    80a3d35 (branch: m0/honest; working tree clean outside reports/)
 Tools:     git version 2.56.0; Python 3.9.6; node v22.23.4; swift-driver version: 1.168.6 Apple Swift version 6.4.2 (swiftlang-6.4.2.1.9 clang-2100.4.1.1)
 ================================================================
 
@@ -13,17 +13,17 @@ ZH para 1: `RelayIDE` 是一款原生 macOS SwiftUI 桌面工作台、SQLite 工
 --- Row 2: --help, version, status (empty project) exit 0 + [DEMO] / [演示数据] markers (EN + ZH) ---
 version (--lang en): RelayIDE 1.1.0 (macOS arm64 · Workspace Ledger, MCP Ownership Check & Experimental 3-Way Merge; M0 does not launch coding agents yet)
 version (--lang zh): RelayIDE 1.1.0 (macOS arm64 · 工作区台账、MCP 所有权校验与实验性三路合并；M0 尚未接入智能体执行)
-Empty workspace status JSON (--lang en): {"repositoryPath":"","guardrailFindingCount":0,"workspaceName":"clean-empty-en","totalSpendUSD":0,"semanticAutoMergeCount":0,"totalTokensObserved":0,"unresolvedConflictCount":0,"schemaVersion":4,"walBytes":0,"undoDepth":0,"sqliteBytes":69632,"activeLaneCount":0,"taskNodeCount":0,"redoDepth":0}
+Empty workspace status JSON (--lang en): {"undoDepth":0,"unresolvedConflictCount":0,"redoDepth":0,"taskNodeCount":0,"totalTokensObserved":0,"workspaceName":"clean-empty-en","repositoryPath":"","schemaVersion":4,"walBytes":0,"guardrailFindingCount":0,"activeLaneCount":0,"sqliteBytes":69632,"totalSpendUSD":0,"semanticAutoMergeCount":0}
 Empty workspace lanes (--lang en): ''; dag-waves: 'No DAG registered'
-Empty workspace status JSON (--lang zh): {"taskNodeCount":0,"walBytes":0,"sqliteBytes":69632,"semanticAutoMergeCount":0,"guardrailFindingCount":0,"undoDepth":0,"totalTokensObserved":0,"workspaceName":"clean-empty-zh","totalSpendUSD":0,"schemaVersion":4,"activeLaneCount":0,"unresolvedConflictCount":0,"redoDepth":0,"repositoryPath":""}
+Empty workspace status JSON (--lang zh): {"activeLaneCount":0,"taskNodeCount":0,"redoDepth":0,"walBytes":0,"repositoryPath":"","totalTokensObserved":0,"semanticAutoMergeCount":0,"guardrailFindingCount":0,"totalSpendUSD":0,"sqliteBytes":69632,"schemaVersion":4,"undoDepth":0,"workspaceName":"clean-empty-zh","unresolvedConflictCount":0}
 Empty workspace lanes (--lang zh): ''; dag-waves: '当前工作区尚未注册任何 DAG'
-EN seed output: [DEMO] Initialized synthetic demo workspace at /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/demo-en.relayproj (lanes=4, tasks=4, autoMerges=2; worktree paths, commit OIDs, and spend are synthetic preview fixtures)
-ZH seed output: [演示数据] 已在 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/demo-zh.relayproj 初始化合成演示工作区 (lanes=4, tasks=4, autoMerges=2；工作树路径、提交哈希与花费均为合成预览样本)
+EN seed output: [DEMO] Initialized synthetic demo workspace at /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.x3bQNP/demo-en.relayproj (lanes=4, tasks=4, autoMerges=2; worktree paths, commit OIDs, and spend are synthetic preview fixtures)
+ZH seed output: [演示数据] 已在 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.x3bQNP/demo-zh.relayproj 初始化合成演示工作区 (lanes=4, tasks=4, autoMerges=2；工作树路径、提交哈希与花费均为合成预览样本)
 [PASS] Row 2: --help, version, status (empty project) exit 0 (EN+ZH) and [DEMO]/[演示数据] markers verified
 
 --- Row 3: Nonexistent --project error & zero directory creation (EN + ZH) ---
-Verified nonexistent --project across 6 subcommands (--lang en, exit=1): last stderr='Workspace project bundle does not exist at '/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/does-not-exist-en-1775.relayproj' (run 'RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/does-not-exist-en-1775.relayproj' first)'
-Verified nonexistent --project across 6 subcommands (--lang zh, exit=1): last stderr='工程目录不存在或未初始化：'/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/does-not-exist-zh-14008.relayproj'（请先运行 'RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/does-not-exist-zh-14008.relayproj'）'
+Verified nonexistent --project across 6 subcommands (--lang en, exit=1): last stderr='Workspace project bundle does not exist at '/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.x3bQNP/does-not-exist-en-1087.relayproj' (run 'RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.x3bQNP/does-not-exist-en-1087.relayproj' first)'
+Verified nonexistent --project across 6 subcommands (--lang zh, exit=1): last stderr='工程目录不存在或未初始化：'/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.x3bQNP/does-not-exist-zh-28853.relayproj'（请先运行 'RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.x3bQNP/does-not-exist-zh-28853.relayproj'）'
 [PASS] Row 3: Nonexistent --project exits non-zero (1) without creating directory across all 6 project subcommands (EN+ZH)
 
 --- Row 4: semantic-merge on 09-py-triplequote + every case in Fixtures/merge-cases (EN + ZH) ---
@@ -111,7 +111,7 @@ MCP tools/list returned 2 tools: ['relay_semantic_merge', 'relay_check_ownership
 [PASS] Row 6: MCP tools/list exposes 2 tools (relay_semantic_merge, relay_check_ownership), matching README.md & README.zh-CN.md
 
 --- Row 7 & Row 8 + added row A: headless view-model tests, no preference files written ---
-✔ Test run with 40 tests in 2 suites passed after 23.904 seconds.
+✔ Test run with 40 tests in 2 suites passed after 28.029 seconds.
 passed: RelayStudioViewModel starts completely empty without --demo in both EN and ZH (Row 7)
 [PASS] Row 7: default RelayStudioViewModel (no --demo) has 0 lanes, no terminal content, no spend, no proxy address (EN+ZH, headless)
 passed: Opening an empty user .relayproj in RelayStudioViewModel never seeds demo lanes into disk DB (Row 8)

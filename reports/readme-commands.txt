@@ -1,7 +1,7 @@
 ================================================================
 RelayIDE README.md & README.zh-CN.md command replay
-Timestamp: 2026-11-14T06:36:00Z
-Commit:    eb9032c (working tree clean outside reports/)
+Timestamp: 2026-11-14T06:44:04Z
+Commit:    80a3d35 (working tree clean outside reports/)
 ================================================================
 
 README command sets agree: <repo>/README.md, <repo>/README.zh-CN.md (3 bash blocks, 18 commands each)
@@ -45,44 +45,47 @@ SKIP-GUI       README.zh-CN.md:132: build/RelayIDE.app/Contents/MacOS/RelayIDE -
 + swift build
 Building for debugging...
 [Computing dependencies]
+[Pre-planning 1 / 675]
+[Planning deferred tasks]
+[12 / 53]
 [13 / 54] RelayModels
 [15 / 55] RelayModels
-[27 / 89] RelayWorkspaceStore
+[27 / 89] RelayPTYCore
 [37 / 94] RelayWorkspaceStore
-[58 / 91] RelayWiretapProxy-product
-[73 / 96] RelayPluginSDK
+[58 / 91] RelayPTYCore
+[73 / 96] RelaySemanticMerge-product
 [75 / 97] RelayPluginSDK
 [84 / 110] RelayOrchestrator
 [88 / 112] RelayOrchestrator
 [96 / 118] RelayCLIAndMCP
-[105 / 118] RelayCLIAndMCP-product
+[104 / 118] RelayCLIAndMCP
 [113 / 124] RelayStudioViews
 [115 / 125] RelayStudioViews
 [125 / 128] RelayStudioViews-product
 [128 / 130] RelayIDE-product
 [129 / 130] RelayIDE-product
-Build complete! (3.22秒)
+Build complete! (3.61秒)
 + printf %s ''
 --- README.md bash block 2: executing 12 command(s) verbatim
 ++ mktemp -d
-+ WORK=/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq
-+ .build/debug/RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/my-empty.relayproj
-Initialized /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/my-empty.relayproj (lanes=0, tasks=0, autoMerges=0)
-+ .build/debug/RelayIDE status --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/my-empty.relayproj
-{"repositoryPath":"","guardrailFindingCount":0,"totalSpendUSD":0,"undoDepth":0,"activeLaneCount":0,"walBytes":0,"totalTokensObserved":0,"unresolvedConflictCount":0,"redoDepth":0,"schemaVersion":4,"sqliteBytes":69632,"workspaceName":"my-empty","semanticAutoMergeCount":0,"taskNodeCount":0}
-+ .build/debug/RelayIDE lanes --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/my-empty.relayproj
-+ .build/debug/RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/demo.relayproj --seed-demo --lang en
-[DEMO] Initialized synthetic demo workspace at /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/demo.relayproj (lanes=4, tasks=4, autoMerges=2; worktree paths, commit OIDs, and spend are synthetic preview fixtures)
-+ .build/debug/RelayIDE dag-waves --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/demo.relayproj --lang en
++ WORK=/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz
++ .build/debug/RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/my-empty.relayproj
+Initialized /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/my-empty.relayproj (lanes=0, tasks=0, autoMerges=0)
++ .build/debug/RelayIDE status --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/my-empty.relayproj
+{"totalTokensObserved":0,"semanticAutoMergeCount":0,"activeLaneCount":0,"undoDepth":0,"redoDepth":0,"sqliteBytes":69632,"unresolvedConflictCount":0,"repositoryPath":"","guardrailFindingCount":0,"walBytes":0,"workspaceName":"my-empty","schemaVersion":4,"taskNodeCount":0,"totalSpendUSD":0}
++ .build/debug/RelayIDE lanes --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/my-empty.relayproj
++ .build/debug/RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/demo.relayproj --seed-demo --lang en
+[DEMO] Initialized synthetic demo workspace at /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/demo.relayproj (lanes=4, tasks=4, autoMerges=2; worktree paths, commit OIDs, and spend are synthetic preview fixtures)
++ .build/debug/RelayIDE dag-waves --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/demo.relayproj --lang en
 Wave 1: stage-1-ledger [claude], stage-1-tax [codex]
 Wave 2: stage-2-gateway [agy]
 Wave 3: stage-3-verify [vibe]
-+ .build/debug/RelayIDE audit-plugins --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/demo.relayproj --lang en
++ .build/debug/RelayIDE audit-plugins --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/demo.relayproj --lang en
 [PASS] AST Conventional Commit Synthesizer: Synthesized Conventional Commit · feat(multi-lane): integrate BillingEngine, vatInvariant
 [WARNING] Test Coverage Gate Enforcer: Production AST modified without companion Tests/ update · Lane 'lane-codex-tax' modified 1 AST symbols under Sources/ without touching Tests/.
 [WARNING] Test Coverage Gate Enforcer: Production AST modified without companion Tests/ update · Lane 'lane-claude-core' modified 1 AST symbols under Sources/ without touching Tests/.
-+ .build/debug/RelayIDE export-html /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/demo-dossier.html --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/demo.relayproj --lang en
-Exported standalone HTML dossier to /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/demo-dossier.html
++ .build/debug/RelayIDE export-html /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/demo-dossier.html --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/demo.relayproj --lang en
+Exported standalone HTML dossier to /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/demo-dossier.html
 + .build/debug/RelayIDE semantic-merge Fixtures/merge-cases/20-py-decorator-added/base.py Fixtures/merge-cases/20-py-decorator-added/left.py Fixtures/merge-cases/20-py-decorator-added/right.py --lang en
 import functools
 
@@ -121,38 +124,37 @@ semantic-merge: [strategy=none] the output is the conflict-marked git merge-file
 + echo 'semantic-merge exit code: 1'
 semantic-merge exit code: 1
 + printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-+ .build/debug/RelayIDE mcp --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq/my-empty.relayproj --lang en
-{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","serverInfo":{"version":"1.1.0","name":"relayide-mcp","projectPath":"\/var\/folders\/d5\/4h6nzhm94l91870kmn7p8q040000gn\/T\/tmp.C0Igug7VCq\/my-empty.relayproj"},"capabilities":{"tools":{}}},"id":1}
-{"result":{"tools":[{"name":"relay_semantic_merge","inputSchema":{"properties":{"left":{"type":"string"},"right":{"type":"string"},"path":{"type":"string"},"base":{"type":"string"}},"required":["path","base","left","right"],"type":"object"},"description":"EXPERIMENTAL 3-way merge of base, left and right anchored on git merge-file. Returns git's line-level result when git merges cleanly. When git reports conflicts, both sides are kept verbatim only if every conflict block is a both-sides insertion at the same place, the declaration-level engine agrees, and the result passes the language syntax check; otherwise isError is true and the text is git's conflict-marked output. The declaration-level engine alone is known to corrupt Python and Swift output, so its text is never returned. isError is also true when the merged text fails the syntax check or git is unavailable."},{"name":"relay_check_ownership","inputSchema":{"properties":{"relativePath":{"type":"string"},"allowedGlobs":{"items":{"type":"string"},"type":"array"},"laneID":{"type":"string"}},"required":["relativePath"],"type":"object"},"description":"Verify whether a relative file path is permitted by allowedGlobs or by a registered laneID in the bound --project workspace."}]},"id":2,"jsonrpc":"2.0"}
-+ printf %s /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.C0Igug7VCq
++ .build/debug/RelayIDE mcp --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz/my-empty.relayproj --lang en
+{"result":{"serverInfo":{"projectPath":"\/var\/folders\/d5\/4h6nzhm94l91870kmn7p8q040000gn\/T\/tmp.irlaWZu7oz\/my-empty.relayproj","name":"relayide-mcp","version":"1.1.0"},"capabilities":{"tools":{}},"protocolVersion":"2024-11-05"},"jsonrpc":"2.0","id":1}
+{"result":{"tools":[{"name":"relay_semantic_merge","inputSchema":{"properties":{"right":{"type":"string"},"path":{"type":"string"},"base":{"type":"string"},"left":{"type":"string"}},"type":"object","required":["path","base","left","right"]},"description":"EXPERIMENTAL 3-way merge of base, left and right anchored on git merge-file. Returns git's line-level result when git merges cleanly. When git reports conflicts, both sides are kept verbatim only if every conflict block is a both-sides insertion at the same place, the declaration-level engine agrees, and the result passes the language syntax check; otherwise isError is true and the text is git's conflict-marked output. The declaration-level engine alone is known to corrupt Python and Swift output, so its text is never returned. isError is also true when the merged text fails the syntax check or git is unavailable."},{"name":"relay_check_ownership","description":"Verify whether a relative file path is permitted by allowedGlobs or by a registered laneID in the bound --project workspace.","inputSchema":{"properties":{"allowedGlobs":{"type":"array","items":{"type":"string"}},"relativePath":{"type":"string"},"laneID":{"type":"string"}},"type":"object","required":["relativePath"]}}]},"jsonrpc":"2.0","id":2}
++ printf %s /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.irlaWZu7oz
 --- README.md bash block 3: nothing to execute
 --- README.zh-CN.md bash block 1: executing 1 command(s) verbatim
 + swift build
 Building for debugging...
 [Computing dependencies]
-[1 / 4]
-Build complete! (0.52秒)
+Build complete! (0.37秒)
 + printf %s ''
 --- README.zh-CN.md bash block 2: executing 12 command(s) verbatim
 ++ mktemp -d
-+ WORK=/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF
-+ .build/debug/RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/my-empty.relayproj --lang zh
-已初始化空工作区 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/my-empty.relayproj (lanes=0, tasks=0, autoMerges=0)
-+ .build/debug/RelayIDE status --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/my-empty.relayproj --lang zh
-{"unresolvedConflictCount":0,"walBytes":0,"schemaVersion":4,"workspaceName":"my-empty","guardrailFindingCount":0,"totalTokensObserved":0,"activeLaneCount":0,"semanticAutoMergeCount":0,"undoDepth":0,"totalSpendUSD":0,"sqliteBytes":69632,"redoDepth":0,"repositoryPath":"","taskNodeCount":0}
-+ .build/debug/RelayIDE lanes --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/my-empty.relayproj --lang zh
-+ .build/debug/RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/demo.relayproj --seed-demo --lang zh
-[演示数据] 已在 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/demo.relayproj 初始化合成演示工作区 (lanes=4, tasks=4, autoMerges=2；工作树路径、提交哈希与花费均为合成预览样本)
-+ .build/debug/RelayIDE dag-waves --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/demo.relayproj --lang zh
++ WORK=/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB
++ .build/debug/RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/my-empty.relayproj --lang zh
+已初始化空工作区 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/my-empty.relayproj (lanes=0, tasks=0, autoMerges=0)
++ .build/debug/RelayIDE status --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/my-empty.relayproj --lang zh
+{"semanticAutoMergeCount":0,"totalTokensObserved":0,"redoDepth":0,"taskNodeCount":0,"guardrailFindingCount":0,"unresolvedConflictCount":0,"totalSpendUSD":0,"repositoryPath":"","schemaVersion":4,"sqliteBytes":69632,"undoDepth":0,"workspaceName":"my-empty","walBytes":0,"activeLaneCount":0}
++ .build/debug/RelayIDE lanes --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/my-empty.relayproj --lang zh
++ .build/debug/RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/demo.relayproj --seed-demo --lang zh
+[演示数据] 已在 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/demo.relayproj 初始化合成演示工作区 (lanes=4, tasks=4, autoMerges=2；工作树路径、提交哈希与花费均为合成预览样本)
++ .build/debug/RelayIDE dag-waves --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/demo.relayproj --lang zh
 波次 1: stage-1-ledger [claude], stage-1-tax [codex]
 波次 2: stage-2-gateway [agy]
 波次 3: stage-3-verify [vibe]
-+ .build/debug/RelayIDE audit-plugins --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/demo.relayproj --lang zh
++ .build/debug/RelayIDE audit-plugins --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/demo.relayproj --lang zh
 [通过] AST 约定式提交生成器: 已生成约定式提交建议 · feat(multi-lane): 集成多通道符号 BillingEngine, vatInvariant
 [警告] 测试覆盖率门禁守卫: 修改生产环境 AST 符号但未同步补充 Tests/ 测试 · 通道 'lane-codex-tax' 修改了 Sources/ 下的 1 个 AST 符号，但未同步更新 Tests/ 测试套件。
 [警告] 测试覆盖率门禁守卫: 修改生产环境 AST 符号但未同步补充 Tests/ 测试 · 通道 'lane-claude-core' 修改了 Sources/ 下的 1 个 AST 符号，但未同步更新 Tests/ 测试套件。
-+ .build/debug/RelayIDE export-html /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/demo-dossier.html --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/demo.relayproj --lang zh
-已导出独立 HTML 报告至 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/demo-dossier.html
++ .build/debug/RelayIDE export-html /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/demo-dossier.html --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/demo.relayproj --lang zh
+已导出独立 HTML 报告至 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/demo-dossier.html
 + .build/debug/RelayIDE semantic-merge Fixtures/merge-cases/20-py-decorator-added/base.py Fixtures/merge-cases/20-py-decorator-added/left.py Fixtures/merge-cases/20-py-decorator-added/right.py --lang zh
 import functools
 
@@ -191,10 +193,10 @@ semantic-merge: [strategy=none] 输出是 git merge-file 带冲突标记的结�
 + echo 'semantic-merge exit code: 1'
 semantic-merge exit code: 1
 + printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-+ .build/debug/RelayIDE mcp --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF/my-empty.relayproj --lang zh
-{"id":1,"result":{"capabilities":{"tools":{}},"serverInfo":{"version":"1.1.0","name":"relayide-mcp","projectPath":"\/var\/folders\/d5\/4h6nzhm94l91870kmn7p8q040000gn\/T\/tmp.NKRjHZ4xYF\/my-empty.relayproj"},"protocolVersion":"2024-11-05"},"jsonrpc":"2.0"}
-{"id":2,"result":{"tools":[{"description":"EXPERIMENTAL 3-way merge of base, left and right anchored on git merge-file. Returns git's line-level result when git merges cleanly. When git reports conflicts, both sides are kept verbatim only if every conflict block is a both-sides insertion at the same place, the declaration-level engine agrees, and the result passes the language syntax check; otherwise isError is true and the text is git's conflict-marked output. The declaration-level engine alone is known to corrupt Python and Swift output, so its text is never returned. isError is also true when the merged text fails the syntax check or git is unavailable.","inputSchema":{"type":"object","required":["path","base","left","right"],"properties":{"left":{"type":"string"},"base":{"type":"string"},"right":{"type":"string"},"path":{"type":"string"}}},"name":"relay_semantic_merge"},{"name":"relay_check_ownership","description":"Verify whether a relative file path is permitted by allowedGlobs or by a registered laneID in the bound --project workspace.","inputSchema":{"properties":{"allowedGlobs":{"type":"array","items":{"type":"string"}},"laneID":{"type":"string"},"relativePath":{"type":"string"}},"required":["relativePath"],"type":"object"}}]},"jsonrpc":"2.0"}
-+ printf %s /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.NKRjHZ4xYF
++ .build/debug/RelayIDE mcp --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB/my-empty.relayproj --lang zh
+{"id":1,"jsonrpc":"2.0","result":{"serverInfo":{"version":"1.1.0","name":"relayide-mcp","projectPath":"\/var\/folders\/d5\/4h6nzhm94l91870kmn7p8q040000gn\/T\/tmp.8hcphdWrVB\/my-empty.relayproj"},"protocolVersion":"2024-11-05","capabilities":{"tools":{}}}}
+{"id":2,"result":{"tools":[{"name":"relay_semantic_merge","inputSchema":{"type":"object","required":["path","base","left","right"],"properties":{"base":{"type":"string"},"path":{"type":"string"},"left":{"type":"string"},"right":{"type":"string"}}},"description":"EXPERIMENTAL 3-way merge of base, left and right anchored on git merge-file. Returns git's line-level result when git merges cleanly. When git reports conflicts, both sides are kept verbatim only if every conflict block is a both-sides insertion at the same place, the declaration-level engine agrees, and the result passes the language syntax check; otherwise isError is true and the text is git's conflict-marked output. The declaration-level engine alone is known to corrupt Python and Swift output, so its text is never returned. isError is also true when the merged text fails the syntax check or git is unavailable."},{"name":"relay_check_ownership","description":"Verify whether a relative file path is permitted by allowedGlobs or by a registered laneID in the bound --project workspace.","inputSchema":{"properties":{"laneID":{"type":"string"},"allowedGlobs":{"items":{"type":"string"},"type":"array"},"relativePath":{"type":"string"}},"type":"object","required":["relativePath"]}}]},"jsonrpc":"2.0"}
++ printf %s /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T/tmp.8hcphdWrVB
 --- README.zh-CN.md bash block 3: nothing to execute
 every runnable README command exited 0
 
