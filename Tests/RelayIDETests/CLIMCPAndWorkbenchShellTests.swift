@@ -2,6 +2,7 @@ import Foundation
 import RelayCLIAndMCP
 import RelayModels
 import RelayOrchestrator
+import RelaySemanticMerge
 import RelayWorkbenchShell
 import RelayWorkspaceStore
 import Testing
@@ -16,6 +17,21 @@ struct CLIMCPAndWorkbenchShellTests {
             .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    /// A real `UserDefaults` instance for one test whose plist lives inside a fresh temporary directory.
+    /// CFPreferences stores a domain whose name is an absolute path at that path, so nothing is written to
+    /// `~/Library/Preferences`. (A named suite leaves an empty plist behind there even after `removePersistentDomain`.)
+    private func makeIsolatedUserDefaults(label: String) throws -> (defaults: UserDefaults, storageDirectory: URL, cleanup: () -> Void) {
+        let directory = try makeIsolatedTempDirectory(prefix: "relay-defaults-\(label)")
+        let domainPath = directory.appendingPathComponent("io.relayide.tests.\(label)").path
+        let defaults = try #require(UserDefaults(suiteName: domainPath))
+        let cleanup: () -> Void = {
+            defaults.removePersistentDomain(forName: domainPath)
+            defaults.synchronize()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        return (defaults, directory, cleanup)
     }
 
     // MARK: - 1. `RelayCLIRunner` Help, Version & Unknown Subcommand Error
@@ -287,10 +303,10 @@ struct CLIMCPAndWorkbenchShellTests {
 
     @Test("RelayKeybindingAndShortcutRegistry default bindings contain zero blocking chord collisions")
     @MainActor
-    func defaultKeybindingRegistryHasZeroBlockingCollisions() {
-        let suiteName = "io.relayide.tests.keymap.defaults.\(UUID().uuidString)"
-        let isolatedDefaults = UserDefaults(suiteName: suiteName)!
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+    func defaultKeybindingRegistryHasZeroBlockingCollisions() throws {
+        let isolated = try makeIsolatedUserDefaults(label: "keymap.defaults")
+        defer { isolated.cleanup() }
+        let isolatedDefaults = isolated.defaults
 
         let registry = RelayKeybindingAndShortcutRegistry(
             userDefaults: isolatedDefaults,
@@ -305,10 +321,10 @@ struct CLIMCPAndWorkbenchShellTests {
 
     @Test("RelayKeybindingAndShortcutRegistry detects identical chord collisions, prefix shadowing, and macOS reserved shortcuts")
     @MainActor
-    func keybindingCollisionPrefixShadowingAndReservedSystemWarnings() {
-        let suiteName = "io.relayide.tests.keymap.conflicts.\(UUID().uuidString)"
-        let isolatedDefaults = UserDefaults(suiteName: suiteName)!
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+    func keybindingCollisionPrefixShadowingAndReservedSystemWarnings() throws {
+        let isolated = try makeIsolatedUserDefaults(label: "keymap.conflicts")
+        defer { isolated.cleanup() }
+        let isolatedDefaults = isolated.defaults
 
         let cmdA = RelayShortcutBinding(
             commandID: "cmd.alpha",
@@ -371,9 +387,9 @@ struct CLIMCPAndWorkbenchShellTests {
     @Test("RelayKeybindingAndShortcutRegistry dispatches two-stroke chords and round-trips exported keymap JSON")
     @MainActor
     func keybindingTwoStrokeDispatchAndKeymapJSONRoundTrip() throws {
-        let suiteName = "io.relayide.tests.keymap.dispatch.\(UUID().uuidString)"
-        let isolatedDefaults = UserDefaults(suiteName: suiteName)!
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let isolated = try makeIsolatedUserDefaults(label: "keymap.dispatch")
+        defer { isolated.cleanup() }
+        let isolatedDefaults = isolated.defaults
 
         let twoStroke = RelayShortcutBinding(
             commandID: "merge.acceptVerified",
@@ -519,9 +535,9 @@ struct CLIMCPAndWorkbenchShellTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let prefsFile = tempDir.appendingPathComponent("prefs.json")
-        let suiteName = "io.relayide.tests.prefs.\(UUID().uuidString)"
-        let isolatedDefaults = UserDefaults(suiteName: suiteName)!
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let isolated = try makeIsolatedUserDefaults(label: "prefs")
+        defer { isolated.cleanup() }
+        let isolatedDefaults = isolated.defaults
 
         let tokens = BauhausColorThemeTokens.bauhausStandard
         #expect(tokens.chromeWarmSandpaperHex.hasPrefix("#"))
@@ -549,9 +565,9 @@ struct CLIMCPAndWorkbenchShellTests {
         let tempDir = try makeIsolatedTempDirectory(prefix: "relay-coord")
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        let suiteName = "io.relayide.tests.coord.\(UUID().uuidString)"
-        let isolatedDefaults = UserDefaults(suiteName: suiteName)!
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let isolated = try makeIsolatedUserDefaults(label: "coord")
+        defer { isolated.cleanup() }
+        let isolatedDefaults = isolated.defaults
 
         let prefs = RelayUserPreferences(
             backingFileURL: tempDir.appendingPathComponent("coord-prefs.json"),
@@ -588,9 +604,9 @@ struct CLIMCPAndWorkbenchShellTests {
     @Test("RelayLocalizer resolves --lang, RELAYIDE_LANG, UserDefaults, and Chinese Locale fallback, and toggles live")
     @MainActor
     func relayLocalizerResolutionPrecedenceAndLiveToggle() throws {
-        let suiteName = "io.relayide.tests.localizer.\(UUID().uuidString)"
-        let isolatedDefaults = UserDefaults(suiteName: suiteName)!
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let isolated = try makeIsolatedUserDefaults(label: "localizer")
+        defer { isolated.cleanup() }
+        let isolatedDefaults = isolated.defaults
 
         // 1. Auto-detect Chinese when Locale.preferredLanguages starts with "zh"
         let autoZh = RelayLocalizer.resolveLanguage(
@@ -740,11 +756,15 @@ struct CLIMCPAndWorkbenchShellTests {
         let cli = RelayCLIRunner()
         let helpEN = await cli.executeCommand(arguments: ["--help", "--lang", "en"])
         #expect(helpEN.exitCode == 0)
-        #expect(helpEN.stdout.contains("EXPERIMENTAL: known to corrupt output on Python"))
+        #expect(helpEN.stdout.contains("EXPERIMENTAL 3-way merge anchored on git merge-file"))
+        #expect(helpEN.stdout.contains("known to corrupt Python and Swift output, so its text is never printed"))
+        #expect(helpEN.stdout.contains("Exit codes: 0 clean; 1 conflict"))
 
         let helpZH = await cli.executeCommand(arguments: ["--help", "--lang", "zh"])
         #expect(helpZH.exitCode == 0)
-        #expect(helpZH.stdout.contains("【实验性】已知会在 Python 代码上损坏输出"))
+        #expect(helpZH.stdout.contains("【实验性】以 git merge-file 为准的三路合并"))
+        #expect(helpZH.stdout.contains("已知会损坏 Python 和 Swift 的输出，所以它的文本从不输出"))
+        #expect(helpZH.stdout.contains("退出码：0 无冲突；1 有冲突"))
 
         let demoENPath = tempDir.appendingPathComponent("DemoEN.relayproj").path
         let initEN = await cli.executeCommand(arguments: ["init", "--project", demoENPath, "--seed-demo", "--lang", "en"])
@@ -764,8 +784,8 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(html.contains("[演示数据]"))
     }
 
-    @Test("semantic-merge CLI and MCP exit 1 on conflicts and exit 3 with empty stdout when language syntax check fails")
-    func semanticMergeConflictExit1AndBrokenPythonSyntaxExit3() async throws {
+    @Test("semantic-merge CLI and MCP exit 1 with git's conflict text on a true conflict, and merge the former Python corruption case (09) cleanly")
+    func semanticMergeConflictExit1AndFormerPythonCorruptionCaseMergesCleanly() async throws {
         let tempDir = try makeIsolatedTempDirectory(prefix: "relay-cli-merge-gates")
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -783,8 +803,9 @@ struct CLIMCPAndWorkbenchShellTests {
         let cli = RelayCLIRunner()
         let conflictRes = await cli.executeCommand(arguments: ["semantic-merge", cBase.path, cLeft.path, cRight.path, "--lang", "en"])
         #expect(conflictRes.exitCode == 1)
-        #expect(conflictRes.stdout.contains("<<<<<<<"))
-        #expect(!conflictRes.stderr.isEmpty)
+        #expect(conflictRes.stdout == "public func compute() -> Int {\n<<<<<<< left\n    return 10\n=======\n    return 20\n>>>>>>> right\n}\n")
+        #expect(conflictRes.stdoutIsVerbatim)
+        #expect(conflictRes.stderr.contains("[strategy=none]"))
 
         let mcp = RelayMCPServer()
         let mcpConflictReq: [String: Any] = [
@@ -800,7 +821,9 @@ struct CLIMCPAndWorkbenchShellTests {
         let mcpConflictRes = (try JSONSerialization.jsonObject(with: Data(mcpConflictReply.utf8)) as? [String: Any])?["result"] as? [String: Any]
         #expect(mcpConflictRes?["isError"] as? Bool == true)
 
-        // 2. Python triple-quote silent corruption case (R10 / case 09) -> CLI exit 3 with ZERO stdout bytes, MCP isError: true
+        // 2. Python triple-quote case (R10 / case 09). The declaration engine used to corrupt this file, so M0 answered
+        //    exit 3. git merges it cleanly and the result is valid Python, so the guarded merge now returns exactly
+        //    git's text with exit 0 (CLI) and isError: false (MCP).
         let pBase = tempDir.appendingPathComponent("base.py")
         let pLeft = tempDir.appendingPathComponent("left.py")
         let pRight = tempDir.appendingPathComponent("right.py")
@@ -847,15 +870,20 @@ struct CLIMCPAndWorkbenchShellTests {
         try pyLeftSrc.write(to: pLeft, atomically: true, encoding: .utf8)
         try pyRightSrc.write(to: pRight, atomically: true, encoding: .utf8)
 
+        let expectedMergedPython = pyBaseSrc
+            .replacingOccurrences(of: "return 1", with: "return 10")
+            .replacingOccurrences(of: "return 2", with: "return 20")
+
         let pyResEN = await cli.executeCommand(arguments: ["semantic-merge", pBase.path, pLeft.path, pRight.path, "--lang", "en"])
-        #expect(pyResEN.exitCode == 3)
-        #expect(pyResEN.stdout.isEmpty)
-        #expect(pyResEN.stderr.lowercased().contains("syntax"))
+        #expect(pyResEN.exitCode == 0)
+        #expect(pyResEN.stdout == expectedMergedPython)
+        #expect(pyResEN.stderr.contains("[strategy=line-level]"))
+        #expect(pyResEN.stderr.contains("py_compile"))
 
         let pyResZH = await cli.executeCommand(arguments: ["semantic-merge", pBase.path, pLeft.path, pRight.path, "--lang", "zh"])
-        #expect(pyResZH.exitCode == 3)
-        #expect(pyResZH.stdout.isEmpty)
-        #expect(pyResZH.stderr.contains("语法"))
+        #expect(pyResZH.exitCode == 0)
+        #expect(pyResZH.stdout == expectedMergedPython)
+        #expect(pyResZH.stderr.contains("行级合并"))
 
         let mcpPyReq: [String: Any] = [
             "jsonrpc": "2.0",
@@ -868,7 +896,8 @@ struct CLIMCPAndWorkbenchShellTests {
         ]
         let mcpPyReply = mcp.handleJSONRPCLine(String(decoding: try JSONSerialization.data(withJSONObject: mcpPyReq), as: UTF8.self))!
         let mcpPyRes = (try JSONSerialization.jsonObject(with: Data(mcpPyReply.utf8)) as? [String: Any])?["result"] as? [String: Any]
-        #expect(mcpPyRes?["isError"] as? Bool == true)
+        #expect(mcpPyRes?["isError"] as? Bool == false)
+        #expect(((mcpPyRes?["content"] as? [[String: Any]])?.first?["text"] as? String) == expectedMergedPython)
     }
 
     @Test("RelayMCPServer binds --project ownership rules and RelayUserPreferences disables auto-semantic-merge before M3")
@@ -906,5 +935,631 @@ struct CLIMCPAndWorkbenchShellTests {
         let defaultSnapshot = RelayUserPreferencesSnapshot()
         #expect(defaultSnapshot.autoRunSemanticMergeOnHandoff == false)
         #expect(defaultSnapshot.outboundDLPRedactByDefault == false)
+    }
+
+    // MARK: - 19. M0 Rework (C1): Acceptance Scripts Must Never Launch the Desktop GUI
+
+    private static var repositoryRootURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
+    private func runTool(
+        _ executable: String,
+        _ arguments: [String],
+        environment: [String: String]? = nil,
+        currentDirectory: URL? = nil
+    ) throws -> (exitCode: Int32, stdout: String, stderr: String) {
+        let raw = try runToolRaw(executable, arguments, environment: environment, currentDirectory: currentDirectory)
+        return (raw.exitCode, String(decoding: raw.stdout, as: UTF8.self), raw.stderr)
+    }
+
+    private func runToolRaw(
+        _ executable: String,
+        _ arguments: [String],
+        environment: [String: String]? = nil,
+        currentDirectory: URL? = nil
+    ) throws -> (exitCode: Int32, stdout: Data, stderr: String) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: executable)
+        proc.arguments = arguments
+        if let environment { proc.environment = environment }
+        if let currentDirectory { proc.currentDirectoryURL = currentDirectory }
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        proc.standardInput = FileHandle.nullDevice
+        try proc.run()
+        // Drain both pipes concurrently so a chatty child can never block on a full pipe buffer.
+        final class DataBox: @unchecked Sendable { var data = Data() }
+        let outBox = DataBox()
+        let errBox = DataBox()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global().async {
+            outBox.data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        group.enter()
+        DispatchQueue.global().async {
+            errBox.data = errPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        proc.waitUntilExit()
+        group.wait()
+        return (proc.terminationStatus, outBox.data, String(decoding: errBox.data, as: UTF8.self))
+    }
+
+    @Test("Acceptance scripts reach the product binary only through the headless-subcommand wrapper (C1)")
+    func acceptanceScriptsOnlyReachProductBinaryThroughHeadlessWrapper() throws {
+        let scriptsDir = Self.repositoryRootURL.appendingPathComponent("Scripts", isDirectory: true)
+        let wrapperURL = scriptsDir.appendingPathComponent("acceptance/relay-cli.sh")
+        #expect(FileManager.default.isExecutableFile(atPath: wrapperURL.path), "Scripts/acceptance/relay-cli.sh must exist and be executable")
+
+        // 1. No script other than the wrapper (and the .app packager, which only copies the file) may name the raw binary.
+        let rawBinaryMarkers = [".build/debug/RelayIDE", ".build/release/RelayIDE", "Contents/MacOS/RelayIDE", "${BIN}", "$BIN", "--show-bin-path"]
+        let enumerator = try #require(FileManager.default.enumerator(at: scriptsDir, includingPropertiesForKeys: nil))
+        var offending: [String] = []
+        for case let fileURL as URL in enumerator {
+            let name = fileURL.lastPathComponent
+            guard name.hasSuffix(".sh") || name.hasSuffix(".py") else { continue }
+            if name == "relay-cli.sh" || name == "build-app.sh" { continue }
+            let text = try String(contentsOf: fileURL, encoding: .utf8)
+            for (idx, line) in text.components(separatedBy: "\n").enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("#") { continue }
+                for marker in rawBinaryMarkers where line.contains(marker) {
+                    offending.append("\(name):\(idx + 1): \(trimmed)")
+                }
+            }
+        }
+        #expect(offending.isEmpty, "Scripts must call Scripts/acceptance/relay-cli.sh instead of the raw binary: \(offending)")
+
+        // 2. The wrapper refuses every invocation that would fall through to the desktop GUI, and forwards headless subcommands.
+        //    RELAY_CLI_BIN points at /usr/bin/true so this test can never start the real application.
+        let stubEnv = ["RELAY_CLI_BIN": "/usr/bin/true", "PATH": "/usr/bin:/bin"]
+        let refused: [[String]] = [
+            [],
+            ["--demo"],
+            ["--lang", "en"],
+            ["--project", "Some.relayproj"],
+            ["--lang", "zh", "--project", "Some.relayproj"],
+            ["Some.relayproj"],
+            ["--export-screenshots", "out"],
+            ["semantic_merge", "a", "b", "c"]
+        ]
+        for args in refused {
+            let res = try runTool("/bin/bash", [wrapperURL.path] + args, environment: stubEnv)
+            #expect(res.exitCode == 64, "wrapper must refuse \(args), got exit \(res.exitCode)")
+            #expect(res.stderr.contains("refusing"), "wrapper must explain the refusal for \(args)")
+        }
+        let forwarded: [[String]] = [
+            ["status", "--project", "X.relayproj"],
+            ["--lang", "zh", "lanes"],
+            ["--lang=en", "semantic-merge", "a", "b", "c"],
+            ["--help"],
+            ["version"],
+            ["mcp"]
+        ]
+        for args in forwarded {
+            let res = try runTool("/bin/bash", [wrapperURL.path] + args, environment: stubEnv)
+            #expect(res.exitCode == 0, "wrapper must forward \(args), got exit \(res.exitCode): \(res.stderr)")
+        }
+    }
+
+    // MARK: - 20. M0 Rework (R28): `semantic-merge` Is Anchored on `git merge-file` and Never Loses or Alters Lines
+
+    private struct MergeFixture {
+        let name: String
+        let directory: URL
+        let fileExtension: String
+        let expectedExit: Int32
+        let expectedStrategy: String
+
+        var baseURL: URL { directory.appendingPathComponent("base.\(fileExtension)") }
+        var leftURL: URL { directory.appendingPathComponent("left.\(fileExtension)") }
+        var rightURL: URL { directory.appendingPathComponent("right.\(fileExtension)") }
+        var expectedMergedURL: URL { directory.appendingPathComponent("expected.\(fileExtension)") }
+    }
+
+    private static var mergeFixturesRootURL: URL {
+        repositoryRootURL.appendingPathComponent("Fixtures/merge-cases", isDirectory: true)
+    }
+
+    /// Reads `Fixtures/merge-cases/EXPECTED.tsv` (case, expected exit code, expected strategy) and checks that it
+    /// lists exactly the case directories that exist.
+    private func loadMergeFixtures() throws -> [MergeFixture] {
+        let root = Self.mergeFixturesRootURL
+        let manifest = try String(contentsOf: root.appendingPathComponent("EXPECTED.tsv"), encoding: .utf8)
+        var fixtures: [MergeFixture] = []
+        for line in manifest.components(separatedBy: "\n") {
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            let cols = line.components(separatedBy: "\t")
+            try #require(cols.count >= 3, "malformed EXPECTED.tsv line: \(line)")
+            let dir = root.appendingPathComponent(cols[0], isDirectory: true)
+            let entries = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            let baseName = try #require(entries.first { $0.hasPrefix("base.") }, "no base.* in \(cols[0])")
+            fixtures.append(
+                MergeFixture(
+                    name: cols[0],
+                    directory: dir,
+                    fileExtension: (baseName as NSString).pathExtension,
+                    expectedExit: try #require(Int32(cols[1])),
+                    expectedStrategy: cols[2]
+                )
+            )
+        }
+        let onDisk = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { name in
+                var isDir: ObjCBool = false
+                return FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path, isDirectory: &isDir) && isDir.boolValue
+            }
+            .sorted()
+        #expect(fixtures.map(\.name).sorted() == onDisk, "EXPECTED.tsv must list every directory in Fixtures/merge-cases")
+        return fixtures
+    }
+
+    /// Plain `git merge-file -p` with default settings, run outside any repository and without user configuration.
+    private func referenceGitMergeFile(_ fixture: MergeFixture) throws -> (conflicts: Int32, output: Data) {
+        let scratch = try makeIsolatedTempDirectory(prefix: "relay-git-reference")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let res = try runToolRaw(
+            "/usr/bin/env",
+            ["git", "merge-file", "-p", "-L", "left", "-L", "base", "-L", "right",
+             fixture.leftURL.path, fixture.baseURL.path, fixture.rightURL.path],
+            environment: [
+                "PATH": ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin",
+                "HOME": scratch.path,
+                "LC_ALL": "C",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null"
+            ],
+            currentDirectory: scratch
+        )
+        try #require(res.exitCode >= 0 && res.exitCode <= 127, "reference git merge-file failed for \(fixture.name): \(res.stderr)")
+        return (res.exitCode, res.stdout)
+    }
+
+    private func linesKeepingTerminators(_ data: Data) -> [Data] {
+        var lines: [Data] = []
+        var current = Data()
+        for byte in data {
+            current.append(byte)
+            if byte == 0x0A {
+                lines.append(current)
+                current = Data()
+            }
+        }
+        if !current.isEmpty { lines.append(current) }
+        return lines
+    }
+
+    /// Language-independent bookkeeping on whole lines (blank lines count, bytes compared exactly):
+    /// every line a side added relative to base is still there, and no line was invented.
+    private func expectNoLostOrInventedLines(base: Data, left: Data, right: Data, merged: Data, caseName: String) {
+        func counts(_ data: Data) -> [Data: Int] {
+            var table: [Data: Int] = [:]
+            for line in linesKeepingTerminators(data) { table[line, default: 0] += 1 }
+            return table
+        }
+        let b = counts(base), l = counts(left), r = counts(right), m = counts(merged)
+        for (side, table) in [("left", l), ("right", r)] {
+            for (line, count) in table {
+                let added = count - (b[line] ?? 0)
+                if added > 0 {
+                    #expect((m[line] ?? 0) >= added, "\(caseName): a line added by \(side) is missing from the output: \(String(decoding: line, as: UTF8.self).debugDescription)")
+                }
+            }
+        }
+        for (line, count) in m {
+            #expect(count <= (l[line] ?? 0) + (r[line] ?? 0), "\(caseName): the output contains a line neither side has: \(String(decoding: line, as: UTF8.self).debugDescription)")
+        }
+    }
+
+    @Test("semantic-merge on every Fixtures/merge-cases case equals git merge-file, or a verified keep-both-insertions merge (R28)")
+    func semanticMergeFixtureSweepMatchesGitOrVerifiedUnion() async throws {
+        let fixtures = try loadMergeFixtures()
+        #expect(fixtures.count >= 26)
+        let cli = RelayCLIRunner()
+        for fixture in fixtures {
+            let base = try Data(contentsOf: fixture.baseURL)
+            let left = try Data(contentsOf: fixture.leftURL)
+            let right = try Data(contentsOf: fixture.rightURL)
+            let reference = try referenceGitMergeFile(fixture)
+            let result = await cli.executeCommand(arguments: ["semantic-merge", fixture.baseURL.path, fixture.leftURL.path, fixture.rightURL.path])
+            let stdout = Data(result.stdout.utf8)
+
+            #expect(result.exitCode == fixture.expectedExit, "\(fixture.name): expected exit \(fixture.expectedExit), got \(result.exitCode); stderr: \(result.stderr)")
+
+            switch result.exitCode {
+            case 0:
+                expectNoLostOrInventedLines(base: base, left: left, right: right, merged: stdout, caseName: fixture.name)
+                if reference.conflicts == 0 {
+                    #expect(stdout == reference.output, "\(fixture.name): git merges this cleanly, so the output must be git's text byte for byte")
+                    #expect(fixture.expectedStrategy == "line-level")
+                } else {
+                    // git reports a conflict here. Exit 0 is only acceptable for the hand-written expected merge.
+                    let expected = try Data(contentsOf: fixture.expectedMergedURL)
+                    #expect(stdout == expected, "\(fixture.name): output differs from the hand-written expected merge")
+                    #expect(fixture.expectedStrategy == "declaration-level")
+                }
+            case 1:
+                #expect(reference.conflicts > 0, "\(fixture.name): exit 1 although git merges this cleanly")
+                #expect(stdout == reference.output, "\(fixture.name): on conflict the output must be git's conflict-marked text byte for byte")
+                #expect(!FileManager.default.fileExists(atPath: fixture.expectedMergedURL.path), "\(fixture.name): stale expected.* next to a case that ends in conflict")
+            default:
+                Issue.record("\(fixture.name): unexpected exit code \(result.exitCode); stderr: \(result.stderr)")
+            }
+        }
+    }
+
+    @Test("semantic-merge keeps an added decorator, an added attribute and a multi-line string literal intact (R28 repro cases 20 and 21)")
+    func semanticMergeKeepsDecoratorAttributeAndMultilineString() async throws {
+        let root = Self.mergeFixturesRootURL
+        let cli = RelayCLIRunner()
+
+        let py = root.appendingPathComponent("20-py-decorator-added")
+        let pyRes = await cli.executeCommand(arguments: [
+            "semantic-merge", py.appendingPathComponent("base.py").path, py.appendingPathComponent("left.py").path, py.appendingPathComponent("right.py").path
+        ])
+        #expect(pyRes.exitCode == 0)
+        #expect(pyRes.stdout == "import functools\n\n\ndef f(x):\n    return x + 100\n\n\n@functools.lru_cache\ndef g(x):\n    return x * 2\n")
+
+        let sw = root.appendingPathComponent("21-swift-attribute-and-multiline-string")
+        let swRes = await cli.executeCommand(arguments: [
+            "semantic-merge", sw.appendingPathComponent("base.swift").path, sw.appendingPathComponent("left.swift").path, sw.appendingPathComponent("right.swift").path
+        ])
+        #expect(swRes.exitCode == 0)
+        #expect(swRes.stdout == "let sql = \"\"\"\nSELECT a\nFROM t\nWHERE x = 1\n\"\"\"\n\nfunc f() -> Int {\n    return 10\n}\n\n@discardableResult\nfunc g() -> Int {\n    return 2\n}\n")
+    }
+
+    @Test("relay_semantic_merge over MCP returns the same text and error flag as the CLI (R28)")
+    func mcpSemanticMergeMirrorsGuardedCLI() async throws {
+        // One case per kind of outcome; the full sweep above already covers every case through the CLI.
+        let representative: Set<String> = [
+            "01-swift-samefunc-difflines",          // line-level, syntax-checked
+            "02-swift-both-add-func",               // declaration-level
+            "12-swift-true-conflict",               // conflict that touches base lines
+            "20-py-decorator-added",                // R28 repro
+            "21-swift-attribute-and-multiline-string", // R28 repro
+            "24-py-decorator-vs-insert-above",      // engine disagrees -> conflict
+            "28-rs-attributes-git-clean",           // line-level, no syntax checker
+            "29-rs-both-add-fn",                    // conflict, no syntax checker
+            "33-swift-no-final-newline-both-add"    // declaration-level, no final newline
+        ]
+        let fixtures = try loadMergeFixtures().filter { representative.contains($0.name) }
+        #expect(fixtures.count == representative.count)
+        let cli = RelayCLIRunner()
+        let server = RelayMCPServer()
+        var sawClean = false
+        var sawConflict = false
+        for fixture in fixtures {
+            let cliResult = await cli.executeCommand(arguments: ["semantic-merge", fixture.baseURL.path, fixture.leftURL.path, fixture.rightURL.path])
+            let request: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": [
+                    "name": "relay_semantic_merge",
+                    "arguments": [
+                        "path": "merged.\(fixture.fileExtension)",
+                        "base": try String(contentsOf: fixture.baseURL, encoding: .utf8),
+                        "left": try String(contentsOf: fixture.leftURL, encoding: .utf8),
+                        "right": try String(contentsOf: fixture.rightURL, encoding: .utf8)
+                    ]
+                ]
+            ]
+            let reply = try #require(server.handleJSONRPCLine(String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self)))
+            let result = try #require((try JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])?["result"] as? [String: Any])
+            let text = (result["content"] as? [[String: Any]])?.first?["text"] as? String ?? ""
+            let isError = result["isError"] as? Bool
+            if cliResult.exitCode == 0 {
+                sawClean = true
+                #expect(isError == false, "\(fixture.name): CLI exit 0 but MCP isError != false")
+                #expect(text == cliResult.stdout, "\(fixture.name): MCP text differs from CLI stdout")
+            } else {
+                sawConflict = sawConflict || cliResult.exitCode == 1
+                #expect(isError == true, "\(fixture.name): CLI exit \(cliResult.exitCode) but MCP isError != true")
+                if cliResult.exitCode == 1 {
+                    #expect(text == cliResult.stdout, "\(fixture.name): MCP conflict text differs from CLI stdout")
+                }
+            }
+        }
+        #expect(sawClean && sawConflict)
+    }
+
+    @Test("semantic-merge refuses to merge and exits 4 with empty stdout when git is not on PATH (R28)")
+    func semanticMergeRefusesWithoutGit() async throws {
+        let emptyDir = try makeIsolatedTempDirectory(prefix: "relay-no-git-path")
+        defer { try? FileManager.default.removeItem(at: emptyDir) }
+        let fixture = Self.mergeFixturesRootURL.appendingPathComponent("20-py-decorator-added")
+        let args = [
+            "semantic-merge", fixture.appendingPathComponent("base.py").path, fixture.appendingPathComponent("left.py").path, fixture.appendingPathComponent("right.py").path
+        ]
+        for lang in ["en", "zh"] {
+            let res = await RelayCLIRunner().executeCommand(arguments: args + ["--lang", lang], environment: ["PATH": emptyDir.path])
+            #expect(res.exitCode == 4, "--lang \(lang): expected exit 4 without git, got \(res.exitCode)")
+            #expect(res.stdout.isEmpty)
+            #expect(res.stderr.contains("git"))
+        }
+    }
+
+    // MARK: - 21. M0 Rework (C2): Tests Never Write Into the User's Preferences Folder
+
+    private func relayPreferenceFilesInUserLibrary() -> Set<String> {
+        let prefsDir = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Preferences")
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: prefsDir)) ?? []
+        return Set(names.filter { $0.hasPrefix("io.relayide.") || $0.hasPrefix("io.github.zxu756.RelayIDE") })
+    }
+
+    @Test("UserDefaults used by tests are stored in a temporary directory, never in ~/Library/Preferences (C2)")
+    func testUserDefaultsNeverTouchUserPreferencesFolder() throws {
+        let before = relayPreferenceFilesInUserLibrary()
+
+        let isolated = try makeIsolatedUserDefaults(label: "probe")
+        isolated.defaults.set("zh-Hans", forKey: "language")
+        isolated.defaults.set(Data([1, 2, 3]), forKey: "blob")
+        isolated.defaults.synchronize()
+        #expect(isolated.defaults.string(forKey: "language") == "zh-Hans")
+
+        let stored = try FileManager.default.contentsOfDirectory(atPath: isolated.storageDirectory.path)
+        #expect(stored.contains { $0.hasSuffix(".plist") }, "the defaults plist must be written inside the test's temporary directory, found: \(stored)")
+        #expect(relayPreferenceFilesInUserLibrary() == before, "a test wrote a preference file into ~/Library/Preferences")
+
+        isolated.cleanup()
+        #expect(!FileManager.default.fileExists(atPath: isolated.storageDirectory.path))
+        #expect(relayPreferenceFilesInUserLibrary() == before)
+
+        // No test may construct a named suite or touch the standard domain directly: the helper above is the only door.
+        let testsDir = Self.repositoryRootURL.appendingPathComponent("Tests", isDirectory: true)
+        let enumerator = try #require(FileManager.default.enumerator(at: testsDir, includingPropertiesForKeys: nil))
+        var suiteConstructions = 0
+        var standardDomainUses: [String] = []
+        for case let fileURL as URL in enumerator where fileURL.pathExtension == "swift" {
+            let text = try String(contentsOf: fileURL, encoding: .utf8)
+            suiteConstructions += text.components(separatedBy: "UserDefaults(" + "suiteName:").count - 1
+            if text.contains("UserDefaults." + "standard") {
+                standardDomainUses.append(fileURL.lastPathComponent)
+            }
+        }
+        #expect(suiteConstructions == 1, "only makeIsolatedUserDefaults may construct a UserDefaults suite")
+        #expect(standardDomainUses.isEmpty, "tests must not use the standard defaults domain: \(standardDomainUses)")
+    }
+
+    // MARK: - 22. M0 Rework (R29): Syntax Gate per Language (clean line merge that does not parse -> exit 3)
+
+    /// Each case in `Fixtures/syntax-gate-cases` has three versions that parse on their own and that git merges
+    /// without conflict into text that does not parse. The only thing standing between that text and exit 0 is the
+    /// syntax check of that language.
+    private func expectSyntaxGateRejects(caseName: String, fileExtension: String, parserFragment: String) async throws {
+        let dir = Self.repositoryRootURL.appendingPathComponent("Fixtures/syntax-gate-cases/\(caseName)", isDirectory: true)
+        let fixture = MergeFixture(name: caseName, directory: dir, fileExtension: fileExtension, expectedExit: 3, expectedStrategy: "none")
+        let base = try String(contentsOf: fixture.baseURL, encoding: .utf8)
+        let left = try String(contentsOf: fixture.leftURL, encoding: .utf8)
+        let right = try String(contentsOf: fixture.rightURL, encoding: .utf8)
+
+        // Preconditions: each side is valid on its own and git sees no conflict.
+        for (label, source) in [("base", base), ("left", left), ("right", right)] {
+            let verdict = LanguageSyntaxValidator.validate(source: source, filePath: fixture.baseURL.path)
+            #expect(verdict.passed, "\(caseName): \(label) must parse on its own: \(verdict.diagnostic)")
+            #expect(verdict.parserUsed?.contains(parserFragment) == true, "\(caseName): expected parser containing '\(parserFragment)', got \(verdict.parserUsed ?? "nil")")
+        }
+        let reference = try referenceGitMergeFile(fixture)
+        #expect(reference.conflicts == 0, "\(caseName): git must merge this case cleanly")
+        let gitMerged = String(decoding: reference.output, as: UTF8.self)
+        #expect(!LanguageSyntaxValidator.validate(source: gitMerged, filePath: fixture.baseURL.path).passed, "\(caseName): git's clean merge must not parse, otherwise this case tests nothing")
+
+        let cli = RelayCLIRunner()
+        for lang in ["en", "zh"] {
+            let res = await cli.executeCommand(arguments: ["semantic-merge", fixture.baseURL.path, fixture.leftURL.path, fixture.rightURL.path, "--lang", lang])
+            #expect(res.exitCode == 3, "\(caseName) --lang \(lang): merged text does not parse, expected exit 3, got \(res.exitCode)")
+            #expect(res.stdout.isEmpty, "\(caseName) --lang \(lang): nothing may be printed when the syntax check fails")
+            #expect(res.stderr.contains(parserFragment), "\(caseName) --lang \(lang): stderr should name the parser: \(res.stderr)")
+            #expect(res.stderr.contains(lang == "en" ? "syntax check" : "语法检查"))
+        }
+
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": [
+                "name": "relay_semantic_merge",
+                "arguments": ["path": "merged.\(fileExtension)", "base": base, "left": left, "right": right]
+            ]
+        ]
+        let reply = try #require(RelayMCPServer().handleJSONRPCLine(String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self)))
+        let result = try #require((try JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])?["result"] as? [String: Any])
+        #expect(result["isError"] as? Bool == true, "\(caseName): MCP must flag the syntax failure")
+        let texts = (result["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        #expect(texts.count == 1, "\(caseName): MCP must return only the error message")
+        #expect(texts.first?.contains(parserFragment) == true)
+        #expect(!texts.contains { $0.contains(gitMerged) }, "\(caseName): MCP must not return the unparsable merged text")
+    }
+
+    @Test("semantic-merge exits 3 with empty stdout when a clean line merge is not valid Swift (R29)")
+    func semanticMergeSwiftSyntaxGateExits3() async throws {
+        try await expectSyntaxGateRejects(caseName: "swift-string-delimiters", fileExtension: "swift", parserFragment: "swiftc -parse")
+    }
+
+    @Test("semantic-merge exits 3 with empty stdout when a clean line merge is not valid JavaScript (R29)")
+    func semanticMergeJavaScriptSyntaxGateExits3() async throws {
+        try await expectSyntaxGateRejects(caseName: "javascript-block-comment", fileExtension: "js", parserFragment: "node --check")
+    }
+
+    @Test("semantic-merge exits 3 with empty stdout when a clean line merge is not valid TypeScript (R29)")
+    func semanticMergeTypeScriptSyntaxGateExits3() async throws {
+        // The parser name depends on the host: `tsc --noEmit` when tsc is installed, node's type stripping otherwise.
+        let hasTSC = LanguageSyntaxValidator.validate(source: "const x: number = 1;\n", filePath: "probe.ts").parserUsed?.contains("tsc") == true
+        try await expectSyntaxGateRejects(caseName: "typescript-block-comment", fileExtension: "ts", parserFragment: hasTSC ? "tsc" : "node")
+    }
+
+    @Test("semantic-merge exits 3 with empty stdout when a clean line merge is not valid Python (R29 companion)")
+    func semanticMergePythonSyntaxGateExits3() async throws {
+        try await expectSyntaxGateRejects(caseName: "python-string-delimiters", fileExtension: "py", parserFragment: "py_compile")
+    }
+
+    // MARK: - 23. M0 Rework (R28): Output Bytes, Notes, Unreadable Input and Missing git over MCP
+
+    @Test("semantic-merge marks stdout as verbatim, reports the strategy in EN and ZH, and rejects unreadable or non-UTF-8 input with exit 2")
+    func semanticMergeVerbatimStdoutNotesAndInputErrors() async throws {
+        let root = Self.mergeFixturesRootURL
+        let cli = RelayCLIRunner()
+
+        // Line-level result on an extension without a syntax checker: clean, flagged as not syntax-checked.
+        let rs = root.appendingPathComponent("28-rs-attributes-git-clean")
+        let rsArgs = ["semantic-merge", rs.appendingPathComponent("base.rs").path, rs.appendingPathComponent("left.rs").path, rs.appendingPathComponent("right.rs").path]
+        let rsEN = await cli.executeCommand(arguments: rsArgs)
+        #expect(rsEN.exitCode == 0)
+        #expect(rsEN.stdoutIsVerbatim)
+        #expect(rsEN.stdout.contains("#[derive(Debug, Clone)]\npub struct Point {"))
+        #expect(rsEN.stdout.contains("    #[inline]\n    pub fn origin() -> Point {"))
+        #expect(rsEN.stderr.contains("[strategy=line-level]"))
+        #expect(rsEN.stderr.contains("no syntax checker for .rs files, output was not syntax-checked"))
+        let rsZH = await cli.executeCommand(arguments: rsArgs + ["--lang", "zh"])
+        #expect(rsZH.stderr.contains(".rs 文件没有语法检查器，输出未做语法检查"))
+
+        // Conflict on an extension without a syntax checker: the declaration engine is never consulted.
+        let rsConflict = root.appendingPathComponent("29-rs-both-add-fn")
+        let rsConflictRes = await cli.executeCommand(arguments: [
+            "semantic-merge", rsConflict.appendingPathComponent("base.rs").path, rsConflict.appendingPathComponent("left.rs").path, rsConflict.appendingPathComponent("right.rs").path
+        ])
+        #expect(rsConflictRes.exitCode == 1)
+        #expect(rsConflictRes.stdout.contains("<<<<<<< left\n"))
+        #expect(rsConflictRes.stdout.contains(">>>>>>> right\n"))
+        #expect(rsConflictRes.stderr.contains("no syntax checker is available for .rs files"))
+
+        // Declaration-level result: both insertions kept, stated in both languages.
+        let both = root.appendingPathComponent("02-swift-both-add-func")
+        let bothArgs = ["semantic-merge", both.appendingPathComponent("base.swift").path, both.appendingPathComponent("left.swift").path, both.appendingPathComponent("right.swift").path]
+        let bothEN = await cli.executeCommand(arguments: bothArgs)
+        #expect(bothEN.exitCode == 0)
+        #expect(bothEN.stdoutIsVerbatim)
+        #expect(bothEN.stderr.contains("[strategy=declaration-level]"))
+        #expect(bothEN.stderr.contains("swiftc -parse"))
+        let bothZH = await cli.executeCommand(arguments: bothArgs + ["--lang", "zh"])
+        #expect(bothZH.stderr.contains("[strategy=declaration-level]"))
+        #expect(bothZH.stderr.contains("两边内容已原样保留"))
+
+        // Unreadable and non-UTF-8 input are usage errors (exit 2), never "conflict" (exit 1).
+        let tempDir = try makeIsolatedTempDirectory(prefix: "relay-merge-input-errors")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let good = tempDir.appendingPathComponent("good.txt")
+        try "a\n".write(to: good, atomically: true, encoding: .utf8)
+        let missing = tempDir.appendingPathComponent("missing.txt").path
+        let missingRes = await cli.executeCommand(arguments: ["semantic-merge", good.path, missing, good.path])
+        #expect(missingRes.exitCode == 2)
+        #expect(missingRes.stdout.isEmpty)
+        #expect(missingRes.stderr.contains("missing.txt"))
+
+        let latin1 = tempDir.appendingPathComponent("latin1.txt")
+        try Data([0x63, 0x61, 0x66, 0xE9, 0x0A]).write(to: latin1)
+        let latin1Res = await cli.executeCommand(arguments: ["semantic-merge", good.path, latin1.path, good.path])
+        #expect(latin1Res.exitCode == 2)
+        #expect(latin1Res.stdout.isEmpty)
+        #expect(latin1Res.stderr.contains("UTF-8"))
+    }
+
+    @Test("relay_semantic_merge returns isError: true and no merged text when git is not on PATH (R28)")
+    func mcpSemanticMergeRefusesWithoutGit() throws {
+        let emptyDir = try makeIsolatedTempDirectory(prefix: "relay-mcp-no-git-path")
+        defer { try? FileManager.default.removeItem(at: emptyDir) }
+        let server = RelayMCPServer(environment: ["PATH": emptyDir.path])
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": [
+                "name": "relay_semantic_merge",
+                "arguments": ["path": "a.py", "base": "x = 1\n", "left": "x = 2\n", "right": "x = 1\n"]
+            ]
+        ]
+        let reply = try #require(server.handleJSONRPCLine(String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self)))
+        let result = try #require((try JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])?["result"] as? [String: Any])
+        #expect(result["isError"] as? Bool == true)
+        let texts = (result["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        #expect(texts.count == 1)
+        #expect(texts.first?.contains("git") == true)
+        #expect(texts.first?.contains("x = 2") == false)
+    }
+
+    // MARK: - 24. M0 Rework (C4): README Commands Are Replayed From the README Files, and the Two Files Agree
+
+    private func runReadmeReplay(_ arguments: [String]) throws -> (exitCode: Int32, stdout: String, stderr: String) {
+        let script = Self.repositoryRootURL.appendingPathComponent("Scripts/acceptance/readme_replay.py").path
+        return try runTool("/usr/bin/python3", [script] + arguments, currentDirectory: Self.repositoryRootURL)
+    }
+
+    @Test("readme-commands.sh replays the commands found in README.md and README.zh-CN.md instead of a hand-kept copy (C4)")
+    func readmeCommandsAreTakenFromTheReadmeFiles() throws {
+        let root = Self.repositoryRootURL
+
+        // 1. The shell script holds no product command of its own: it only hands both READMEs to the replay tool.
+        let shellScript = try String(contentsOf: root.appendingPathComponent("Scripts/acceptance/readme-commands.sh"), encoding: .utf8)
+        #expect(shellScript.contains("readme_replay.py"))
+        for handCopied in ["--seed-demo", "semantic-merge", "dag-waves", "audit-plugins", "export-html", "tools/list"] {
+            #expect(!shellScript.contains(handCopied), "readme-commands.sh still carries its own copy of a README command: \(handCopied)")
+        }
+
+        // 2. The real READMEs agree with each other, every command is classified, and nothing that opens the GUI is runnable.
+        let listing = try runReadmeReplay(["--list", "README.md", "README.zh-CN.md"])
+        #expect(listing.exitCode == 0, "\(listing.stdout)\(listing.stderr)")
+        let lines = listing.stdout.components(separatedBy: "\n")
+        let runnable = lines.filter { $0.hasPrefix("RUN ") }
+        #expect(runnable.count >= 20)
+        #expect(!runnable.contains { $0.contains(".app/Contents/MacOS") || $0.contains("--demo") })
+        #expect(lines.filter { $0.hasPrefix("SKIP-GUI") }.count == 6)
+        #expect(!listing.stdout.contains("UNKNOWN"))
+
+        // 3. Every fixture file a README example names exists, so the examples can be run exactly as written.
+        var missing: [String] = []
+        for line in runnable {
+            for token in line.components(separatedBy: " ") where token.hasPrefix("Fixtures/") {
+                if !FileManager.default.fileExists(atPath: root.appendingPathComponent(token).path) {
+                    missing.append(token)
+                }
+            }
+        }
+        #expect(missing.isEmpty, "README examples name files that are not in the repository: \(missing)")
+        #expect(runnable.filter { $0.contains(" semantic-merge ") }.allSatisfy { $0.contains("Fixtures/merge-cases/") })
+
+        // 4. The tool notices when the two READMEs drift apart, and refuses commands it has no rule for.
+        let scratch = try makeIsolatedTempDirectory(prefix: "relay-readme-replay")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        func write(_ name: String, _ commands: [String]) throws -> String {
+            let url = scratch.appendingPathComponent(name)
+            try ("# doc\n\n```bash\n" + commands.joined(separator: "\n") + "\n```\n").write(to: url, atomically: true, encoding: .utf8)
+            return url.path
+        }
+        let en = try write("en.md", [".build/debug/RelayIDE status --project p.relayproj", ".build/debug/RelayIDE lanes --project p.relayproj"])
+        let zhSame = try write("zh-same.md", [".build/debug/RelayIDE status --project p.relayproj --lang zh", ".build/debug/RelayIDE lanes --lang=zh --project p.relayproj"])
+        let zhDrifted = try write("zh-drifted.md", [".build/debug/RelayIDE status --project p.relayproj --lang zh", ".build/debug/RelayIDE dag-waves --project p.relayproj --lang zh"])
+        #expect(try runReadmeReplay(["--list", en, zhSame]).exitCode == 0)
+        let drift = try runReadmeReplay(["--list", en, zhDrifted])
+        #expect(drift.exitCode == 1)
+        #expect(drift.stdout.contains("differs between"))
+
+        let unknown = try write("unknown.md", ["rm -rf build"])
+        let unknownResult = try runReadmeReplay(["--list", unknown])
+        #expect(unknownResult.exitCode == 1)
+        #expect(unknownResult.stdout.contains("UNKNOWN"))
+
+        // 5. Anything that would open the desktop window is classified SKIP-GUI, never RUN.
+        let gui = try write("gui.md", [
+            ".build/debug/RelayIDE",
+            ".build/debug/RelayIDE --demo",
+            ".build/debug/RelayIDE --lang zh --project p.relayproj",
+            ".build/debug/RelayIDE semantic_merge a b c",
+            ".build/debug/RelayIDE status --export-screenshots out",
+            "build/RelayIDE.app/Contents/MacOS/RelayIDE status",
+            "printf x | relayide --demo"
+        ])
+        let guiResult = try runReadmeReplay(["--list", gui])
+        #expect(guiResult.exitCode == 0)
+        let guiLines = guiResult.stdout.components(separatedBy: "\n").filter { $0.contains("gui.md:") }
+        #expect(guiLines.count == 7)
+        #expect(guiLines.allSatisfy { $0.hasPrefix("SKIP-GUI") }, "\(guiLines)")
     }
 }

@@ -1,6 +1,6 @@
 import Foundation
 import RelayModels
-import RelaySemanticMerge
+@testable import RelaySemanticMerge
 import Testing
 
 @Suite("3-Way Semantic AST Merger, Myers/Diff3, Conflict Resolution, Call-Site & Isometric Coupling", .timeLimit(.minutes(1)))
@@ -1063,5 +1063,231 @@ struct SemanticASTMergeAndCouplingTests {
         )
         #expect(bothGreen.decision == .selectedHigherQualityGreenLane)
         #expect(bothGreen.winningLaneID == "lane-a")
+    }
+
+    // MARK: - 23. M0 Rework (R28): `LineAnchoredGuardedMerger` (git merge-file as the anchor, the engine only as referee)
+
+    private var pathGitMerger: LineAnchoredGuardedMerger {
+        LineAnchoredGuardedMerger(environment: ProcessInfo.processInfo.environment)
+    }
+
+    private func makeScratchDirectory(prefix: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test("LineAnchoredGuardedMerger returns git's line-level text when git merges cleanly")
+    func guardedMergerReturnsGitLineResultWhenClean() throws {
+        let base = "import functools\n\n\ndef f(x):\n    return x + 1\n\n\ndef g(x):\n    return x * 2\n"
+        let left = base.replacingOccurrences(of: "return x + 1", with: "return x + 100")
+        let right = base.replacingOccurrences(of: "def g(x):", with: "@functools.lru_cache\ndef g(x):")
+        let outcome = pathGitMerger.merge(relativePath: "calc.py", baseSource: base, leftSource: left, rightSource: right)
+        #expect(outcome == .clean(
+            mergedText: "import functools\n\n\ndef f(x):\n    return x + 100\n\n\n@functools.lru_cache\ndef g(x):\n    return x * 2\n",
+            strategy: .lineLevel,
+            syntaxParser: "python3 -m py_compile",
+            resolvedConflictBlocks: 0
+        ))
+    }
+
+    @Test("LineAnchoredGuardedMerger keeps both insertions using git's bytes, not the engine's reformatted text")
+    func guardedMergerAssemblesBothInsertionsFromGitBytes() throws {
+        // A multi-line string with a blank line in it, and members that are not separated by blank lines.
+        let base = "struct S {\n    let banner = \"\"\"\n        Title\n\n        end\n        \"\"\"\n    func a() -> Int { 1 }\n}\n"
+        let left = base.replacingOccurrences(of: "    func a() -> Int { 1 }\n", with: "    func a() -> Int { 1 }\n    @discardableResult\n    func l() -> Int { 2 }\n")
+        let right = base.replacingOccurrences(of: "    func a() -> Int { 1 }\n", with: "    func a() -> Int { 1 }\n    func r() -> Int { 3 }\n")
+        let expected = "struct S {\n    let banner = \"\"\"\n        Title\n\n        end\n        \"\"\"\n    func a() -> Int { 1 }\n    @discardableResult\n    func l() -> Int { 2 }\n    func r() -> Int { 3 }\n}\n"
+
+        let outcome = pathGitMerger.merge(relativePath: "S.swift", baseSource: base, leftSource: left, rightSource: right)
+        #expect(outcome == .clean(mergedText: expected, strategy: .declarationLevel, syntaxParser: "swiftc -parse", resolvedConflictBlocks: 1))
+
+        // The declaration engine's own text for the same input is not byte-identical to that (it re-spaces declarations),
+        // which is exactly why its text is never emitted.
+        let engineText = ThreeWaySemanticASTMerger().mergeFile(
+            relativePath: "S.swift", baseSource: base, leftSource: left, rightSource: right, leftLaneID: "left", rightLaneID: "right"
+        ).mergedText
+        #expect(engineText != expected)
+    }
+
+    @Test("LineAnchoredGuardedMerger is not confused by file content that looks like a conflict separator")
+    func guardedMergerHandlesSeparatorLookalikeContent() throws {
+        // The string literal contains lines that are exactly git's 7-character conflict separator.
+        let base = "BANNER = \"\"\"\n=======\nTitle\n\n=======\n\"\"\"\n\n\ndef a():\n    return 1\n"
+        let left = base + "\n\ndef l():\n    return 2\n"
+        let right = base + "\n\ndef r():\n    return 3\n"
+        let keepBoth = base + "\n\ndef l():\n    return 2\n\n\ndef r():\n    return 3\n"
+        let gitConflict = base + "\n\n<<<<<<< left\ndef l():\n    return 2\n=======\ndef r():\n    return 3\n>>>>>>> right\n"
+
+        // Whatever the declaration engine makes of this file, only two results are acceptable: both insertions kept
+        // around the untouched string, or git's own conflict text. The --diff3 output must have been readable.
+        switch pathGitMerger.merge(relativePath: "banner.py", baseSource: base, leftSource: left, rightSource: right) {
+        case .clean(let mergedText, let strategy, _, _):
+            #expect(mergedText == keepBoth)
+            #expect(strategy == .declarationLevel)
+        case .conflict(let lineMergeText, let conflictCount, let verdict):
+            #expect(lineMergeText == gitConflict)
+            #expect(conflictCount == 1)
+            if case .structuralMergeUnreadable(let detail) = verdict {
+                Issue.record("the --diff3 output was misread: \(detail)")
+            }
+        case let other:
+            Issue.record("unexpected outcome \(other)")
+        }
+    }
+
+    @Test("LineAnchoredGuardedMerger falls back to git's conflict text when the engine does not reproduce every non-blank line in place")
+    func guardedMergerRejectsEngineResultThatDoesNotMatchLineMerge() throws {
+        // left decorates g, right inserts h directly above g: git sees two insertions at the same place.
+        // Keeping "left then right" would silently move the decorator onto h.
+        let base = "def f(x):\n    return x + 1\n\n\ndef g(x):\n    return x * 2\n"
+        let left = base.replacingOccurrences(of: "def g(x):", with: "@trace\ndef g(x):")
+        let right = base.replacingOccurrences(of: "def g(x):", with: "def h(x):\n    return x - 3\n\n\ndef g(x):")
+        let outcome = pathGitMerger.merge(relativePath: "m.py", baseSource: base, leftSource: left, rightSource: right)
+        guard case .conflict(let text, let count, let verdict) = outcome else {
+            Issue.record("expected a conflict, got \(outcome)")
+            return
+        }
+        #expect(count == 1)
+        #expect(text == "def f(x):\n    return x + 1\n\n\n<<<<<<< left\n@trace\n=======\ndef h(x):\n    return x - 3\n\n\n>>>>>>> right\ndef g(x):\n    return x * 2\n")
+        if case .engineDisagreesWithLineMerge = verdict {} else {
+            Issue.record("expected engineDisagreesWithLineMerge, got \(verdict)")
+        }
+    }
+
+    @Test("LineAnchoredGuardedMerger never resolves a conflict block that modifies or deletes base lines")
+    func guardedMergerRejectsConflictsThatTouchBaseLines() throws {
+        let base = "public func compute() -> Int {\n    return 1\n}\n"
+        let left = base.replacingOccurrences(of: "return 1", with: "return 10")
+        let right = base.replacingOccurrences(of: "return 1", with: "return 20")
+        let outcome = pathGitMerger.merge(relativePath: "C.swift", baseSource: base, leftSource: left, rightSource: right)
+        #expect(outcome == .conflict(
+            lineMergeText: "public func compute() -> Int {\n<<<<<<< left\n    return 10\n=======\n    return 20\n>>>>>>> right\n}\n",
+            conflictCount: 1,
+            declarationVerdict: .conflictTouchesBaseLines(blockNumber: 1, blockCount: 1)
+        ))
+    }
+
+    @Test("LineAnchoredGuardedMerger behaves exactly like git merge-file for file types without a syntax checker")
+    func guardedMergerLeavesUncheckedFileTypesToGit() throws {
+        let base = "pub fn base() -> u32 {\n    0\n}\n"
+        let left = base + "\n#[inline]\npub fn from_left() -> u32 {\n    1\n}\n"
+        let right = base + "\n#[must_use]\npub fn from_right() -> u32 {\n    2\n}\n"
+        for path in ["lib.rs", "main.go", "notes.txt", "Makefile"] {
+            let outcome = pathGitMerger.merge(relativePath: path, baseSource: base, leftSource: left, rightSource: right)
+            guard case .conflict(let text, _, let verdict) = outcome else {
+                Issue.record("\(path): expected git's conflict, got \(outcome)")
+                continue
+            }
+            #expect(text.contains("<<<<<<< left\n") && text.contains("=======\n") && text.contains(">>>>>>> right\n"))
+            #expect(verdict == .noSyntaxCheckerForFileType(fileExtension: (path as NSString).pathExtension.lowercased()))
+        }
+        // Clean line merges of such files are passed through, flagged as unchecked (syntaxParser == nil).
+        let cleanRight = base.replacingOccurrences(of: "    0\n", with: "    7\n")
+        let clean = pathGitMerger.merge(relativePath: "lib.rs", baseSource: base, leftSource: base, rightSource: cleanRight)
+        #expect(clean == .clean(mergedText: cleanRight, strategy: .lineLevel, syntaxParser: nil, resolvedConflictBlocks: 0))
+    }
+
+    @Test("LineAnchoredGuardedMerger preserves a missing final newline and CRLF line endings")
+    func guardedMergerPreservesFinalNewlineStateAndCRLF() throws {
+        // No version ends in a newline: neither does the result.
+        let base = "struct S {\n    func a() -> Int { 1 }\n}"
+        let left = "struct S {\n    func a() -> Int { 1 }\n    func l() -> Int { 2 }\n}"
+        let right = "struct S {\n    func a() -> Int { 1 }\n    func r() -> Int { 3 }\n}"
+        let unterminated = pathGitMerger.merge(relativePath: "S.swift", baseSource: base, leftSource: left, rightSource: right)
+        #expect(unterminated == .clean(
+            mergedText: "struct S {\n    func a() -> Int { 1 }\n    func l() -> Int { 2 }\n    func r() -> Int { 3 }\n}",
+            strategy: .declarationLevel,
+            syntaxParser: "swiftc -parse",
+            resolvedConflictBlocks: 1
+        ))
+
+        // Versions that disagree about the final newline are not handed to the declaration-level path at all.
+        let mixed = pathGitMerger.merge(relativePath: "S.swift", baseSource: base, leftSource: left + "\n", rightSource: right)
+        if case .conflict(_, _, let verdict) = mixed {
+            #expect(verdict == .inconsistentFinalNewline)
+        } else {
+            Issue.record("expected a conflict for mixed final-newline state, got \(mixed)")
+        }
+
+        // CRLF content survives a clean merge byte for byte.
+        let crlfBase = "def first():\r\n    return 1\r\n\r\n\r\ndef second():\r\n    return 2\r\n"
+        let crlfLeft = crlfBase.replacingOccurrences(of: "return 1", with: "return 100")
+        let crlfRight = crlfBase.replacingOccurrences(of: "return 2", with: "return 200")
+        let crlf = pathGitMerger.merge(relativePath: "m.py", baseSource: crlfBase, leftSource: crlfLeft, rightSource: crlfRight)
+        guard case .clean(let crlfText, let strategy, _, _) = crlf else {
+            Issue.record("expected a clean CRLF merge, got \(crlf)")
+            return
+        }
+        #expect(strategy == .lineLevel)
+        #expect(Array(crlfText.utf8) == Array("def first():\r\n    return 100\r\n\r\n\r\ndef second():\r\n    return 200\r\n".utf8))
+    }
+
+    @Test("LineAnchoredGuardedMerger refuses to merge when git is missing, is not git, or fails")
+    func guardedMergerRefusesWithoutWorkingGit() throws {
+        let base = "x = 1\ny = 2\n"
+        let left = "x = 10\ny = 2\n"
+        let right = "x = 1\ny = 20\n"
+        func isUnavailable(_ outcome: GuardedMergeOutcome) -> Bool {
+            if case .lineMergeUnavailable = outcome { return true }
+            return false
+        }
+
+        #expect(isUnavailable(LineAnchoredGuardedMerger(gitExecutablePath: nil).merge(relativePath: "a.py", baseSource: base, leftSource: left, rightSource: right)))
+        #expect(LineAnchoredGuardedMerger.locateGit(in: [:]) == nil)
+        #expect(LineAnchoredGuardedMerger.locateGit(in: ["PATH": "/nonexistent-relay-dir"]) == nil)
+
+        let scratch = try makeScratchDirectory(prefix: "relay-fake-git")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        func fakeGit(_ name: String, _ script: String) throws -> String {
+            let url = scratch.appendingPathComponent(name)
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+            return url.path
+        }
+        // 1. Not there at all.
+        let missing = scratch.appendingPathComponent("no-such-git").path
+        // 2. Exits 0 and prints nothing: would otherwise be read as "clean merge, empty file".
+        let silent = try fakeGit("silent", "#!/bin/sh\nexit 0\n")
+        // 3. Fails like a shim that cannot find the real tool: would otherwise be read as "1 conflict".
+        let failing = try fakeGit("failing", "#!/bin/sh\necho 'no developer tools' >&2\nexit 1\n")
+        // 4. Identifies as git but merge-file errors out.
+        let brokenMerge = try fakeGit("broken-merge", "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'git version 0.0.0'; exit 0; fi\necho 'fatal: boom' >&2\nexit 255\n")
+        // 5. Identifies as git, claims one conflict, prints no conflict markers.
+        let markerless = try fakeGit("markerless", "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'git version 0.0.0'; exit 0; fi\nexit 1\n")
+
+        for path in [missing, silent, failing, brokenMerge, markerless] {
+            let outcome = LineAnchoredGuardedMerger(gitExecutablePath: path).merge(relativePath: "a.py", baseSource: base, leftSource: left, rightSource: right)
+            #expect(isUnavailable(outcome), "\((path as NSString).lastPathComponent): expected lineMergeUnavailable, got \(outcome)")
+        }
+    }
+
+    @Test("Conflict-marker width and --diff3 parsing cannot be confused by marker-like lines in the files")
+    func guardedMergerMarkerSizeAndDiff3Parsing() throws {
+        func bytes(_ text: String) -> [UInt8] { Array(text.utf8) }
+
+        #expect(LineAnchoredGuardedMerger.unambiguousMarkerSize(for: [bytes("a\nb\n")]) == 7)
+        #expect(LineAnchoredGuardedMerger.unambiguousMarkerSize(for: [bytes("Title\n=======\n")]) == 8)
+        #expect(LineAnchoredGuardedMerger.unambiguousMarkerSize(for: [bytes("x\n"), bytes("<<<<<<<<<< left\n"), bytes("||\n")]) == 11)
+        #expect(LineAnchoredGuardedMerger.unambiguousMarkerSize(for: [bytes("a ======= b\n")]) == 7)
+        #expect(LineAnchoredGuardedMerger.unambiguousMarkerSize(for: [bytes(">>>>>>>>>")]) == 10)
+
+        let output = bytes("keep\n=======\n<<<<<<<< left\nL1\n\n|||||||| base\n========\nR1\n>>>>>>>> right\ntail")
+        let parsed = try LineAnchoredGuardedMerger.parseDiff3(output, markerSize: 8).get()
+        #expect(parsed == [
+            .stable(bytes("keep\n=======\n")),
+            .conflict(left: bytes("L1\n\n"), base: [], right: bytes("R1\n")),
+            .stable(bytes("tail"))
+        ])
+
+        for malformed in ["<<<<<<< left\nL\n", "=======\n", "<<<<<<< left\n<<<<<<< left\n", "a\n>>>>>>> right\n"] {
+            if case .success(let segments) = LineAnchoredGuardedMerger.parseDiff3(bytes(malformed), markerSize: 7) {
+                Issue.record("malformed --diff3 text was accepted: \(malformed.debugDescription) -> \(segments)")
+            }
+        }
+
+        #expect(LineAnchoredGuardedMerger.nonBlankLines(bytes("a\n\n  \t\r\n b \nc")) == [bytes("a"), bytes(" b "), bytes("c")])
+        #expect(LineAnchoredGuardedMerger.splitLinesKeepingTerminators(bytes("a\n\nb")).map { Array($0) } == [bytes("a\n"), bytes("\n"), bytes("b")])
     }
 }

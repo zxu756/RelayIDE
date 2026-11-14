@@ -103,8 +103,8 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
         switch self {
         case .ptyAllocationFailed(let code, let msg):
             return isZh
-                ? "POSIX forkpty 分配失败 (errno \(code))：\(msg)"
-                : "POSIX forkpty failed (errno \(code)): \(msg)"
+                ? "伪终端分配失败（posix_openpt / grantpt / unlockpt，errno \(code)）：\(msg)"
+                : "Pseudo-terminal allocation failed (posix_openpt / grantpt / unlockpt, errno \(code)): \(msg)"
         case .processSpawnFailed(let exe, let reason):
             return isZh
                 ? "启动子进程 '\(exe)' 失败：\(reason)"

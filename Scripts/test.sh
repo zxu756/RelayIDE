@@ -34,19 +34,28 @@ except subprocess.TimeoutExpired:
 PY
 }
 
+# Optional cap on build parallelism, e.g. RELAY_SWIFT_JOBS=3 (passed to swift build / swift test as -j).
+SWIFT_JOBS_ARGS=()
+if [[ -n "${RELAY_SWIFT_JOBS:-}" ]]; then
+    SWIFT_JOBS_ARGS=(-j "${RELAY_SWIFT_JOBS}")
+fi
+
 usage() {
     cat <<'EOF' >&2
 Usage:
   Scripts/test.sh scope <ModuleOrFilter...>
-  Scripts/test.sh milestone <0>
-  Scripts/test.sh release
+  Scripts/test.sh milestone <0> [--record]
+  Scripts/test.sh release [--record]
+
+Acceptance output goes to a temporary directory. Only with --record are reports/*.txt rewritten.
+No mode opens the desktop window. Environment: RELAY_SWIFT_JOBS=<n> caps build parallelism.
 
 Modules supported by `scope`:
   RelayModels          (shared models -> runs all unit test suites)
   RelayPTYCore         (PTYAndTerminalMultiplexerTests)
   RelayWorktreeGit     (WorktreeGitDiffAndHandoffTests)
   RelayWorkspaceStore  (WorkspaceStoreFTSAndUndoTests + dependent store suites)
-  RelaySemanticMerge   (SemanticASTMergeAndCouplingTests)
+  RelaySemanticMerge   (SemanticASTMergeAndCouplingTests + CLIMCPAndWorkbenchShellTests)
   RelayWiretapProxy    (WiretapSSEAndDLPCircuitBreakerTests)
   RelayPluginSDK       (PluginSDKAndOrchestratorCPMTests)
   RelayOrchestrator    (PluginSDKAndOrchestratorCPMTests)
@@ -72,7 +81,8 @@ map_module_to_filter() {
             echo "WorkspaceStoreFTSAndUndoTests|CLIMCPAndWorkbenchShellTests|StudioViewModelAndHonestyTests"
             ;;
         RelaySemanticMerge)
-            echo "SemanticASTMergeAndCouplingTests"
+            # The guarded merge is exercised both directly and through the CLI / MCP entry points.
+            echo "SemanticASTMergeAndCouplingTests|CLIMCPAndWorkbenchShellTests"
             ;;
         RelayWiretapProxy)
             echo "WiretapSSEAndDLPCircuitBreakerTests"
@@ -113,31 +123,66 @@ run_scope() {
         fi
     done
 
-    local timeout_sec="${RELAY_SCOPE_TIMEOUT_SEC:-90}"
-    echo "==> [scope] swift test --no-parallel --filter \"${joined}\" (watchdog=${timeout_sec}s)"
-    run_with_watchdog "${timeout_sec}" swift test --no-parallel --filter "${joined}"
+    # Build first, outside the watchdog: the watchdog exists to stop tests that hang, not to kill a cold build.
+    echo "==> [scope] swift build --build-tests ${SWIFT_JOBS_ARGS[*]:-}"
+    swift build --build-tests ${SWIFT_JOBS_ARGS[@]+"${SWIFT_JOBS_ARGS[@]}"}
+
+    local timeout_sec="${RELAY_SCOPE_TIMEOUT_SEC:-180}"
+    echo "==> [scope] swift test --skip-build --no-parallel --filter \"${joined}\" (watchdog=${timeout_sec}s)"
+    run_with_watchdog "${timeout_sec}" swift test --skip-build --no-parallel --filter "${joined}"
+}
+
+# Splits "--record" out of the arguments of milestone / release.
+RECORD_ARGS=()
+POSITIONAL_ARGS=()
+split_record_flag() {
+    RECORD_ARGS=()
+    POSITIONAL_ARGS=()
+    for arg in "$@"; do
+        if [[ "${arg}" == "--record" ]]; then
+            RECORD_ARGS=(--record)
+        else
+            POSITIONAL_ARGS+=("${arg}")
+        fi
+    done
+}
+
+run_acceptance_script() {
+    local script="${ROOT_DIR}/Scripts/acceptance/$1"
+    if [[ ! -x "${script}" ]]; then
+        echo "error: missing executable ${script}" >&2
+        exit 1
+    fi
+    echo "==> Running Scripts/acceptance/$1 ${RECORD_ARGS[*]:-}"
+    "${script}" ${RECORD_ARGS[@]+"${RECORD_ARGS[@]}"}
 }
 
 run_milestone() {
-    local m="${1:-}"
+    split_record_flag "$@"
+    local m="${POSITIONAL_ARGS[0]:-}"
     case "${m}" in
         0|m0|M0)
+            local tree_before
+            tree_before="$(git status --porcelain)"
+
             echo "==> [milestone 0] Running M0 scoped unit test suites..."
-            run_scope RelaySemanticMerge RelayWiretapProxy RelayWorkspaceStore RelayCLIAndMCP RelayStudioViews
+            run_scope RelaySemanticMerge RelayWiretapProxy RelayWorkspaceStore RelayCLIAndMCP RelayStudioViews RelayPTYCore
 
-            if [[ ! -x "${ROOT_DIR}/Scripts/acceptance/m0-acceptance.sh" ]]; then
-                echo "error: missing executable ${ROOT_DIR}/Scripts/acceptance/m0-acceptance.sh" >&2
-                exit 1
-            fi
-            echo "==> [milestone 0] Running Scripts/acceptance/m0-acceptance.sh..."
-            "${ROOT_DIR}/Scripts/acceptance/m0-acceptance.sh"
+            run_acceptance_script m0-acceptance.sh
+            run_acceptance_script readme-commands.sh
 
-            if [[ ! -x "${ROOT_DIR}/Scripts/acceptance/readme-commands.sh" ]]; then
-                echo "error: missing executable ${ROOT_DIR}/Scripts/acceptance/readme-commands.sh" >&2
-                exit 1
+            if [[ "${#RECORD_ARGS[@]}" -eq 0 ]]; then
+                local tree_after
+                tree_after="$(git status --porcelain)"
+                if [[ "${tree_before}" != "${tree_after}" ]]; then
+                    echo "error: 'Scripts/test.sh milestone 0' changed the working tree:" >&2
+                    diff <(printf '%s\n' "${tree_before}") <(printf '%s\n' "${tree_after}") >&2 || true
+                    exit 1
+                fi
+                echo "==> [milestone 0] git status --short after the run: ${tree_after:-(no output)}"
+            else
+                echo "==> [milestone 0] --record: reports/*.txt were rewritten"
             fi
-            echo "==> [milestone 0] Running Scripts/acceptance/readme-commands.sh..."
-            "${ROOT_DIR}/Scripts/acceptance/readme-commands.sh"
             ;;
         *)
             echo "error: milestone '${m}' acceptance suite is not implemented yet." >&2
@@ -147,25 +192,15 @@ run_milestone() {
 }
 
 run_release() {
+    split_record_flag "$@"
     local timeout_sec="${RELAY_RELEASE_TIMEOUT_SEC:-300}"
-    echo "==> [release] Running full unit test suite (swift test --no-parallel, watchdog=${timeout_sec}s)..."
-    run_with_watchdog "${timeout_sec}" swift test --no-parallel
+    echo "==> [release] swift build --build-tests ${SWIFT_JOBS_ARGS[*]:-}"
+    swift build --build-tests ${SWIFT_JOBS_ARGS[@]+"${SWIFT_JOBS_ARGS[@]}"}
+    echo "==> [release] Running full unit test suite (swift test --skip-build --no-parallel, watchdog=${timeout_sec}s)..."
+    run_with_watchdog "${timeout_sec}" swift test --skip-build --no-parallel
 
-    if [[ -x "${ROOT_DIR}/Scripts/acceptance/m0-acceptance.sh" ]]; then
-        echo "==> [release] Running Scripts/acceptance/m0-acceptance.sh..."
-        "${ROOT_DIR}/Scripts/acceptance/m0-acceptance.sh"
-    else
-        echo "error: missing executable ${ROOT_DIR}/Scripts/acceptance/m0-acceptance.sh" >&2
-        exit 1
-    fi
-
-    if [[ -x "${ROOT_DIR}/Scripts/acceptance/readme-commands.sh" ]]; then
-        echo "==> [release] Running Scripts/acceptance/readme-commands.sh..."
-        "${ROOT_DIR}/Scripts/acceptance/readme-commands.sh"
-    else
-        echo "error: missing executable ${ROOT_DIR}/Scripts/acceptance/readme-commands.sh" >&2
-        exit 1
-    fi
+    run_acceptance_script m0-acceptance.sh
+    run_acceptance_script readme-commands.sh
 
     if [[ "${RELAY_REAL_AGENTS:-0}" == "1" ]]; then
         if [[ -x "${ROOT_DIR}/Scripts/acceptance/real-agents.sh" ]]; then

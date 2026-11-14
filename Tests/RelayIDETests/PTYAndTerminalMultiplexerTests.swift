@@ -795,4 +795,42 @@ struct PTYAndTerminalMultiplexerTests {
         #expect(abs(Int(midpoint.r) - 100) <= 1)
         #expect(abs(Int(midpoint.g) - 50) <= 1)
     }
+
+    // MARK: - M0 Rework (R31): Error Text Names the PTY Call That Is Actually Used
+
+    @Test("ptyAllocationFailed error text names posix_openpt, the call the implementation uses, not forkpty (R31)")
+    func ptyAllocationErrorNamesPosixOpenpt() throws {
+        let err = RelayIDEError.ptyAllocationFailed(errnoCode: 24, message: "Too many open files")
+        for lang in [RelayLanguage.en, RelayLanguage.zhHans] {
+            let text = err.localizedDescription(in: lang)
+            #expect(!text.contains("forkpty"), "\(lang.rawValue): \(text)")
+            #expect(text.contains("posix_openpt"), "\(lang.rawValue): \(text)")
+            #expect(text.contains("errno 24"))
+            #expect(text.contains("Too many open files"))
+        }
+        #expect(err.errorDescription?.contains("posix_openpt") == true)
+
+        // The implementation really is posix_openpt + posix_spawn, and nothing shipped in the repository says forkpty.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let session = try String(contentsOf: root.appendingPathComponent("Sources/RelayPTYCore/POSIXPseudoTerminalSession.swift"), encoding: .utf8)
+        #expect(session.contains("Darwin.posix_openpt("))
+        #expect(!session.contains("forkpty("))
+
+        var mentions: [String] = []
+        var candidates = [root.appendingPathComponent("README.md"), root.appendingPathComponent("README.zh-CN.md")]
+        let sources = try #require(FileManager.default.enumerator(at: root.appendingPathComponent("Sources"), includingPropertiesForKeys: nil))
+        for case let url as URL in sources where url.pathExtension == "swift" {
+            candidates.append(url)
+        }
+        for url in candidates {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            if text.contains("fork" + "pty") {
+                mentions.append(url.lastPathComponent)
+            }
+        }
+        #expect(mentions.isEmpty, "these files still say forkpty: \(mentions)")
+    }
 }

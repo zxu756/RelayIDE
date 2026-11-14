@@ -103,7 +103,12 @@ enum RelayIDEBootstrap {
                 try? RelayHallmarkDossierNormalizer.normalizeFileIfPresent(at: htmlOutURL)
             }
             if !result.stdout.isEmpty {
-                print(result.stdout)
+                if result.stdoutIsVerbatim {
+                    // Merged file content: written byte for byte, without the newline `print` would append.
+                    FileHandle.standardOutput.write(Data(result.stdout.utf8))
+                } else {
+                    print(result.stdout)
+                }
             }
             if !result.stderr.isEmpty {
                 FileHandle.standardError.write(Data((result.stderr + "\n").utf8))

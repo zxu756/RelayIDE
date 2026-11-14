@@ -1,84 +1,61 @@
 #!/usr/bin/env bash
-# Executes every CLI/MCP command documented in README.md and README.zh-CN.md against isolated temp workspaces.
+# Replays the commands that README.md and README.zh-CN.md contain.
+#
+# The commands are read from the two README files by readme_replay.py; this script keeps no copy of them.
+# The replay fails when the two files disagree, when a command cannot be classified, or when a command fails.
+# Commands that would open the desktop window are listed and never executed.
+#
+# Usage: Scripts/acceptance/readme-commands.sh [--record]
+#   --record   write the output to reports/readme-commands.txt (default: a file in a temporary directory)
+# Environment: RELAY_SWIFT_JOBS=<n> caps build parallelism.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
-mkdir -p "${ROOT_DIR}/reports"
-REPORT_FILE="${ROOT_DIR}/reports/readme-commands.txt"
+RECORD=0
+for arg in "$@"; do
+    case "${arg}" in
+        --record) RECORD=1 ;;
+        *)
+            echo "error: unknown argument '${arg}' (usage: readme-commands.sh [--record])" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ "${RECORD}" -eq 1 ]]; then
+    mkdir -p "${ROOT_DIR}/reports"
+    REPORT_FILE="${ROOT_DIR}/reports/readme-commands.txt"
+else
+    REPORT_FILE="$(mktemp -d "${TMPDIR:-/tmp}/relayide-report.XXXXXX")/readme-commands.txt"
+fi
+
+SWIFT_JOBS_ARGS=""
+if [[ -n "${RELAY_SWIFT_JOBS:-}" ]]; then
+    SWIFT_JOBS_ARGS="-j ${RELAY_SWIFT_JOBS}"
+fi
 
 run_readme_verification() {
     echo "================================================================"
-    echo "RelayIDE README & README.zh-CN Command Verification"
+    echo "RelayIDE README.md & README.zh-CN.md command replay"
     echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    echo "Commit:    $(git rev-parse --short HEAD)"
+    echo "Commit:    $(git rev-parse --short HEAD) (working tree $([[ -z "$(git status --porcelain)" ]] && echo clean || echo 'has uncommitted changes'))"
     echo "================================================================"
 
-    swift build >/dev/null
-    BIN="${ROOT_DIR}/.build/debug/RelayIDE"
-
-    WORK_TMP="$(mktemp -d "${TMPDIR:-/tmp}/relayide-readme-cmd.XXXXXX")"
-    trap 'rm -rf "${WORK_TMP}"' EXIT
+    # shellcheck disable=SC2086
+    swift build ${SWIFT_JOBS_ARGS} >/dev/null
 
     echo ""
-    echo "--- 1. Empty workspace commands (EN + ZH) ---"
-    "${BIN}" init --project "${WORK_TMP}/my-empty.relayproj"
-    "${BIN}" status --project "${WORK_TMP}/my-empty.relayproj"
-    "${BIN}" lanes --project "${WORK_TMP}/my-empty.relayproj"
-
-    "${BIN}" init --project "${WORK_TMP}/my-empty-zh.relayproj" --lang zh
-    "${BIN}" status --project "${WORK_TMP}/my-empty-zh.relayproj" --lang zh
-    "${BIN}" lanes --project "${WORK_TMP}/my-empty-zh.relayproj" --lang zh
-
-    echo ""
-    echo "--- 2. Explicit [DEMO] seeded workspace & HTML export commands (EN + ZH) ---"
-    "${BIN}" init --project "${WORK_TMP}/demo.relayproj" --seed-demo --lang en
-    "${BIN}" dag-waves --project "${WORK_TMP}/demo.relayproj" --lang en
-    "${BIN}" audit-plugins --project "${WORK_TMP}/demo.relayproj" --lang en
-    "${BIN}" export-html "${WORK_TMP}/demo-dossier.html" --project "${WORK_TMP}/demo.relayproj" --lang en
-
-    "${BIN}" init --project "${WORK_TMP}/demo-zh.relayproj" --seed-demo --lang zh
-    "${BIN}" dag-waves --project "${WORK_TMP}/demo-zh.relayproj" --lang zh
-    "${BIN}" audit-plugins --project "${WORK_TMP}/demo-zh.relayproj" --lang zh
-    "${BIN}" export-html "${WORK_TMP}/demo-dossier-zh.html" --project "${WORK_TMP}/demo-zh.relayproj" --lang zh
-
-    echo ""
-    echo "--- 3. Experimental semantic-merge command (EN + ZH) ---"
-    cat > "${WORK_TMP}/base.swift" <<'EOF'
-public struct Counter {
-    public init() {}
-}
-EOF
-    cat > "${WORK_TMP}/left.swift" <<'EOF'
-public struct Counter {
-    public init() {}
-    public func increment(_ x: Int) -> Int { x + 1 }
-}
-EOF
-    cat > "${WORK_TMP}/right.swift" <<'EOF'
-public struct Counter {
-    public init() {}
-    public func decrement(_ x: Int) -> Int { x - 1 }
-}
-EOF
-    "${BIN}" semantic-merge "${WORK_TMP}/base.swift" "${WORK_TMP}/left.swift" "${WORK_TMP}/right.swift" > "${WORK_TMP}/merged.swift"
-    /usr/bin/xcrun swiftc -parse "${WORK_TMP}/merged.swift"
-    "${BIN}" semantic-merge "${WORK_TMP}/base.swift" "${WORK_TMP}/left.swift" "${WORK_TMP}/right.swift" --lang zh > "${WORK_TMP}/merged-zh.swift"
-    /usr/bin/xcrun swiftc -parse "${WORK_TMP}/merged-zh.swift"
-    echo "Verified clean Swift semantic-merge output passes 'xcrun swiftc -parse' (EN + ZH)."
-
-    echo ""
-    echo "--- 4. MCP stdio server command (EN + ZH) ---"
-    printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n' \
-        | "${BIN}" mcp --project "${WORK_TMP}/my-empty.relayproj"
-    printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n' \
-        | "${BIN}" mcp --project "${WORK_TMP}/my-empty-zh.relayproj" --lang zh
+    /usr/bin/python3 "${ROOT_DIR}/Scripts/acceptance/readme_replay.py" --run --repo-root "${ROOT_DIR}" \
+        "${ROOT_DIR}/README.md" "${ROOT_DIR}/README.zh-CN.md"
 
     echo ""
     echo "================================================================"
-    echo "ALL README & README.zh-CN COMMANDS VERIFIED SUCCESSFULLY"
+    echo "README & README.zh-CN COMMANDS: SAME IN BOTH FILES, ALL RUNNABLE ONES EXITED 0"
     echo "================================================================"
 }
 
-run_readme_verification 2>&1 | tee "${REPORT_FILE}"
+# Absolute paths of this checkout are replaced so a recorded report carries no machine-specific path.
+run_readme_verification 2>&1 | sed "s|${ROOT_DIR}|<repo>|g" | tee "${REPORT_FILE}"
+echo "Report written to ${REPORT_FILE}"

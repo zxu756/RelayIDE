@@ -22,19 +22,51 @@ public enum LanguageSyntaxValidator {
     /// `node --check` (JavaScript), `module.stripTypeScriptTypes` + `node --check` (TypeScript), and `JSONSerialization` (JSON).
     public static func validate(source: String, filePath: String) -> SyntaxValidationVerdict {
         let ext = (filePath as NSString).pathExtension.lowercased()
+        switch checkerKind(forExtension: ext) {
+        case .python:
+            return validatePython(source: source)
+        case .swift:
+            return validateSwift(source: source)
+        case .javaScript:
+            return validateJavaScript(source: source, fileExtension: ext)
+        case .typeScript:
+            return validateTypeScript(source: source, fileExtension: ext)
+        case .json:
+            return validateJSON(source: source)
+        case nil:
+            // No parser for this file type: nothing was checked. `parserUsed == nil` tells the caller so.
+            return SyntaxValidationVerdict(passed: true, parserUsed: nil)
+        }
+    }
+
+    /// True when `validate` runs a real parser for this file type. For every other extension `validate`
+    /// checks nothing, so callers must not treat its `passed` as evidence of anything.
+    public static func hasSyntaxChecker(forFilePath filePath: String) -> Bool {
+        checkerKind(forExtension: (filePath as NSString).pathExtension.lowercased()) != nil
+    }
+
+    private enum CheckerKind {
+        case python
+        case swift
+        case javaScript
+        case typeScript
+        case json
+    }
+
+    private static func checkerKind(forExtension ext: String) -> CheckerKind? {
         switch ext {
         case "py", "pyi":
-            return validatePython(source: source)
+            return .python
         case "swift":
-            return validateSwift(source: source)
+            return .swift
         case "js", "mjs", "cjs":
-            return validateJavaScript(source: source, fileExtension: ext)
+            return .javaScript
         case "ts", "tsx":
-            return validateTypeScript(source: source, fileExtension: ext)
+            return .typeScript
         case "json":
-            return validateJSON(source: source)
+            return .json
         default:
-            return SyntaxValidationVerdict(passed: true, parserUsed: nil)
+            return nil
         }
     }
 

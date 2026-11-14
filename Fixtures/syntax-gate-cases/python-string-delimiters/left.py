@@ -1,0 +1,8 @@
+ALPHA = 1
+NOTES = """
+BETA = 2
+GAMMA = 3
+DELTA = 4
+EPSILON = 5
+"""
+ZETA = 6

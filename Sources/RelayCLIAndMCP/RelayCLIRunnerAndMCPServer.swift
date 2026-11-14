@@ -14,17 +14,77 @@ public struct RelayCLIExecutionResult: Sendable, Equatable {
     public let stderr: String
     public let exitCode: Int32
     public let error: RelayIDEError?
+    /// True when `stdout` is file content that must reach the caller byte for byte (no newline appended).
+    /// `semantic-merge` sets it: an extra trailing newline would itself be a change nobody made.
+    public let stdoutIsVerbatim: Bool
 
     public init(
         stdout: String = "",
         stderr: String = "",
         exitCode: Int32 = 0,
-        error: RelayIDEError? = nil
+        error: RelayIDEError? = nil,
+        stdoutIsVerbatim: Bool = false
     ) {
         self.stdout = stdout
         self.stderr = stderr
         self.exitCode = exitCode
         self.error = error
+        self.stdoutIsVerbatim = stdoutIsVerbatim
+    }
+}
+
+// MARK: - Guarded `semantic-merge` Reporting Shared by the CLI and the MCP Server
+
+public enum RelaySemanticMergeReporting {
+    public static let exitCodeClean: Int32 = 0
+    public static let exitCodeConflict: Int32 = 1
+    public static let exitCodeSyntaxCheckFailed: Int32 = 3
+    public static let exitCodeLineMergeUnavailable: Int32 = 4
+
+    /// One-line account of how a clean result was obtained. The `[strategy=...]` token is the same in both languages.
+    public static func cleanNote(
+        strategy: GuardedMergeStrategy,
+        syntaxParser: String?,
+        resolvedConflictBlocks: Int,
+        relativePath: String,
+        language: RelayLanguage
+    ) -> String {
+        let zh = language.isChinese
+        let ext = (relativePath as NSString).pathExtension.lowercased()
+        let shownExt = ext.isEmpty ? (zh ? "无扩展名的" : "extensionless") : ".\(ext)"
+        let syntaxPart: String
+        if let syntaxParser {
+            syntaxPart = zh ? "语法检查通过（\(syntaxParser)）" : "syntax check passed (\(syntaxParser))"
+        } else {
+            syntaxPart = zh
+                ? "\(shownExt) 文件没有语法检查器，输出未做语法检查"
+                : "no syntax checker for \(shownExt) files, output was not syntax-checked"
+        }
+        switch strategy {
+        case .lineLevel:
+            return zh
+                ? "[strategy=line-level] 无冲突：采用 git merge-file 的行级合并结果；\(syntaxPart)"
+                : "[strategy=line-level] clean: this is the git merge-file line-level result; \(syntaxPart)"
+        case .declarationLevel:
+            return zh
+                ? "[strategy=declaration-level] 无冲突：git merge-file 报告的 \(resolvedConflictBlocks) 个冲突块都是两边在同一位置各自插入，两边内容已原样保留（声明级引擎判定一致）；\(syntaxPart)"
+                : "[strategy=declaration-level] clean: all \(resolvedConflictBlocks) conflict block(s) reported by git merge-file were both-sides insertions and both insertions were kept verbatim (the declaration-level engine agreed); \(syntaxPart)"
+        }
+    }
+
+    public static func conflictNote(verdict: GuardedMergeDeclarationVerdict, language: RelayLanguage) -> String {
+        let lead = language.isChinese
+            ? "[strategy=none] 输出是 git merge-file 带冲突标记的结果："
+            : "[strategy=none] the output is the conflict-marked git merge-file result: "
+        return lead + verdict.localizedDescription(in: language)
+    }
+
+    public static func lineMergeUnavailableError(reason: String, language: RelayLanguage) -> RelayIDEError {
+        .semanticMergeFailure(
+            language.isChinese
+                ? "git 不可用或 git merge-file 运行失败（\(reason)）。没有行级合并结果作参照，拒绝合并"
+                : "git is unavailable or `git merge-file` failed (\(reason)). Refusing to merge without the line-level reference"
+        )
     }
 }
 
@@ -137,49 +197,78 @@ public struct RelayCLIRunner: Sendable {
                         error: usageErr
                     )
                 }
-                let baseText = try String(contentsOfFile: positional[0], encoding: .utf8)
-                let leftText = try String(contentsOfFile: positional[1], encoding: .utf8)
-                let rightText = try String(contentsOfFile: positional[2], encoding: .utf8)
-                let merger = ThreeWaySemanticASTMerger()
-                let report = merger.mergeFile(
-                    relativePath: (positional[0] as NSString).lastPathComponent,
-                    baseSource: baseText,
-                    leftSource: leftText,
-                    rightSource: rightText,
-                    leftLaneID: "left",
-                    rightLaneID: "right"
-                )
-
-                let hasConflicts = !report.isCleanlyMerged || report.mergedText.contains("<<<<<<<")
-                if hasConflicts {
-                    let count = max(1, report.unresolvedConflictCount)
-                    let conflictErr = RelayIDEError.semanticMergeConflictsDetected(count)
-                    return RelayCLIExecutionResult(
-                        stdout: report.mergedText,
-                        stderr: "semantic-merge: \(conflictErr.localizedDescription(in: lang))",
-                        exitCode: 1,
-                        error: conflictErr
-                    )
+                var sources: [String] = []
+                for path in positional.prefix(3) {
+                    // Read bytes and require a lossless UTF-8 decoding, so that what is merged is exactly what is on disk.
+                    guard let data = FileManager.default.contents(atPath: path) else {
+                        let readErr = RelayIDEError.invalidCLIUsage(
+                            lang.isChinese ? "无法读取文件 '\(path)'" : "Cannot read file '\(path)'"
+                        )
+                        return RelayCLIExecutionResult(stderr: readErr.localizedDescription(in: lang), exitCode: 2, error: readErr)
+                    }
+                    let text = String(decoding: data, as: UTF8.self)
+                    guard Array(text.utf8) == Array(data) else {
+                        let encodingErr = RelayIDEError.invalidCLIUsage(
+                            lang.isChinese ? "文件 '\(path)' 不是合法的 UTF-8 文本" : "File '\(path)' is not valid UTF-8 text"
+                        )
+                        return RelayCLIExecutionResult(stderr: encodingErr.localizedDescription(in: lang), exitCode: 2, error: encodingErr)
+                    }
+                    sources.append(text)
                 }
 
-                let verdict = LanguageSyntaxValidator.validate(
-                    source: report.mergedText,
-                    filePath: positional[0]
+                let outcome = LineAnchoredGuardedMerger(environment: environment).merge(
+                    relativePath: (positional[0] as NSString).lastPathComponent,
+                    baseSource: sources[0],
+                    leftSource: sources[1],
+                    rightSource: sources[2]
                 )
-                guard verdict.passed else {
-                    let syntaxErr = RelayIDEError.semanticMergeSyntaxCheckFailed(
-                        parser: verdict.parserUsed ?? "parser",
-                        diagnostic: verdict.diagnostic
+                switch outcome {
+                case .clean(let mergedText, let strategy, let syntaxParser, let resolvedConflictBlocks):
+                    let note = RelaySemanticMergeReporting.cleanNote(
+                        strategy: strategy,
+                        syntaxParser: syntaxParser,
+                        resolvedConflictBlocks: resolvedConflictBlocks,
+                        relativePath: positional[0],
+                        language: lang
                     )
+                    return RelayCLIExecutionResult(
+                        stdout: mergedText,
+                        stderr: "semantic-merge: \(note)",
+                        exitCode: RelaySemanticMergeReporting.exitCodeClean,
+                        stdoutIsVerbatim: true
+                    )
+
+                case .conflict(let lineMergeText, let conflictCount, let declarationVerdict):
+                    let conflictErr = RelayIDEError.semanticMergeConflictsDetected(max(1, conflictCount))
+                    let note = RelaySemanticMergeReporting.conflictNote(verdict: declarationVerdict, language: lang)
+                    return RelayCLIExecutionResult(
+                        stdout: lineMergeText,
+                        stderr: "semantic-merge: \(conflictErr.localizedDescription(in: lang))\nsemantic-merge: \(note)",
+                        exitCode: RelaySemanticMergeReporting.exitCodeConflict,
+                        error: conflictErr,
+                        stdoutIsVerbatim: true
+                    )
+
+                case .syntaxCheckFailed(let parser, let diagnostic):
+                    let syntaxErr = RelayIDEError.semanticMergeSyntaxCheckFailed(parser: parser, diagnostic: diagnostic)
                     return RelayCLIExecutionResult(
                         stdout: "",
                         stderr: "semantic-merge: \(syntaxErr.localizedDescription(in: lang))",
-                        exitCode: 3,
-                        error: syntaxErr
+                        exitCode: RelaySemanticMergeReporting.exitCodeSyntaxCheckFailed,
+                        error: syntaxErr,
+                        stdoutIsVerbatim: true
+                    )
+
+                case .lineMergeUnavailable(let reason):
+                    let unavailableErr = RelaySemanticMergeReporting.lineMergeUnavailableError(reason: reason, language: lang)
+                    return RelayCLIExecutionResult(
+                        stdout: "",
+                        stderr: "semantic-merge: \(unavailableErr.localizedDescription(in: lang))",
+                        exitCode: RelaySemanticMergeReporting.exitCodeLineMergeUnavailable,
+                        error: unavailableErr,
+                        stdoutIsVerbatim: true
                     )
                 }
-
-                return RelayCLIExecutionResult(stdout: report.mergedText, exitCode: 0)
 
             case "audit-plugins":
                 let bundlePath = optionValue("--project", in: rest) ?? optionValue("-p", in: rest) ?? "PaymentsCore.relayproj"
@@ -219,7 +308,7 @@ public struct RelayCLIRunner: Sendable {
                     }
                     boundProjectURL = candidateURL
                 }
-                let server = RelayMCPServer(projectBundleURL: boundProjectURL, language: lang)
+                let server = RelayMCPServer(projectBundleURL: boundProjectURL, language: lang, environment: environment)
                 await server.serveStdio()
                 return RelayCLIExecutionResult(stdout: "", exitCode: 0)
 
@@ -324,7 +413,10 @@ public struct RelayCLIRunner: Sendable {
               status [--project <path.relayproj>]                   输出已有工作区的 JSON 统计（工程不存在时报错，不会自动新建）
               lanes [--project <path.relayproj>]                    列出工作区已登记的通道与路径归属规则
               dag-waves [--project <path.relayproj>]                按拓扑排序计算已登记 DAG 的并行执行波次
-              semantic-merge <base> <left> <right>                  声明级三路合并（【实验性】已知会在 Python 代码上损坏输出；冲突退出码 1，语法检查失败退出码 3）
+              semantic-merge <base> <left> <right>                  【实验性】以 git merge-file 为准的三路合并：git 能干净合并时原样输出它的行级结果；git 报冲突时，
+                                                                    只有每个冲突块都是两边在同一位置各自插入、声明级引擎判定一致、且结果通过语法检查，才把两边内容原样都保留。
+                                                                    声明级引擎单独使用时已知会损坏 Python 和 Swift 的输出，所以它的文本从不输出。
+                                                                    退出码：0 无冲突；1 有冲突（stdout 是 git 带冲突标记的结果）；3 合并结果未通过语法检查（不输出）；4 git 不可用（拒绝合并）
               audit-plugins [--project <path.relayproj>]            列出工作区已保存的 JavaScriptCore 护栏记录
               export-html <out.html> [--project <path>]             导出双语单文件 HTML 报告（演示工作区带 [演示数据] 标记）
               mcp [--project <path.relayproj>]                      在 stdio 上启动 JSON-RPC 2.0 MCP 服务（2 个工具：relay_semantic_merge、relay_check_ownership）
@@ -340,7 +432,12 @@ public struct RelayCLIRunner: Sendable {
           status [--project <path.relayproj>]                   Print JSON workspace statistics (errors if --project does not exist; never auto-creates)
           lanes [--project <path.relayproj>]                    List registered worktree lanes & ownership globs
           dag-waves [--project <path.relayproj>]                Compute topological execution waves for registered DAG
-          semantic-merge <base> <left> <right>                  3-Way declaration merge (EXPERIMENTAL: known to corrupt output on Python; exit 1 on conflict, exit 3 on syntax check failure)
+          semantic-merge <base> <left> <right>                  EXPERIMENTAL 3-way merge anchored on git merge-file: prints git's line-level result when git merges cleanly. When git
+                                                                reports conflicts, both sides are kept verbatim only if every conflict block is a both-sides insertion at the same
+                                                                place, the declaration-level engine agrees, and the result passes the syntax check. The declaration-level engine
+                                                                alone is known to corrupt Python and Swift output, so its text is never printed.
+                                                                Exit codes: 0 clean; 1 conflict (stdout is git's conflict-marked text); 3 merged text fails the syntax check
+                                                                (nothing printed); 4 git unavailable (nothing merged)
           audit-plugins [--project <path.relayproj>]            List saved JavaScriptCore guardrail findings in workspace
           export-html <out.html> [--project <path>]             Export bilingual standalone HTML report (carries [DEMO] banner on seeded demo workspaces)
           mcp [--project <path.relayproj>]                      Start JSON-RPC 2.0 MCP server on stdio (2 tools: relay_semantic_merge, relay_check_ownership)
@@ -356,10 +453,17 @@ public struct RelayCLIRunner: Sendable {
 public struct RelayMCPServer: Sendable {
     public let projectBundleURL: URL?
     public let language: RelayLanguage
+    /// Environment used to locate `git` for `relay_semantic_merge` (PATH lookup only).
+    public let environment: [String: String]
 
-    public init(projectBundleURL: URL? = nil, language: RelayLanguage = .en) {
+    public init(
+        projectBundleURL: URL? = nil,
+        language: RelayLanguage = .en,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) {
         self.projectBundleURL = projectBundleURL
         self.language = language
+        self.environment = environment
     }
 
     public func handleJSONRPCLine(_ rawLine: String) -> String? {
@@ -391,7 +495,7 @@ public struct RelayMCPServer: Sendable {
                 "tools": [
                     [
                         "name": "relay_semantic_merge",
-                        "description": "EXPERIMENTAL: known to corrupt output on Python. Perform a declaration-level 3-Way merge across base, left, and right source revisions with post-merge syntax validation.",
+                        "description": "EXPERIMENTAL 3-way merge of base, left and right anchored on git merge-file. Returns git's line-level result when git merges cleanly. When git reports conflicts, both sides are kept verbatim only if every conflict block is a both-sides insertion at the same place, the declaration-level engine agrees, and the result passes the language syntax check; otherwise isError is true and the text is git's conflict-marked output. The declaration-level engine alone is known to corrupt Python and Swift output, so its text is never returned. isError is also true when the merged text fails the syntax check or git is unavailable.",
                         "inputSchema": [
                             "type": "object",
                             "properties": [
@@ -429,43 +533,59 @@ public struct RelayMCPServer: Sendable {
                 let base = args["base"] as? String ?? ""
                 let left = args["left"] as? String ?? ""
                 let right = args["right"] as? String ?? ""
-                let report = ThreeWaySemanticASTMerger().mergeFile(
+                let outcome = LineAnchoredGuardedMerger(environment: environment).merge(
                     relativePath: path,
                     baseSource: base,
                     leftSource: left,
-                    rightSource: right,
-                    leftLaneID: "left",
-                    rightLaneID: "right"
+                    rightSource: right
                 )
-                let hasConflicts = !report.isCleanlyMerged || report.mergedText.contains("<<<<<<<")
-                if hasConflicts {
+                // content[0] is always the payload (merged text, conflict-marked text, or the error message);
+                // content[1], when present, says how the result was obtained.
+                switch outcome {
+                case .clean(let mergedText, let strategy, let syntaxParser, let resolvedConflictBlocks):
+                    let note = RelaySemanticMergeReporting.cleanNote(
+                        strategy: strategy,
+                        syntaxParser: syntaxParser,
+                        resolvedConflictBlocks: resolvedConflictBlocks,
+                        relativePath: path,
+                        language: language
+                    )
                     resultPayload = [
                         "content": [
-                            ["type": "text", "text": report.mergedText]
+                            ["type": "text", "text": mergedText],
+                            ["type": "text", "text": "semantic-merge: \(note)"]
+                        ],
+                        "isError": false
+                    ]
+                case .conflict(let lineMergeText, let conflictCount, let declarationVerdict):
+                    let conflictMsg = RelayIDEError.semanticMergeConflictsDetected(max(1, conflictCount))
+                        .localizedDescription(in: language)
+                    let note = RelaySemanticMergeReporting.conflictNote(verdict: declarationVerdict, language: language)
+                    resultPayload = [
+                        "content": [
+                            ["type": "text", "text": lineMergeText],
+                            ["type": "text", "text": "semantic-merge: \(conflictMsg)\nsemantic-merge: \(note)"]
                         ],
                         "isError": true
                     ]
-                } else {
-                    let verdict = LanguageSyntaxValidator.validate(source: report.mergedText, filePath: path)
-                    if verdict.passed {
-                        resultPayload = [
-                            "content": [
-                                ["type": "text", "text": report.mergedText]
-                            ],
-                            "isError": false
-                        ]
-                    } else {
-                        let errMsg = RelayIDEError.semanticMergeSyntaxCheckFailed(
-                            parser: verdict.parserUsed ?? "parser",
-                            diagnostic: verdict.diagnostic
-                        ).localizedDescription(in: language)
-                        resultPayload = [
-                            "content": [
-                                ["type": "text", "text": errMsg]
-                            ],
-                            "isError": true
-                        ]
-                    }
+                case .syntaxCheckFailed(let parser, let diagnostic):
+                    let errMsg = RelayIDEError.semanticMergeSyntaxCheckFailed(parser: parser, diagnostic: diagnostic)
+                        .localizedDescription(in: language)
+                    resultPayload = [
+                        "content": [
+                            ["type": "text", "text": errMsg]
+                        ],
+                        "isError": true
+                    ]
+                case .lineMergeUnavailable(let reason):
+                    let errMsg = RelaySemanticMergeReporting.lineMergeUnavailableError(reason: reason, language: language)
+                        .localizedDescription(in: language)
+                    resultPayload = [
+                        "content": [
+                            ["type": "text", "text": errMsg]
+                        ],
+                        "isError": true
+                    ]
                 }
             } else if toolName == "relay_check_ownership" {
                 let rel = args["relativePath"] as? String ?? ""

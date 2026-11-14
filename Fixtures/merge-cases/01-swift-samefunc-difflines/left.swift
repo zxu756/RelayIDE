@@ -1,0 +1,18 @@
+import Foundation
+
+struct Calc {
+    func total(items: [Int]) -> Int {
+        var sum = 0
+        let offset = 10
+        for i in items {
+            sum += i
+        }
+        let tax = 2
+        sum += tax
+        let bonus = 3
+        sum += bonus
+        return sum + offset
+    }
+
+    func other() -> Int { 7 }
+}

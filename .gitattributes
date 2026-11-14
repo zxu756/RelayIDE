@@ -1,0 +1,2 @@
+# Merge fixtures are compared byte for byte (one of them uses CRLF line endings, one has no final newline).
+Fixtures/** -text

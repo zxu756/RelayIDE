@@ -742,7 +742,7 @@ public struct TerminalClickableLinkDetector: Sendable {
         // Matches:
         //   `Sources/Auth/Session.swift:142:9` (+ optional `: error:` / `: warning:` / `: note:`)
         //   `./Tests/AppTests.ts(42,10)`
-        //   `/Users/xu/Projects/RelayIDE/Package.swift`
+        //   an absolute path such as `/opt/project/Package.swift`
         let pattern = #"(?<![A-Za-z0-9_])((?:\.{1,2}/|/)?(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+\.([A-Za-z0-9]+)|[A-Za-z0-9_.\-]+\.([A-Za-z0-9]+))(?::([0-9]+)(?::([0-9]+))?|\(([0-9]+),\s*([0-9]+)\))?(?:\s*:\s*(error|warning|note|fatal error))?"#
         guard let rx = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = line.plainText as NSString

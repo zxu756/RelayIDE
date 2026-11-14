@@ -1,0 +1,7 @@
+let header = "v1"
+let line1 = "alpha"
+let line2 = "beta"
+let line3 = "gamma"
+let line4 = "delta"
+let line5 = "epsilon"
+let footer = "end"
