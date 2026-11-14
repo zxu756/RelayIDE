@@ -7,7 +7,9 @@ import RelayWorkbenchShell
 import RelayWorkspaceStore
 import Testing
 
-@Suite("Headless CLI Subcommands, JSON-RPC 2.0 MCP Server, HTML Dossier & Bauhaus Workbench Shell", .timeLimit(.minutes(1)))
+// `.serialized`: many tests here run git and a compiler and block their thread while they wait. Run all at once they
+// occupy the whole cooperative thread pool and make timing assertions in other suites fail.
+@Suite("Headless CLI Subcommands, JSON-RPC 2.0 MCP Server, HTML Dossier & Bauhaus Workbench Shell", .serialized, .timeLimit(.minutes(1)))
 struct CLIMCPAndWorkbenchShellTests {
 
     // MARK: - Isolated Temp Directory & UserDefaults Helpers

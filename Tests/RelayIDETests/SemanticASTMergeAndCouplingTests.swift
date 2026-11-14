@@ -3,7 +3,9 @@ import RelayModels
 @testable import RelaySemanticMerge
 import Testing
 
-@Suite("3-Way Semantic AST Merger, Myers/Diff3, Conflict Resolution, Call-Site & Isometric Coupling", .timeLimit(.minutes(1)))
+// `.serialized`: the guarded-merge tests run git and a compiler and block their thread while they wait (see the note
+// in CLIMCPAndWorkbenchShellTests).
+@Suite("3-Way Semantic AST Merger, Myers/Diff3, Conflict Resolution, Call-Site & Isometric Coupling", .serialized, .timeLimit(.minutes(1)))
 struct SemanticASTMergeAndCouplingTests {
 
     // MARK: - 1. Multi-Language Declaration Parsing: Swift & Structural Fingerprints
