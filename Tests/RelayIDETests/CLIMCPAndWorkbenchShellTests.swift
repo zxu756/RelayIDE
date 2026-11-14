@@ -50,7 +50,7 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(helpOut == RelayCLIRunner.helpBanner)
 
         let versionOut = try await cli.execute(arguments: ["--version"])
-        #expect(versionOut.contains("RelayIDE 1.1.0"))
+        #expect(versionOut.contains("RelayIDE 1.2.0"))
 
         await #expect(throws: RelayIDEError.self) {
             _ = try await cli.execute(arguments: ["non-existent-subcommand"])

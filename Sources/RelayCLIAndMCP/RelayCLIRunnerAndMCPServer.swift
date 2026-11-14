@@ -117,8 +117,8 @@ public struct RelayCLIRunner: Sendable {
 
             case "version", "--version":
                 let msg = lang.isChinese
-                    ? "RelayIDE 1.1.0 (macOS arm64 · 工作区台账、MCP 所有权校验与实验性三路合并；M0 尚未接入智能体执行)"
-                    : "RelayIDE 1.1.0 (macOS arm64 · Workspace Ledger, MCP Ownership Check & Experimental 3-Way Merge; M0 does not launch coding agents yet)"
+                    ? "RelayIDE 1.2.0 (macOS arm64 · 工作区台账、MCP 所有权校验与实验性三路合并；M0 尚未接入智能体执行)"
+                    : "RelayIDE 1.2.0 (macOS arm64 · Workspace Ledger, MCP Ownership Check & Experimental 3-Way Merge; M0 does not launch coding agents yet)"
                 return RelayCLIExecutionResult(stdout: msg, exitCode: 0)
 
             case "init":
@@ -407,7 +407,7 @@ public struct RelayCLIRunner: Sendable {
     public static func helpBanner(language: RelayLanguage) -> String {
         if language.isChinese {
             return """
-            RelayIDE 1.1.0 · 多智能体并行工作台原型（M0：当前版本尚不会启动任何 coding agent，排在 M1）
+            RelayIDE 1.2.0 · 多智能体并行工作台原型（M0：当前版本尚不会启动任何 coding agent，排在 M1）
             命令（可执行文件名：RelayIDE；Homebrew Cask 软链名：relayide）：
               init [--project <path.relayproj>] [--seed-demo]       新建 .relayproj SQLite WAL 工作区（--seed-demo 会写入带 [演示数据] 标记的合成样本）
               status [--project <path.relayproj>]                   输出已有工作区的 JSON 统计（工程不存在时报错，不会自动新建）
@@ -426,7 +426,7 @@ public struct RelayCLIRunner: Sendable {
             """
         }
         return """
-        RelayIDE 1.1.0 · Multi-Agent Workbench Prototype (M0: does not launch coding agents yet; scheduled for M1)
+        RelayIDE 1.2.0 · Multi-Agent Workbench Prototype (M0: does not launch coding agents yet; scheduled for M1)
         Commands (built executable: RelayIDE; Homebrew Cask symlink: relayide):
           init [--project <path.relayproj>] [--seed-demo]       Initialize .relayproj SQLite WAL workspace (--seed-demo writes [DEMO] synthetic fixtures)
           status [--project <path.relayproj>]                   Print JSON workspace statistics (errors if --project does not exist; never auto-creates)
@@ -479,7 +479,7 @@ public struct RelayMCPServer: Sendable {
         case "initialize":
             var serverInfo: [String: Any] = [
                 "name": "relayide-mcp",
-                "version": "1.1.0"
+                "version": "1.2.0"
             ]
             if let boundPath = projectBundleURL?.path {
                 serverInfo["projectPath"] = boundPath
