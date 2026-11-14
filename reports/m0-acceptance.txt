@@ -1,10 +1,11 @@
 ================================================================
-RelayIDE M0 Acceptance Suite (m0/honest)
-Timestamp: 2026-11-14T00:53:25Z
-Commit:    8dd4871 (branch: m0/honest)
+RelayIDE M0 Acceptance Suite
+Timestamp: 2026-11-14T06:35:18Z
+Commit:    eb9032c (branch: m0/honest; working tree clean outside reports/)
+Tools:     git version 2.56.0; Python 3.9.6; node v22.23.4; swift-driver version: 1.168.6 Apple Swift version 6.4.2 (swiftlang-6.4.2.1.9 clang-2100.4.1.1)
 ================================================================
 
---- Row 1: swift build verification + README.md & README.zh-CN.md opening M0 disclosure ---
+--- Row 1: swift build + README.md & README.zh-CN.md opening M0 disclosure ---
 EN para 1: `RelayIDE` is a native macOS SwiftUI workbench, SQLite workspace store, and CLI/MCP utility for inspecting isolated Git worktree lanes, topological task waves, guardrail policies, and merge artifacts. **Current status (M0): This version does not launch coding agents yet; headless multi-agent execution via `agent-relay` is scheduled for M1.**
 ZH para 1: `RelayIDE` 是一款原生 macOS SwiftUI 桌面工作台、SQLite 工作区存储库以及 CLI/MCP 命令行工具，用于查看隔离 Git 工作树通道、拓扑任务波次、护栏策略与合并产物。**当前状态（M0）：当前版本尚不会启动任何 coding agent；基于 `agent-relay` 的无界面多智能体真实调度排在 M1。**
 [PASS] Row 1: swift build succeeded and README.md & README.zh-CN.md state in paragraph 1 that M0 does not launch coding agents yet
@@ -12,45 +13,139 @@ ZH para 1: `RelayIDE` 是一款原生 macOS SwiftUI 桌面工作台、SQLite 工
 --- Row 2: --help, version, status (empty project) exit 0 + [DEMO] / [演示数据] markers (EN + ZH) ---
 version (--lang en): RelayIDE 1.1.0 (macOS arm64 · Workspace Ledger, MCP Ownership Check & Experimental 3-Way Merge; M0 does not launch coding agents yet)
 version (--lang zh): RelayIDE 1.1.0 (macOS arm64 · 工作区台账、MCP 所有权校验与实验性三路合并；M0 尚未接入智能体执行)
-Empty workspace status JSON (--lang en): {"activeLaneCount":0,"totalTokensObserved":0,"totalSpendUSD":0,"taskNodeCount":0,"guardrailFindingCount":0,"semanticAutoMergeCount":0,"undoDepth":0,"unresolvedConflictCount":0,"walBytes":0,"workspaceName":"clean-empty-en","repositoryPath":"","sqliteBytes":69632,"redoDepth":0,"schemaVersion":4}
-Empty workspace status JSON (--lang zh): {"redoDepth":0,"totalTokensObserved":0,"taskNodeCount":0,"undoDepth":0,"workspaceName":"clean-empty-zh","guardrailFindingCount":0,"unresolvedConflictCount":0,"schemaVersion":4,"activeLaneCount":0,"semanticAutoMergeCount":0,"sqliteBytes":69632,"repositoryPath":"","totalSpendUSD":0,"walBytes":0}
-EN seed output: [DEMO] Initialized synthetic demo workspace at /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/demo-en.relayproj (lanes=4, tasks=4, autoMerges=2; worktree paths, commit OIDs, and spend are synthetic preview fixtures)
-ZH seed output: [演示数据] 已在 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/demo-zh.relayproj 初始化合成演示工作区 (lanes=4, tasks=4, autoMerges=2；工作树路径、提交哈希与花费均为合成预览样本)
+Empty workspace status JSON (--lang en): {"repositoryPath":"","guardrailFindingCount":0,"workspaceName":"clean-empty-en","totalSpendUSD":0,"semanticAutoMergeCount":0,"totalTokensObserved":0,"unresolvedConflictCount":0,"schemaVersion":4,"walBytes":0,"undoDepth":0,"sqliteBytes":69632,"activeLaneCount":0,"taskNodeCount":0,"redoDepth":0}
+Empty workspace lanes (--lang en): ''; dag-waves: 'No DAG registered'
+Empty workspace status JSON (--lang zh): {"taskNodeCount":0,"walBytes":0,"sqliteBytes":69632,"semanticAutoMergeCount":0,"guardrailFindingCount":0,"undoDepth":0,"totalTokensObserved":0,"workspaceName":"clean-empty-zh","totalSpendUSD":0,"schemaVersion":4,"activeLaneCount":0,"unresolvedConflictCount":0,"redoDepth":0,"repositoryPath":""}
+Empty workspace lanes (--lang zh): ''; dag-waves: '当前工作区尚未注册任何 DAG'
+EN seed output: [DEMO] Initialized synthetic demo workspace at /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/demo-en.relayproj (lanes=4, tasks=4, autoMerges=2; worktree paths, commit OIDs, and spend are synthetic preview fixtures)
+ZH seed output: [演示数据] 已在 /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/demo-zh.relayproj 初始化合成演示工作区 (lanes=4, tasks=4, autoMerges=2；工作树路径、提交哈希与花费均为合成预览样本)
 [PASS] Row 2: --help, version, status (empty project) exit 0 (EN+ZH) and [DEMO]/[演示数据] markers verified
 
 --- Row 3: Nonexistent --project error & zero directory creation (EN + ZH) ---
-Verified nonexistent --project across 6 subcommands (--lang en, exit=1): last stderr='Workspace project bundle does not exist at '/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/does-not-exist-en-6198.relayproj' (run 'RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/does-not-exist-en-6198.relayproj' first)'
-Verified nonexistent --project across 6 subcommands (--lang zh, exit=1): last stderr='工程目录不存在或未初始化：'/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/does-not-exist-zh-1722.relayproj'（请先运行 'RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.fox3VW/does-not-exist-zh-1722.relayproj'）'
+Verified nonexistent --project across 6 subcommands (--lang en, exit=1): last stderr='Workspace project bundle does not exist at '/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/does-not-exist-en-1775.relayproj' (run 'RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/does-not-exist-en-1775.relayproj' first)'
+Verified nonexistent --project across 6 subcommands (--lang zh, exit=1): last stderr='工程目录不存在或未初始化：'/var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/does-not-exist-zh-14008.relayproj'（请先运行 'RelayIDE init --project /var/folders/d5/4h6nzhm94l91870kmn7p8q040000gn/T//relayide-m0-acc.73WdkX/does-not-exist-zh-14008.relayproj'）'
 [PASS] Row 3: Nonexistent --project exits non-zero (1) without creating directory across all 6 project subcommands (EN+ZH)
 
---- Row 4: semantic-merge syntax validation gate on 09-py-triplequote (EN+ZH + MCP + 19-case sweep) ---
-09-py-triplequote (--lang en): exit=3, stdout_bytes=0, stderr='semantic-merge: Merged output failed syntax check (python3 -m py_compile) and was suppressed to prevent file corruption: Sorry: IndentationError: expected an indented block (merged_check.py, line 13) '
-09-py-triplequote (--lang zh): exit=3, stdout_bytes=0, stderr='semantic-merge: 合并结果未通过语法检查（python3 -m py_compile），已阻止输出以防损坏文件：Sorry: IndentationError: expected an indented block (merged_check.py, line 13) '
-19-case sweep verified (0 silent syntax corruptions): 01-swift-samefunc-difflines=exit(1), 02-swift-both-add-func=exit(0), 03-swift-rename-vs-body=exit(1), 04-swift-string-braces=exit(1), 05-ts-samefunc-difflines=exit(1), 06-ts-both-add-func=exit(1), 07-py-samefunc-difflines=exit(1), 08-py-class-both-add-method=exit(1), 09-py-triplequote=exit(3), 10-py-rename-vs-body=exit(1), 11-ts-rename-vs-body=exit(1), 12-swift-true-conflict=exit(1), 13-swift-control-nobrace-strings=exit(0), 14-py-control-triplequote-nodef=exit(3), 15-py-class-plain-twomethods=exit(1), 16-swift-struct-twomethods=exit(0), 17-ts-class-twomethods=exit(0), 18-ts-control-nobrace=exit(0), 19-py-both-add-toplevel=exit(0)
-[PASS] Row 4: 09-py-triplequote exits 3 with 0 stdout bytes (EN+ZH), and 0/19 harness cases silently corrupt output
+--- Row 4: semantic-merge on 09-py-triplequote + every case in Fixtures/merge-cases (EN + ZH) ---
+09-py-triplequote (--lang en): exit=0, stdout_bytes=131, stderr='semantic-merge: [strategy=line-level] clean: this is the git merge-file line-level result; syntax check passed (python3 -m py_compile) '
+09-py-triplequote (--lang zh): exit=0, stdout_bytes=131, stderr='semantic-merge: [strategy=line-level] 无冲突：采用 git merge-file 的行级合并结果；语法检查通过（python3 -m py_compile） '
+09-py-triplequote: output is byte-identical to 'git merge-file -p' and passes py_compile (EN+ZH)
+
+Independent check of all cases (Scripts/acceptance/merge_cases_check.py, --lang en):
+| case | exit | result used | git merge-file | vs git | check | notes |
+|---|---|---|---|---|---|---|
+| 01-swift-samefunc-difflines | 0 | line-level | clean | same | OK | added lines kept; 16 untouched line(s) identical; parser: swiftc -parse |
+| 02-swift-both-add-func | 0 | declaration-level | 1 conflict(s) | better | OK | added lines kept; 5 untouched line(s) identical; 1 conflict block(s), each both-sides insertion, both kept verbatim; parser: swiftc -parse |
+| 03-swift-rename-vs-body | 1 | none | 1 conflict(s) | same | OK |  |
+| 04-swift-string-braces | 1 | none | 1 conflict(s) | same | OK |  |
+| 05-ts-samefunc-difflines | 0 | line-level | clean | same | OK | added lines kept; 14 untouched line(s) identical; parser: node stripTypeScriptTypes + --check |
+| 06-ts-both-add-func | 1 | none | 1 conflict(s) | same | OK |  |
+| 07-py-samefunc-difflines | 0 | line-level | clean | same | OK | added lines kept; 12 untouched line(s) identical; parser: python3 ast.parse |
+| 08-py-class-both-add-method | 1 | none | 1 conflict(s) | same | OK |  |
+| 09-py-triplequote | 0 | line-level | clean | same | OK | added lines kept; 9 untouched line(s) identical; parser: python3 ast.parse |
+| 10-py-rename-vs-body | 1 | none | 1 conflict(s) | same | OK |  |
+| 11-ts-rename-vs-body | 1 | none | 1 conflict(s) | same | OK |  |
+| 12-swift-true-conflict | 1 | none | 1 conflict(s) | same | OK |  |
+| 13-swift-control-nobrace-strings | 0 | declaration-level | 1 conflict(s) | better | OK | added lines kept; 8 untouched line(s) identical; 1 conflict block(s), each both-sides insertion, both kept verbatim; parser: swiftc -parse |
+| 14-py-control-triplequote-nodef | 0 | line-level | clean | same | OK | added lines kept; 9 untouched line(s) identical; parser: python3 ast.parse |
+| 15-py-class-plain-twomethods | 0 | line-level | clean | same | OK | added lines kept; 4 untouched line(s) identical; parser: python3 ast.parse |
+| 16-swift-struct-twomethods | 0 | line-level | clean | same | OK | added lines kept; 7 untouched line(s) identical; parser: swiftc -parse |
+| 17-ts-class-twomethods | 0 | line-level | clean | same | OK | added lines kept; 7 untouched line(s) identical; parser: node stripTypeScriptTypes + --check |
+| 18-ts-control-nobrace | 0 | declaration-level | 1 conflict(s) | better | OK | added lines kept; 5 untouched line(s) identical; 1 conflict block(s), each both-sides insertion, both kept verbatim; parser: node stripTypeScriptTypes + --check |
+| 19-py-both-add-toplevel | 0 | declaration-level | 1 conflict(s) | better | OK | added lines kept; 2 untouched line(s) identical; 1 conflict block(s), each both-sides insertion, both kept verbatim; parser: python3 ast.parse |
+| 20-py-decorator-added | 0 | line-level | clean | same | OK | added lines kept; 8 untouched line(s) identical; parser: python3 ast.parse |
+| 21-swift-attribute-and-multiline-string | 0 | line-level | clean | same | OK | added lines kept; 12 untouched line(s) identical; parser: swiftc -parse |
+| 22-py-nested-indent-decorators | 0 | line-level | clean | same | OK | added lines kept; 22 untouched line(s) identical; parser: python3 ast.parse |
+| 23-py-both-add-decorated-func | 0 | declaration-level | 1 conflict(s) | better | OK | added lines kept; 5 untouched line(s) identical; 1 conflict block(s), each both-sides insertion, both kept verbatim; parser: python3 ast.parse |
+| 24-py-decorator-vs-insert-above | 1 | none | 1 conflict(s) | same | OK |  |
+| 25-swift-attr-members-multiline-string | 0 | declaration-level | 1 conflict(s) | better | OK | added lines kept; 15 untouched line(s) identical; 1 conflict block(s), each both-sides insertion, both kept verbatim; parser: swiftc -parse |
+| 26-ts-template-literal-edit-vs-add | 0 | line-level | clean | same | OK | added lines kept; 15 untouched line(s) identical; parser: node stripTypeScriptTypes + --check |
+| 27-js-class-both-add-method-jsdoc | 0 | declaration-level | 1 conflict(s) | better | OK | added lines kept; 11 untouched line(s) identical; 1 conflict block(s), each both-sides insertion, both kept verbatim; parser: node --check |
+| 28-rs-attributes-git-clean | 0 | line-level | clean | same | OK | added lines kept; 14 untouched line(s) identical; parser: none for .rs |
+| 29-rs-both-add-fn | 1 | none | 1 conflict(s) | same | OK |  |
+| 30-go-both-add-func | 1 | none | 1 conflict(s) | same | OK |  |
+| 31-java-annotation-git-clean | 0 | line-level | clean | same | OK | added lines kept; 14 untouched line(s) identical; parser: none for .java |
+| 32-py-modify-vs-adjacent-insert | 1 | none | 1 conflict(s) | same | OK |  |
+| 33-swift-no-final-newline-both-add | 0 | declaration-level | 1 conflict(s) | better | OK | added lines kept; 3 untouched line(s) identical; 1 conflict block(s), each both-sides insertion, both kept verbatim; parser: swiftc -parse |
+| 34-py-crlf-git-clean | 0 | line-level | clean | same | OK | added lines kept; 8 untouched line(s) identical; parser: python3 ast.parse |
+| 35-py-rst-underline-both-add | 1 | none | 1 conflict(s) | same | OK |  |
+
+cases: 35; exit 0: 23 (line-level 15, declaration-level 8); exit 1: 12; exit 3: 0; other: 0
+vs git merge-file: better 8, same 27, worse 0, stricter (git's clean text does not parse, nothing printed) 0
+all checks hold for every case (--lang en)
+
+Same check with --lang zh (summary lines):
+cases: 35; exit 0: 23 (line-level 15, declaration-level 8); exit 1: 12; exit 3: 0; other: 0
+vs git merge-file: better 8, same 27, worse 0, stricter (git's clean text does not parse, nothing printed) 0
+all checks hold for every case (--lang zh)
+
+Syntax gate (Fixtures/syntax-gate-cases: each side parses, git merges cleanly, the merged text does not parse):
+| case | exit | result used | git merge-file | vs git | check | notes |
+|---|---|---|---|---|---|---|
+| javascript-block-comment | 3 | - | clean | stricter | OK | git's clean merge rejected by node --check |
+| python-string-delimiters | 3 | - | clean | stricter | OK | git's clean merge rejected by python3 ast.parse |
+| swift-string-delimiters | 3 | - | clean | stricter | OK | git's clean merge rejected by swiftc -parse |
+| typescript-block-comment | 3 | - | clean | stricter | OK | git's clean merge rejected by node stripTypeScriptTypes |
+
+cases: 4; exit 0: 0 (line-level 0, declaration-level 0); exit 1: 0; exit 3: 4; other: 0
+vs git merge-file: better 0, same 0, worse 0, stricter (git's clean text does not parse, nothing printed) 4
+all checks hold for every case (--lang en)
+all checks hold for every case (--lang zh)
+
+git not available (child PATH is an empty directory):
+no git (--lang en): exit=4, stdout_bytes=0, stderr='semantic-merge: 3-Way Semantic AST Merge failed: git is unavailable or `git merge-file` failed (git executable not found in PATH). Refusing to merge without the line-level reference '
+no git (--lang zh): exit=4, stdout_bytes=0, stderr='semantic-merge: 三路语义合并失败：git 不可用或 git merge-file 运行失败（git executable not found in PATH）。没有行级合并结果作参照，拒绝合并 '
+[PASS] Row 4: no case exits 0 with lost, altered or unparsable content; 09-py-triplequote equals git merge-file; unparsable clean merges exit 3 with empty stdout; without git the command exits 4 (EN+ZH)
 
 --- Row 5: semantic-merge conflict contract on 12-swift-true-conflict (CLI + MCP) ---
-12-swift-true-conflict CLI (--lang en): exit=1, stderr='semantic-merge: Unresolved merge conflicts detected (1 conflict(s))'
-12-swift-true-conflict CLI (--lang zh): exit=1, stderr='semantic-merge: 检测到未解决的合并冲突（共 1 处）'
-MCP 12-swift-true-conflict isError: True
-MCP 09-py-triplequote isError: True
-[PASS] Row 5: 12-swift-true-conflict exits 1 in CLI and returns isError: true in MCP (and 09-py-triplequote returns isError: true)
+12-swift-true-conflict CLI (--lang en): exit=1, stderr='semantic-merge: Unresolved merge conflicts detected (1 conflict(s)) semantic-merge: [strategy=none] the output is the conflict-marked git merge-file result: conflict block 1 of 1 modifies or deletes base lines (it is not a both-sides insertion); declaration-level result not used '
+12-swift-true-conflict CLI (--lang zh): exit=1, stderr='semantic-merge: 检测到未解决的合并冲突（共 1 处） semantic-merge: [strategy=none] 输出是 git merge-file 带冲突标记的结果：第 1/1 个冲突块改动或删除了 base 里的行（不是两边各自在同一位置插入），不采用声明级结果 '
+MCP 12-swift-true-conflict: isError = True
+MCP 09-py-triplequote: isError = False
+MCP swift-string-delimiters (clean line merge that does not parse): isError = True
+MCP without git: isError = True
+[PASS] Row 5: 12-swift-true-conflict exits 1 with git's conflict text (EN+ZH); MCP isError is true for conflict, unparsable merge and missing git, false with git's text for 09-py-triplequote
 
 --- Row 6: MCP tools/list count & tool names vs README.md and README.zh-CN.md ---
 MCP tools/list returned 2 tools: ['relay_semantic_merge', 'relay_check_ownership']
 [PASS] Row 6: MCP tools/list exposes 2 tools (relay_semantic_merge, relay_check_ownership), matching README.md & README.zh-CN.md
 
---- Row 7 & Row 8: Real GUI process empty launch + open/close empty .relayproj without seeding demo lanes ---
-[PASS] Row 7: Launching GUI without --demo starts cleanly in empty state (verified alongside StudioViewModelAndHonestyTests)
-After GUI open+close (--lang en): lanes='', status={"undoDepth":0,"walBytes":0,"semanticAutoMergeCount":0,"sqliteBytes":143360,"repositoryPath":"","schemaVersion":4,"activeLaneCount":0,"totalTokensObserved":0,"workspaceName":"user-empty-en","guardrailFindingCount":0,"taskNodeCount":0,"totalSpendUSD":0,"redoDepth":0,"unresolvedConflictCount":0}
-After GUI open+close (--lang zh): lanes='', status={"totalTokensObserved":0,"unresolvedConflictCount":0,"redoDepth":0,"semanticAutoMergeCount":0,"totalSpendUSD":0,"activeLaneCount":0,"sqliteBytes":143360,"taskNodeCount":0,"schemaVersion":4,"walBytes":0,"undoDepth":0,"repositoryPath":"","workspaceName":"user-empty-zh","guardrailFindingCount":0}
-[PASS] Row 8: Opening and closing an empty .relayproj in GUI leaves 0 lanes on disk (EN+ZH)
+--- Row 7 & Row 8 + added row A: headless view-model tests, no preference files written ---
+✔ Test run with 40 tests in 2 suites passed after 23.904 seconds.
+passed: RelayStudioViewModel starts completely empty without --demo in both EN and ZH (Row 7)
+[PASS] Row 7: default RelayStudioViewModel (no --demo) has 0 lanes, no terminal content, no spend, no proxy address (EN+ZH, headless)
+passed: Opening an empty user .relayproj in RelayStudioViewModel never seeds demo lanes into disk DB (Row 8)
+[PASS] Row 8: opening a freshly initialised .relayproj in RelayStudioViewModel leaves 0 lanes on disk (headless)
+passed: Acceptance scripts reach the product binary only through the headless-subcommand wrapper (C1)
+passed: UserDefaults used by tests are stored in a temporary directory, never in ~/Library/Preferences (C2)
+passed: readme-commands.sh replays the commands found in README.md and README.zh-CN.md instead of a hand-kept copy (C4)
+~/Library/Preferences entries: before=847, after=847; new RelayIDE entries: 0
+[PASS] Added row A: the test run added no RelayIDE file to ~/Library/Preferences (entries before=847, after=847)
 
 --- Row 9: Repo-wide grep for forbidden fake echo & fake proxy endpoint ---
 Occurrences inside Tests/: 1 -> ['Tests/RelayIDETests/StudioViewModelAndHonestyTests.swift']
 Occurrences outside Tests/: 0
 [PASS] Row 9: Zero occurrences of fake broadcast echo or fake wiretap port outside Tests/
 
+--- Added row B: git grep -n for the macOS home-directory prefix ---
+git grep -n for the home-directory prefix prints 10 line(s):
+  Sources/RelayOrchestrator/RelayDemoWorkspaceSynthesizer.swift:203  home directory name(s): shared
+  Sources/RelayWiretapProxy/OutboundSecretDLPAndCostAnalytics.swift:584  home directory name(s): <name>
+  Sources/RelayWiretapProxy/OutboundSecretDLPAndCostAnalytics.swift:585  home directory name(s): [A-Za-z0-9._\-]+
+  Sources/RelayWiretapProxy/OutboundSecretDLPAndCostAnalytics.swift:603  home directory name(s): <user>
+  Sources/RelayWiretapProxy/OutboundSecretDLPAndCostAnalytics.swift:604  home directory name(s): [A-Za-z0-9._\-]+
+  Tests/RelayIDETests/PluginSDKAndOrchestratorCPMTests.swift:22  home directory name(s): (prefix only, no name)
+  Tests/RelayIDETests/PluginSDKAndOrchestratorCPMTests.swift:29  home directory name(s): developer
+  Tests/RelayIDETests/WiretapSSEAndDLPCircuitBreakerTests.swift:536  home directory name(s): alice
+  Tests/RelayIDETests/WiretapSSEAndDLPCircuitBreakerTests.swift:566  home directory name(s): alice
+  Tests/RelayIDETests/WorktreeGitDiffAndHandoffTests.swift:687  home directory name(s): test
+none of them names a real home directory (only scanner patterns, sample inputs and the invented demo path)
+[PASS] Added row B: no committed file contains the path of a real home directory (the literal expectation 'no output' is not met, see the list above)
+
+--- Added row C: no RelayIDE desktop process was started ---
+RelayIDE processes from this checkout still running: none
+[PASS] Added row C: every product command went through relay-cli.sh (headless subcommands only); no RelayIDE process is left running
+
 ================================================================
-ALL 9 M0 ACCEPTANCE CHECKS PASSED (EN + ZH)
+ALL M0 ACCEPTANCE CHECKS PASSED (EN + ZH)
 ================================================================
