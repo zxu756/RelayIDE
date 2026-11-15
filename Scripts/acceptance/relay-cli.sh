@@ -53,7 +53,7 @@ for arg in "$@"; do
 done
 
 case "${subcommand}" in
-    init|status|lanes|dag-waves|semantic-merge|audit-plugins|export-html|mcp|help|--help|-h|version|--version) ;;
+    init|run|status|lanes|dag-waves|semantic-merge|audit-plugins|export-html|mcp|help|--help|-h|version|--version) ;;
     *)
         REFUSE_REASON="first argument '${subcommand:-<none>}' is not a headless CLI subcommand, so the executable would open the desktop GUI."
         refuse "$@"

@@ -8,9 +8,15 @@ public enum RelayTaskStatus: String, Sendable, Codable, Hashable, CaseIterable {
     case running = "Running"
     case verifyingGate = "Verifying Gate"
     case completed = "Completed"
+    case partial = "Partial"
     case failed = "Failed"
+    case timeout = "Timeout"
+    case refused = "Refused"
+    case skipped = "Skipped"
     case haltedByBudget = "Budget Halted"
     case cancelled = "Cancelled"
+    case killed = "Killed"
+    case interrupted = "Interrupted"
 }
 
 public struct RelayTaskNode: Sendable, Codable, Hashable, Identifiable {

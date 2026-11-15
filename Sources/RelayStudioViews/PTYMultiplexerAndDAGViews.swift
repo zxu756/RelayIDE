@@ -1033,9 +1033,9 @@ public struct PTYCriticalPathAndHandoffInspector: View {
             return RelayBauhausDesign.agySignalGreen
         case .running, .verifyingGate:
             return RelayBauhausDesign.codexCobalt
-        case .failed, .haltedByBudget:
+        case .failed, .timeout, .refused, .killed, .interrupted, .haltedByBudget:
             return RelayBauhausDesign.claudeVermilion
-        case .pending, .blockedOnDeps, .cancelled:
+        case .pending, .blockedOnDeps, .partial, .skipped, .cancelled:
             return RelayBauhausDesign.vibeOchre
         }
     }

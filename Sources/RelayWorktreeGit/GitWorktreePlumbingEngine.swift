@@ -204,12 +204,32 @@ public struct GitWorktreePlumbingEngine: Sendable {
     }
 
     @discardableResult
-    public func runGit(_ arguments: [String], cwd: String) throws -> String {
+    public func runGit(
+        _ arguments: [String],
+        cwd: String,
+        environment: [String: String]? = nil
+    ) throws -> String {
+        let result = try runGitCommand(arguments, cwd: cwd, environment: environment)
+        guard result.exitCode == 0 else {
+            throw RelayIDEError.gitPlumbingFailure(
+                command: "git " + arguments.joined(separator: " "),
+                exitCode: result.exitCode,
+                stderr: result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        return result.stdout
+    }
+
+    public func runGitCommand(
+        _ arguments: [String],
+        cwd: String,
+        environment: [String: String]? = nil
+    ) throws -> (exitCode: Int32, stdout: String, stderr: String) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: gitExecutablePath)
         proc.arguments = arguments
         proc.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        var env = ProcessInfo.processInfo.environment
+        var env = environment ?? ProcessInfo.processInfo.environment
         env["GIT_TERMINAL_PROMPT"] = "0"
         proc.environment = env
 
@@ -217,6 +237,7 @@ public struct GitWorktreePlumbingEngine: Sendable {
         let errPipe = Pipe()
         proc.standardOutput = outPipe
         proc.standardError = errPipe
+        proc.standardInput = FileHandle.nullDevice
 
         do {
             try proc.run()
@@ -227,17 +248,29 @@ public struct GitWorktreePlumbingEngine: Sendable {
                 stderr: error.localizedDescription
             )
         }
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
 
-        guard proc.terminationStatus == 0 else {
-            throw RelayIDEError.gitPlumbingFailure(
-                command: "git " + arguments.joined(separator: " "),
-                exitCode: proc.terminationStatus,
-                stderr: String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            )
+        // Drain stdout and stderr concurrently so large outputs can never deadlock on pipe buffer capacity (R37).
+        final class DataBox: @unchecked Sendable { var data = Data() }
+        let outBox = DataBox()
+        let errBox = DataBox()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global().async {
+            outBox.data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
         }
-        return String(decoding: outData, as: UTF8.self)
+        group.enter()
+        DispatchQueue.global().async {
+            errBox.data = errPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        proc.waitUntilExit()
+        group.wait()
+
+        return (
+            exitCode: proc.terminationStatus,
+            stdout: String(decoding: outBox.data, as: UTF8.self),
+            stderr: String(decoding: errBox.data, as: UTF8.self)
+        )
     }
 }

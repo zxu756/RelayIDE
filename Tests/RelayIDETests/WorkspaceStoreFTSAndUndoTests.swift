@@ -19,21 +19,21 @@ struct WorkspaceStoreFTSAndUndoTests {
 
     // MARK: - 1. Schema Migration Catalog `v1 -> v4` & Idempotent Reopen
 
-    @Test("RelayProjectDatabase applies v1->v4 WAL migrations cleanly and reopens idempotently")
+    @Test("RelayProjectDatabase applies v1->v5 WAL migrations cleanly and reopens idempotently")
     func sqliteSchemaMigrationsV1ThroughV4AndIdempotentReopen() throws {
         let (rootDir, bundleDir) = try makeTempBundleURL(label: "migrations")
         defer { try? FileManager.default.removeItem(at: rootDir) }
 
-        #expect(RelayProjectDatabase.currentSchemaVersion == 4)
-        #expect(RelaySchemaMigrationCatalog.allMigrations.map(\.version) == [1, 2, 3, 4])
-        #expect(RelaySchemaMigrationCatalog.descriptor(forVersion: 4) != nil)
+        #expect(RelayProjectDatabase.currentSchemaVersion == 5)
+        #expect(RelaySchemaMigrationCatalog.allMigrations.map(\.version) == [1, 2, 3, 4, 5])
+        #expect(RelaySchemaMigrationCatalog.descriptor(forVersion: 5) != nil)
 
         do {
             let db = try RelayProjectDatabase(bundleDirectoryURL: bundleDir)
             try db.makeFTS5SearchStore().ensureExtensionTables()
             _ = try db.performWALCheckpoint(mode: .passive)
             let applied = try db.appliedSchemaMigrations()
-            #expect(applied.map(\.version) == [1, 2, 3, 4])
+            #expect(applied.map(\.version) == [1, 2, 3, 4, 5])
             #expect(applied.allSatisfy { $0.allExpectedTablesPresent })
             try db.setMeta(key: "workspace_name", value: "PersistenceCheck")
         }
@@ -41,7 +41,7 @@ struct WorkspaceStoreFTSAndUndoTests {
         // Reopen existing bundle -> migrations must be idempotent and metadata preserved
         let reopened = try RelayProjectDatabase(bundleDirectoryURL: bundleDir)
         #expect(reopened.getMeta(key: "workspace_name") == "PersistenceCheck")
-        #expect(try reopened.appliedSchemaMigrations().count == 4)
+        #expect(try reopened.appliedSchemaMigrations().count == 5)
     }
 
     // MARK: - 2. `PRAGMA integrity_check`, WAL Checkpoint, Telemetry & Online Backup
@@ -66,7 +66,7 @@ struct WorkspaceStoreFTSAndUndoTests {
         #expect(walReport.elapsedMs >= 0)
 
         let telemetry = try db.collectStorageTelemetry()
-        #expect(telemetry.schemaVersion == 4)
+        #expect(telemetry.schemaVersion == 5)
         #expect(telemetry.sqliteFileBytes > 0)
         #expect(!telemetry.tables.isEmpty)
 
@@ -216,7 +216,7 @@ struct WorkspaceStoreFTSAndUndoTests {
         // 6. Aggregate Stats
         let stats = try db.computeStats()
         #expect(stats.workspaceName == "FlagshipCRUD")
-        #expect(stats.schemaVersion == 4)
+        #expect(stats.schemaVersion == 5)
         #expect(stats.activeLaneCount == 2)
         #expect(stats.taskNodeCount == 2)
         #expect(stats.semanticAutoMergeCount == 1)
@@ -825,5 +825,296 @@ struct WorkspaceStoreFTSAndUndoTests {
 
         #expect(try fts.search("   ").isEmpty)
         #expect(try fts.search("::: --- \"\"").isEmpty)
+    }
+
+    // MARK: - 18. Schema v4 -> v5 Upgrade Preserves v4 Data & Persists `relay_runs` / `relay_run_lanes` (R41)
+
+    @Test("Upgrading an existing v4 SQLite bundle to v5 preserves legacy tables, configures busy_timeout, and persists runs and lanes")
+    func sqliteSchemaV4ToV5UpgradePreservesLegacyDataAndPersistsRunsAndLanes() throws {
+        let (rootDir, bundleDir) = try makeTempBundleURL(label: "v4-to-v5")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        try FileManager.default.createDirectory(at: bundleDir, withIntermediateDirectories: true)
+        let sqlitePath = bundleDir.appendingPathComponent("workspace.sqlite").path
+
+        let legacyLane = ManagedWorktreeLane(
+            id: "legacy-lane-claude",
+            displayName: "Legacy Claude",
+            assignedVendor: .claudeCode,
+            worktreePath: "/tmp/legacy/.worktrees/claude",
+            branchName: "relay/legacy-claude",
+            baseCommitOID: "1111111",
+            headCommitOID: "2222222"
+        )
+        let jsonEncoder = JSONEncoder()
+        jsonEncoder.dateEncodingStrategy = .iso8601
+        let legacyLaneJSON = String(decoding: try jsonEncoder.encode(legacyLane), as: UTF8.self)
+
+        // Construct a genuine v4 database on disk before opening with RelayProjectDatabase.
+        do {
+            var rawDB: OpaquePointer?
+            #expect(sqlite3_open_v2(sqlitePath, &rawDB, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+            defer { if let rawDB { sqlite3_close(rawDB) } }
+
+            let v4BootstrapSQL = """
+            PRAGMA journal_mode = WAL;
+            CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
+            CREATE TABLE workspace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE managed_lanes (lane_id TEXT PRIMARY KEY, vendor TEXT NOT NULL, payload_json TEXT NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE dag_specs (dag_id TEXT PRIMARY KEY, name TEXT NOT NULL, payload_json TEXT NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE semantic_merge_reports (relative_path TEXT PRIMARY KEY, auto_merged_count INTEGER NOT NULL, conflict_count INTEGER NOT NULL, payload_json TEXT NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE wiretap_spans (span_id TEXT PRIMARY KEY, lane_id TEXT NOT NULL, vendor TEXT NOT NULL, total_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL, payload_json TEXT NOT NULL, recorded_at REAL NOT NULL);
+            CREATE TABLE guardrail_findings (finding_id TEXT PRIMARY KEY, plugin_id TEXT NOT NULL, severity TEXT NOT NULL, payload_json TEXT NOT NULL, created_at REAL NOT NULL);
+            CREATE TABLE undo_redo_stack (seq INTEGER PRIMARY KEY AUTOINCREMENT, stack_kind TEXT NOT NULL, title TEXT NOT NULL, mutation_json TEXT NOT NULL, created_at REAL NOT NULL);
+            INSERT INTO schema_migrations (version, applied_at) VALUES (1, 1700000001), (2, 1700000002), (3, 1700000003), (4, 1700000004);
+            INSERT INTO workspace_meta (key, value) VALUES ('workspace_name', 'UpgradedFromV4');
+            """
+            #expect(sqlite3_exec(rawDB, v4BootstrapSQL, nil, nil, nil) == SQLITE_OK)
+
+            var stmt: OpaquePointer?
+            #expect(sqlite3_prepare_v2(rawDB, "INSERT INTO managed_lanes (lane_id, vendor, payload_json, updated_at) VALUES ('legacy-lane-claude', 'claude', ?1, 1700000005);", -1, &stmt, nil) == SQLITE_OK)
+            if let stmt {
+                let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+                sqlite3_bind_text(stmt, 1, legacyLaneJSON, -1, transient)
+                #expect(sqlite3_step(stmt) == SQLITE_DONE)
+                sqlite3_finalize(stmt)
+            }
+        }
+
+        // Open via RelayProjectDatabase -> must migrate v4 -> v5 without losing v4 data and set busy_timeout.
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: bundleDir)
+        #expect(try db.configuredBusyTimeoutMs() >= 5000)
+
+        try db.makeFTS5SearchStore().ensureExtensionTables()
+        let applied = try db.appliedSchemaMigrations()
+        #expect(applied.map(\.version) == [1, 2, 3, 4, 5])
+        #expect(applied.allSatisfy { $0.allExpectedTablesPresent })
+        #expect(db.getMeta(key: "workspace_name") == "UpgradedFromV4")
+        let preservedLanes = try db.allLanes()
+        #expect(preservedLanes.count == 1)
+        #expect(preservedLanes.first?.id == "legacy-lane-claude")
+
+        // Verify v5 relay_runs + relay_run_lanes CRUD including nullable exitCode/signal and nullable costUSD/tokens.
+        let started = Date(timeIntervalSince1970: 1_763_200_000)
+        let finished = Date(timeIntervalSince1970: 1_763_200_045)
+        let runID = "20261116-001000-abcd"
+        let initialRun = RelayRunRecord(
+            runID: runID,
+            repoPath: "/tmp/sample-repo",
+            planCopyPath: bundleDir.appendingPathComponent("runs/\(runID)/plan.json").path,
+            baseRef: "main",
+            baseCommitOID: "0123456789abcdef0123456789abcdef01234567",
+            verifyCommand: "swift test",
+            relayShPath: "/tmp/fake-relay.sh",
+            relayShSHA256: "deadbeefcafebabe0123456789abcdefdeadbeefcafebabe0123456789abcdef",
+            startedAt: started,
+            finishedAt: nil,
+            status: .running,
+            reason: nil,
+            relayidePID: 12345,
+            lanes: [
+                RelayRunLaneRecord(
+                    runID: runID,
+                    laneID: "api",
+                    ordinal: 0,
+                    agent: .claude,
+                    promptPath: "/tmp/prompts/api.md",
+                    after: [],
+                    status: .pending
+                ),
+                RelayRunLaneRecord(
+                    runID: runID,
+                    laneID: "docs",
+                    ordinal: 1,
+                    agent: .agy,
+                    promptPath: "/tmp/prompts/docs.md",
+                    after: ["api"],
+                    status: .pending
+                ),
+            ]
+        )
+        try db.createRun(initialRun)
+
+        // Update lane 0 to signal-killed (exitCode nil, signal 9) and lane 1 to unpriced tokens (costUSD nil, tokens 3456).
+        var killedLane = initialRun.lanes[0]
+        killedLane.status = .failed
+        killedLane.exitCode = nil
+        killedLane.signal = 9
+        killedLane.reason = "signal 9"
+        killedLane.startedAt = started
+        killedLane.finishedAt = finished
+        killedLane.pid = 22222
+        killedLane.costUSD = nil
+        killedLane.tokens = nil
+        killedLane.costSource = "no_record"
+        killedLane.branch = "relay/\(runID)/api"
+        killedLane.worktreePath = bundleDir.appendingPathComponent("runs/\(runID)/worktrees/api").path
+        killedLane.uncommittedFiles = ["Sources/API.swift"]
+        try db.updateRunLane(killedLane)
+
+        var tokenOnlyLane = initialRun.lanes[1]
+        tokenOnlyLane.status = .succeeded
+        tokenOnlyLane.exitCode = 0
+        tokenOnlyLane.signal = nil
+        tokenOnlyLane.startedAt = started
+        tokenOnlyLane.finishedAt = finished
+        tokenOnlyLane.pid = 22223
+        tokenOnlyLane.costUSD = nil
+        tokenOnlyLane.tokens = 3456
+        tokenOnlyLane.costSource = "unpriced"
+        tokenOnlyLane.branch = "relay/\(runID)/docs"
+        tokenOnlyLane.commitOID = "fedcba9876543210fedcba9876543210fedcba98"
+        tokenOnlyLane.worktreePath = bundleDir.appendingPathComponent("runs/\(runID)/worktrees/docs").path
+        try db.updateRunLane(tokenOnlyLane)
+
+        try db.updateRunStatus(runID: runID, status: .failed, reason: "lane api failed", finishedAt: finished)
+
+        let loaded = try #require(try db.fetchRun(runID: runID))
+        #expect(loaded.status == .failed)
+        #expect(loaded.reason == "lane api failed")
+        #expect(loaded.verifyCommand == "swift test")
+        #expect(loaded.lanes.count == 2)
+        #expect(loaded.lanes[0].laneID == "api")
+        #expect(loaded.lanes[0].exitCode == nil)
+        #expect(loaded.lanes[0].signal == 9)
+        #expect(loaded.lanes[0].costUSD == nil)
+        #expect(loaded.lanes[0].costSource == "no_record")
+        #expect(loaded.lanes[0].uncommittedFiles == ["Sources/API.swift"])
+        #expect(loaded.lanes[1].laneID == "docs")
+        #expect(loaded.lanes[1].exitCode == 0)
+        #expect(loaded.lanes[1].costUSD == nil)
+        #expect(loaded.lanes[1].tokens == 3456)
+        #expect(loaded.lanes[1].costSource == "unpriced")
+
+        // M1 RelayTaskStatus must include timeout, partial, refused, skipped, killed, interrupted (R41).
+        let requiredStatuses: Set<RelayTaskStatus> = [.timeout, .partial, .refused, .skipped, .killed, .interrupted]
+        #expect(requiredStatuses.isSubset(of: Set(RelayTaskStatus.allCases)))
+    }
+
+    // MARK: - 19. Project-Level `run.lock` Contention Across Two Handles in Same Process (§9)
+
+    @Test("RelayProjectRunLock acquires exclusive flock on run.lock, rejects second handle with exit 125 naming holder runID, and re-acquires after release")
+    func projectRunLockTwoHandleContentionInSameProcess() throws {
+        let (rootDir, bundleDir) = try makeTempBundleURL(label: "run-lock")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+        _ = try RelayProjectDatabase(bundleDirectoryURL: bundleDir)
+
+        let firstRunID = "20261116-010203-a1b2"
+        let secondRunID = "20261116-010204-c3d4"
+
+        let handle1 = try RelayProjectRunLock.acquire(
+            bundleDirectoryURL: bundleDir,
+            runID: firstRunID,
+            pid: 4242
+        )
+        defer { handle1.release() }
+
+        let active = RelayProjectRunLock.inspectActiveHolder(bundleDirectoryURL: bundleDir)
+        #expect(active.isHeld == true)
+        #expect(active.holder?.runID == firstRunID)
+        #expect(active.holder?.pid == 4242)
+
+        // Second file descriptor in the same process must fail with projectRunLocked (exit 125) and preserve holder info.
+        var caughtError: RelayIDEError?
+        do {
+            let unexpected = try RelayProjectRunLock.acquire(
+                bundleDirectoryURL: bundleDir,
+                runID: secondRunID,
+                pid: 9999
+            )
+            unexpected.release()
+        } catch let err as RelayIDEError {
+            caughtError = err
+        }
+        let lockErr = try #require(caughtError)
+        #expect(lockErr.cliExitCode == 125)
+        #expect(lockErr.localizedDescription(in: .en).contains(firstRunID))
+        #expect(lockErr.localizedDescription(in: .zhHans).contains(firstRunID))
+        #expect(lockErr.localizedDescription(in: .en).contains("4242"))
+
+        // Contender must NOT have wiped handle1's payload in run.lock!
+        let stillActive = RelayProjectRunLock.inspectActiveHolder(bundleDirectoryURL: bundleDir)
+        #expect(stillActive.isHeld == true)
+        #expect(stillActive.holder?.runID == firstRunID)
+
+        // After releasing handle1, handle2 acquires cleanly.
+        handle1.release()
+        let afterRelease = RelayProjectRunLock.inspectActiveHolder(bundleDirectoryURL: bundleDir)
+        #expect(afterRelease.isHeld == false)
+
+        let handle2 = try RelayProjectRunLock.acquire(
+            bundleDirectoryURL: bundleDir,
+            runID: secondRunID,
+            pid: 9999
+        )
+        #expect(RelayProjectRunLock.inspectActiveHolder(bundleDirectoryURL: bundleDir).holder?.runID == secondRunID)
+        handle2.release()
+    }
+
+    // MARK: - 20. Orphaned `running` Run Reconciles to `interrupted` When `run.lock` Is Unheld (§8, §12)
+
+    @Test("RelayProjectDatabase reconciles running run and running lanes to interrupted when run.lock is no longer held by that run")
+    func orphanedRunningRunReconcilesToInterruptedWhenLockIsUnheldOrHeldByAnotherRun() throws {
+        let (rootDir, bundleDir) = try makeTempBundleURL(label: "interrupted-reconcile")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let db = try RelayProjectDatabase(bundleDirectoryURL: bundleDir)
+        let run1ID = "20261116-020000-0001"
+        let now = Date(timeIntervalSince1970: 1_763_210_000)
+
+        let lock1 = try RelayProjectRunLock.acquire(
+            bundleDirectoryURL: bundleDir,
+            runID: run1ID,
+            pid: 5150
+        )
+
+        let run1 = RelayRunRecord(
+            runID: run1ID,
+            repoPath: "/tmp/repo",
+            planCopyPath: bundleDir.appendingPathComponent("runs/\(run1ID)/plan.json").path,
+            baseRef: "main",
+            baseCommitOID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            verifyCommand: nil,
+            relayShPath: "/tmp/fake-relay.sh",
+            relayShSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            startedAt: now,
+            finishedAt: nil,
+            status: .running,
+            reason: nil,
+            relayidePID: 5150,
+            lanes: [
+                RelayRunLaneRecord(runID: run1ID, laneID: "done", ordinal: 0, agent: .claude, promptPath: "/tmp/p1.md", after: [], status: .succeeded, exitCode: 0),
+                RelayRunLaneRecord(runID: run1ID, laneID: "active", ordinal: 1, agent: .codex, promptPath: "/tmp/p2.md", after: [], status: .running, pid: 5151),
+                RelayRunLaneRecord(runID: run1ID, laneID: "queued", ordinal: 2, agent: .agy, promptPath: "/tmp/p3.md", after: ["active"], status: .pending),
+            ]
+        )
+        try db.createRun(run1)
+
+        // While lock1 is held by run1ID, status remains running.
+        let whileAlive = try #require(try db.fetchRun(runID: run1ID))
+        #expect(whileAlive.status == .running)
+        #expect(whileAlive.lanes.first { $0.laneID == "active" }?.status == .running)
+
+        // Simulate kill -9: kernel closes descriptor and releases flock without truncating run.lock.
+        lock1.closeDescriptorSimulatingCrash()
+
+        let afterCrash = try #require(try db.fetchRun(runID: run1ID))
+        #expect(afterCrash.status == .interrupted)
+        #expect(afterCrash.lanes.allSatisfy { $0.status != .running })
+        #expect(afterCrash.lanes.first { $0.laneID == "done" }?.status == .succeeded)
+        #expect(afterCrash.lanes.first { $0.laneID == "active" }?.status == .interrupted)
+
+        let allAfterCrash = try db.allRuns()
+        #expect(allAfterCrash.count == 1)
+        #expect(allAfterCrash[0].status == .interrupted)
+        #expect(allAfterCrash[0].lanes.allSatisfy { $0.status != .running })
+
+        // Even if a subsequent run2 holds run.lock, run1 must still reconcile as interrupted!
+        let run2ID = "20261116-020500-0002"
+        let lock2 = try RelayProjectRunLock.acquire(bundleDirectoryURL: bundleDir, runID: run2ID, pid: 6160)
+        defer { lock2.release() }
+        let run1DuringRun2 = try #require(try db.fetchRun(runID: run1ID))
+        #expect(run1DuringRun2.status == .interrupted)
+        #expect(run1DuringRun2.lanes.allSatisfy { $0.status != .running })
     }
 }

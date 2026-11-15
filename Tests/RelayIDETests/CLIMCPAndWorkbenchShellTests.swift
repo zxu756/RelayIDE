@@ -77,7 +77,7 @@ struct CLIMCPAndWorkbenchShellTests {
         let stats = try JSONDecoder().decode(RelayWorkspaceStats.self, from: Data(statusJSON.utf8))
         #expect(stats.activeLaneCount >= 4)
         #expect(stats.taskNodeCount >= 4)
-        #expect(stats.schemaVersion == 4)
+        #expect(stats.schemaVersion == 5)
 
         // 3. lanes --project <path>
         let lanesOut = try await cli.execute(arguments: ["lanes", "--project", bundlePath])
@@ -1040,6 +1040,7 @@ struct CLIMCPAndWorkbenchShellTests {
         }
         let forwarded: [[String]] = [
             ["status", "--project", "X.relayproj"],
+            ["run", "plan.json", "--project", "X.relayproj"],
             ["--lang", "zh", "lanes"],
             ["--lang=en", "semantic-merge", "a", "b", "c"],
             ["--help"],
@@ -1563,5 +1564,819 @@ struct CLIMCPAndWorkbenchShellTests {
         let guiLines = guiResult.stdout.components(separatedBy: "\n").filter { $0.contains("gui.md:") }
         #expect(guiLines.count == 7)
         #expect(guiLines.allSatisfy { $0.hasPrefix("SKIP-GUI") }, "\(guiLines)")
+    }
+
+    // MARK: - 25. M1 Entry Point Classifier, Unknown Subcommand Rejection & R40 Exit Codes (R39, R40)
+
+    @Test("RelayCLIRunner.classifyLaunchArguments routes run to CLI, rejects unknown non-flag non-.relayproj tokens with exit 2 without opening GUI, and separates exit codes 2 vs 125")
+    func cliLaunchDispositionClassifierAndErrorExitCodeSeparation() async throws {
+        // 1. Legitimate desktop GUI launches
+        #expect(RelayCLIRunner.classifyLaunchArguments([]) == .desktopWorkbench)
+        #expect(RelayCLIRunner.classifyLaunchArguments(["--demo"]) == .desktopWorkbench)
+        #expect(RelayCLIRunner.classifyLaunchArguments(["--project", "Sample.relayproj"]) == .desktopWorkbench)
+        #expect(RelayCLIRunner.classifyLaunchArguments(["--lang", "zh", "--project", "Sample.relayproj"]) == .desktopWorkbench)
+        #expect(RelayCLIRunner.classifyLaunchArguments(["Sample.relayproj"]) == .desktopWorkbench)
+        #expect(RelayCLIRunner.classifyLaunchArguments(["/tmp/Sample.relayproj/"]) == .desktopWorkbench)
+        #expect(RelayCLIRunner.classifyLaunchArguments(["-psn_0_424242"]) == .desktopWorkbench)
+        #expect(RelayCLIRunner.classifyLaunchArguments(["-NSDocumentRevisionsDebugMode", "YES"]) == .desktopWorkbench)
+
+        // 2. Screenshot export
+        if case .exportScreenshots(let dirURL) = RelayCLIRunner.classifyLaunchArguments(["--export-screenshots", "docs"]) {
+            #expect(dirURL.lastPathComponent == "docs")
+        } else {
+            Issue.record("Expected .exportScreenshots for --export-screenshots")
+        }
+
+        // 3. Known headless CLI subcommands including `run`
+        #expect(
+            RelayCLIRunner.classifyLaunchArguments(["run", "plan.json", "--project", "Sample.relayproj"])
+                == .headlessCLI(filteredArguments: ["run", "plan.json", "--project", "Sample.relayproj"], subcommand: "run")
+        )
+        #expect(
+            RelayCLIRunner.classifyLaunchArguments(["--lang", "zh", "run", "plan.json", "--project", "Sample.relayproj"])
+                == .headlessCLI(filteredArguments: ["--lang", "zh", "run", "plan.json", "--project", "Sample.relayproj"], subcommand: "run")
+        )
+        #expect(
+            RelayCLIRunner.classifyLaunchArguments(["--lang=en", "status", "--project", "Sample.relayproj"])
+                == .headlessCLI(filteredArguments: ["--lang=en", "status", "--project", "Sample.relayproj"], subcommand: "status")
+        )
+
+        // 4. First argument not starting with '-', not '.relayproj', and not a known subcommand -> unknownSubcommand (never GUI!)
+        #expect(
+            RelayCLIRunner.classifyLaunchArguments(["typo-cmd"])
+                == .unknownSubcommand(filteredArguments: ["typo-cmd"], offendingToken: "typo-cmd")
+        )
+        #expect(
+            RelayCLIRunner.classifyLaunchArguments(["semantic_merge", "a", "b", "c"])
+                == .unknownSubcommand(filteredArguments: ["semantic_merge", "a", "b", "c"], offendingToken: "semantic_merge")
+        )
+        #expect(
+            RelayCLIRunner.classifyLaunchArguments(["--lang", "zh", "unknown-verb", "--project", "Sample.relayproj"])
+                == .unknownSubcommand(filteredArguments: ["--lang", "zh", "unknown-verb", "--project", "Sample.relayproj"], offendingToken: "unknown-verb")
+        )
+        #expect(
+            RelayCLIRunner.classifyLaunchArguments(["plan.json"])
+                == .unknownSubcommand(filteredArguments: ["plan.json"], offendingToken: "plan.json")
+        )
+
+        let cli = RelayCLIRunner()
+        let zhUnknown = await cli.executeCommand(
+            arguments: ["--lang", "zh", "unknown-verb"],
+            environment: ["PATH": "/usr/bin:/bin"]
+        )
+        #expect(zhUnknown.exitCode == 2)
+        #expect(zhUnknown.stdout.isEmpty)
+        #expect(zhUnknown.stderr.contains("未知子命令"))
+
+        let enUnknown = await cli.executeCommand(
+            arguments: ["--lang", "en", "unknown-verb"],
+            environment: ["PATH": "/usr/bin:/bin"]
+        )
+        #expect(enUnknown.exitCode == 2)
+        #expect(enUnknown.stdout.isEmpty)
+        #expect(enUnknown.stderr.contains("Unknown subcommand"))
+
+        // 5. R40: Missing --project bundle returns exit 2 (not 1, which means lane failure), while internal/env/lock errors map to 125.
+        let tempDir = try makeIsolatedTempDirectory(prefix: "relay-r40")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let missingProj = tempDir.appendingPathComponent("Missing.relayproj").path
+        let missingStatus = await cli.executeCommand(
+            arguments: ["status", "--project", missingProj],
+            environment: ["PATH": "/usr/bin:/bin"]
+        )
+        #expect(missingStatus.exitCode == 2)
+        #expect(missingStatus.stdout.isEmpty)
+        #expect(!missingStatus.stderr.isEmpty)
+        #expect(RelayIDEError.databaseError(code: 5, message: "busy").cliExitCode == 125)
+        #expect(RelayIDEError.relayEnvironmentFailure("missing relay.sh").cliExitCode == 125)
+        #expect(RelayIDEError.projectRunLocked(projectPath: missingProj, holderRunID: "r1", holderPID: 99).cliExitCode == 125)
+    }
+
+    // MARK: - 26. M1 `status --run <id>` & `status --runs` JSON Vocabulary and Crash Reconciliation (§12, §13)
+
+    @Test("RelayCLIRunner status --run and status --runs emit fixed English status JSON under both EN and ZH and reconcile unheld running runs to interrupted")
+    func cliStatusRunAndRunsJSONAndInterruptedReconciliation() async throws {
+        let tempDir = try makeIsolatedTempDirectory(prefix: "relay-status-runs")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let bundleURL = tempDir.appendingPathComponent("RunsLedger.relayproj", isDirectory: true)
+        let cli = RelayCLIRunner()
+        let env = ["PATH": "/usr/bin:/bin", "HOME": tempDir.path]
+
+        let initRes = await cli.executeCommand(arguments: ["init", "--project", bundleURL.path], environment: env)
+        #expect(initRes.exitCode == 0)
+
+        // Empty --runs returns []
+        let emptyRunsRes = await cli.executeCommand(
+            arguments: ["status", "--project", bundleURL.path, "--runs"],
+            environment: env
+        )
+        #expect(emptyRunsRes.exitCode == 0)
+        let emptyDecoded = try RelayRunJSONCodec.decode([RelayRunRecord].self, from: emptyRunsRes.stdout)
+        #expect(emptyDecoded.isEmpty)
+
+        // Unknown --run <id> returns exit 2 with empty stdout
+        let missingRunRes = await cli.executeCommand(
+            arguments: ["status", "--project", bundleURL.path, "--run", "20261116-000000-dead"],
+            environment: env
+        )
+        #expect(missingRunRes.exitCode == 2)
+        #expect(missingRunRes.stdout.isEmpty)
+        #expect(!missingRunRes.stderr.isEmpty)
+
+        // Populate two runs: run1 completed with mixed statuses, run2 marked running with an unheld lock (simulated crash).
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: bundleURL)
+        let t0 = Date(timeIntervalSince1970: 1_763_220_000)
+        let t1 = Date(timeIntervalSince1970: 1_763_220_030)
+        let run1ID = "20261116-030000-1111"
+        let run1 = RelayRunRecord(
+            runID: run1ID,
+            repoPath: "/tmp/repo-a",
+            planCopyPath: bundleURL.appendingPathComponent("runs/\(run1ID)/plan.json").path,
+            baseRef: "main",
+            baseCommitOID: "1111111111111111111111111111111111111111",
+            verifyCommand: nil,
+            relayShPath: "/tmp/fake-relay.sh",
+            relayShSHA256: "2222222222222222222222222222222222222222222222222222222222222222",
+            startedAt: t0,
+            finishedAt: t1,
+            status: .partial,
+            reason: nil,
+            relayidePID: 3001,
+            lanes: [
+                RelayRunLaneRecord(
+                    runID: run1ID,
+                    laneID: "api",
+                    ordinal: 0,
+                    agent: .claude,
+                    promptPath: "/tmp/api.md",
+                    after: [],
+                    status: .succeededNoChanges,
+                    exitCode: 0,
+                    costUSD: 0.0123,
+                    costSource: "usd"
+                ),
+                RelayRunLaneRecord(
+                    runID: run1ID,
+                    laneID: "docs",
+                    ordinal: 1,
+                    agent: .agy,
+                    promptPath: "/tmp/docs.md",
+                    after: ["api"],
+                    status: .partial,
+                    exitCode: 5,
+                    costUSD: nil,
+                    tokens: 2048,
+                    costSource: "unpriced",
+                    branch: "relay/\(run1ID)/docs",
+                    commitOID: "3333333333333333333333333333333333333333"
+                )
+            ]
+        )
+        try db.createRun(run1)
+
+        let run2ID = "20261116-030100-2222"
+        let crashedLock = try RelayProjectRunLock.acquire(bundleDirectoryURL: bundleURL, runID: run2ID, pid: 3002)
+        let run2 = RelayRunRecord(
+            runID: run2ID,
+            repoPath: "/tmp/repo-a",
+            planCopyPath: bundleURL.appendingPathComponent("runs/\(run2ID)/plan.json").path,
+            baseRef: "main",
+            baseCommitOID: "1111111111111111111111111111111111111111",
+            verifyCommand: nil,
+            relayShPath: "/tmp/fake-relay.sh",
+            relayShSHA256: "2222222222222222222222222222222222222222222222222222222222222222",
+            startedAt: t1,
+            finishedAt: nil,
+            status: .running,
+            reason: nil,
+            relayidePID: 3002,
+            lanes: [
+                RelayRunLaneRecord(runID: run2ID, laneID: "worker", ordinal: 0, agent: .codex, promptPath: "/tmp/w.md", after: [], status: .running, pid: 3099)
+            ]
+        )
+        try db.createRun(run2)
+        crashedLock.closeDescriptorSimulatingCrash()
+
+        // Query run1 in EN and ZH: JSON status tokens must be identical fixed English words, and null fields explicitly present.
+        let run1EN = await cli.executeCommand(
+            arguments: ["status", "--project", bundleURL.path, "--run", run1ID, "--lang", "en"],
+            environment: env
+        )
+        let run1ZH = await cli.executeCommand(
+            arguments: ["status", "--project", bundleURL.path, "--run", run1ID, "--lang", "zh"],
+            environment: env
+        )
+        #expect(run1EN.exitCode == 0)
+        #expect(run1ZH.exitCode == 0)
+        #expect(run1EN.stdout == run1ZH.stdout)
+        #expect(run1EN.stdout.contains("\"succeeded-no-changes\""))
+        #expect(run1EN.stdout.contains("\"costUSD\" : null"))
+
+        let decodedRun1 = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: run1EN.stdout)
+        #expect(decodedRun1.status == .partial)
+        #expect(decodedRun1.lanes[0].status == .succeededNoChanges)
+        #expect(decodedRun1.lanes[1].costUSD == nil)
+        #expect(decodedRun1.lanes[1].tokens == 2048)
+
+        // Query crashed run2: must report interrupted and zero running lanes!
+        let run2ZH = await cli.executeCommand(
+            arguments: ["status", "--project", bundleURL.path, "--run", run2ID, "--lang", "zh"],
+            environment: env
+        )
+        #expect(run2ZH.exitCode == 0)
+        let decodedRun2 = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: run2ZH.stdout)
+        #expect(decodedRun2.status == .interrupted)
+        #expect(decodedRun2.lanes.allSatisfy { $0.status != .running })
+        #expect(decodedRun2.lanes[0].status == .interrupted)
+
+        // Query --runs: returns both runs in order; M0 plain `status --project` remains unchanged!
+        let allRunsRes = await cli.executeCommand(
+            arguments: ["status", "--project", bundleURL.path, "--runs"],
+            environment: env
+        )
+        #expect(allRunsRes.exitCode == 0)
+        let allDecoded = try RelayRunJSONCodec.decode([RelayRunRecord].self, from: allRunsRes.stdout)
+        #expect(allDecoded.map(\.runID) == [run1ID, run2ID])
+        #expect(allDecoded[1].status == .interrupted)
+
+        let plainStatusRes = await cli.executeCommand(
+            arguments: ["status", "--project", bundleURL.path],
+            environment: env
+        )
+        #expect(plainStatusRes.exitCode == 0)
+        let m0Stats = try JSONDecoder().decode(RelayWorkspaceStats.self, from: Data(plainStatusRes.stdout.utf8))
+        #expect(m0Stats.schemaVersion == 5)
+    }
+
+    // MARK: - 27. M1 `RelayIDE run` Pre-Run Helpers & Exhaustive Unit Tests (§2, §3, §4, §9, §12)
+
+    private struct IsolatedRunFixture {
+        let rootURL: URL
+        let homeURL: URL
+        let repoURL: URL
+        let baseCommitOID: String
+        let projectURL: URL
+        let fakeRelayDirURL: URL
+        let fakeRelayShURL: URL
+        let fakeRelaySHA256: String
+        let baseEnvironment: [String: String]
+    }
+
+    private func makeIsolatedRunFixture(prefix: String, configureGitIdentity: Bool = true) throws -> IsolatedRunFixture {
+        let rootURL = try makeIsolatedTempDirectory(prefix: prefix)
+        let homeURL = rootURL.appendingPathComponent("isolated-home", isDirectory: true)
+        let repoURL = rootURL.appendingPathComponent("target-repo", isDirectory: true)
+        let projectURL = rootURL.appendingPathComponent("Campaign.relayproj", isDirectory: true)
+        let fakeRelayDirURL = rootURL.appendingPathComponent("fake-relay-bin", isDirectory: true)
+
+        try FileManager.default.createDirectory(at: homeURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repoURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: fakeRelayDirURL, withIntermediateDirectories: true)
+
+        let gitEnv: [String: String] = [
+            "HOME": homeURL.path,
+            "CFFIXED_USER_HOME": homeURL.path,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": "/usr/bin:/bin"
+        ]
+
+        _ = try runTool("/usr/bin/git", ["init", "-b", "main"], environment: gitEnv, currentDirectory: repoURL)
+        if configureGitIdentity {
+            _ = try runTool("/usr/bin/git", ["config", "user.name", "Relay Unit Tester"], environment: gitEnv, currentDirectory: repoURL)
+            _ = try runTool("/usr/bin/git", ["config", "user.email", "unit-tester@relay.invalid"], environment: gitEnv, currentDirectory: repoURL)
+            try "initial\n".write(to: repoURL.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
+            _ = try runTool("/usr/bin/git", ["add", "README.txt"], environment: gitEnv, currentDirectory: repoURL)
+            _ = try runTool("/usr/bin/git", ["commit", "-m", "init"], environment: gitEnv, currentDirectory: repoURL)
+        } else {
+            // Commit once using explicit env vars so HEAD exists while repo config has NO user.name / user.email!
+            var bootstrapCommitEnv = gitEnv
+            bootstrapCommitEnv["GIT_AUTHOR_NAME"] = "Bootstrap"
+            bootstrapCommitEnv["GIT_AUTHOR_EMAIL"] = "bootstrap@relay.invalid"
+            bootstrapCommitEnv["GIT_COMMITTER_NAME"] = "Bootstrap"
+            bootstrapCommitEnv["GIT_COMMITTER_EMAIL"] = "bootstrap@relay.invalid"
+            try "initial\n".write(to: repoURL.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
+            _ = try runTool("/usr/bin/git", ["add", "README.txt"], environment: bootstrapCommitEnv, currentDirectory: repoURL)
+            _ = try runTool("/usr/bin/git", ["commit", "-m", "init"], environment: bootstrapCommitEnv, currentDirectory: repoURL)
+        }
+        let headOut = try runTool("/usr/bin/git", ["rev-parse", "HEAD"], environment: gitEnv, currentDirectory: repoURL)
+        let baseOID = headOut.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Initialize project bundle
+        _ = try RelayProjectDatabase(bundleDirectoryURL: projectURL)
+
+        // Copy Tests/Support/fake-relay.sh + sibling relay_util.py stub (never calls real relay.sh or real agents!)
+        let sourceFakeRelayURL = Self.repositoryRootURL.appendingPathComponent("Tests/Support/fake-relay.sh")
+        let fakeRelayShURL = fakeRelayDirURL.appendingPathComponent("relay.sh")
+        try FileManager.default.copyItem(at: sourceFakeRelayURL, to: fakeRelayShURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeRelayShURL.path)
+        let fakeUtilURL = fakeRelayDirURL.appendingPathComponent("relay_util.py")
+        try "#!/usr/bin/env python3\n# stub relay_util.py for unit tests\n".write(
+            to: fakeUtilURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        let relayData = try Data(contentsOf: fakeRelayShURL)
+        let shaHex = Data(relayData).withUnsafeBytes { _ in "" } + {
+            // Compute SHA-256 via /usr/bin/shasum -a 256 so test expectation is independent of product code
+            let res = try? runTool("/usr/bin/shasum", ["-a", "256", fakeRelayShURL.path], environment: gitEnv)
+            return res?.stdout.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+        }()
+
+        return IsolatedRunFixture(
+            rootURL: rootURL,
+            homeURL: homeURL,
+            repoURL: repoURL,
+            baseCommitOID: baseOID,
+            projectURL: projectURL,
+            fakeRelayDirURL: fakeRelayDirURL,
+            fakeRelayShURL: fakeRelayShURL,
+            fakeRelaySHA256: shaHex,
+            baseEnvironment: gitEnv
+        )
+    }
+
+    @Test("RelayCLIRunner run rejects every invalid plan and CLI usage condition with exit 2, empty stdout, and zero side effects")
+    func cliRunRejectsEveryInvalidPlanAndArgumentCaseWithExit2AndZeroSideEffects() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-exit2")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let promptsDir = fx.rootURL.appendingPathComponent("plans/prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        let validPromptURL = promptsDir.appendingPathComponent("task.md")
+        try "STUB WRITE out.txt ok\n".write(to: validPromptURL, atomically: true, encoding: .utf8)
+
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        let cli = RelayCLIRunner()
+
+        func writePlan(_ name: String, rawJSON: String) throws -> String {
+            let url = plansDir.appendingPathComponent(name)
+            try rawJSON.write(to: url, atomically: true, encoding: .utf8)
+            return url.path
+        }
+
+        let validPlanPath = try writePlan(
+            "valid.json",
+            rawJSON: """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "main",
+              "lanes": [
+                {"id": "api", "agent": "claude", "prompt": "prompts/task.md", "after": []}
+              ]
+            }
+            """
+        )
+
+        func expectExit2(_ label: String, args: [String], env: [String: String]? = nil) async {
+            let res = await cli.executeCommand(arguments: args, environment: env ?? fx.baseEnvironment)
+            #expect(res.exitCode == 2, "\(label): expected exit 2, got \(res.exitCode) (stderr=\(res.stderr))")
+            #expect(res.stdout.isEmpty, "\(label): stdout must be empty on exit 2, got '\(res.stdout)'")
+            #expect(!res.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "\(label): stderr must explain reason")
+        }
+
+        // 1. Missing <plan.json>
+        await expectExit2("missing plan arg", args: ["run", "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        // 2. Missing --project
+        await expectExit2("missing --project", args: ["run", validPlanPath, "--relay-sh", fx.fakeRelayShURL.path])
+
+        // 3. Nonexistent --project bundle (must not create directory!)
+        let nonexistentProj = fx.rootURL.appendingPathComponent("NeverInit.relayproj")
+        await expectExit2("nonexistent --project", args: ["run", validPlanPath, "--project", nonexistentProj.path, "--relay-sh", fx.fakeRelayShURL.path])
+        #expect(!FileManager.default.fileExists(atPath: nonexistentProj.path))
+
+        // 4. --project inside repo working tree
+        let insideRepoProj = fx.repoURL.appendingPathComponent("NestedInsideRepo.relayproj", isDirectory: true)
+        _ = try RelayProjectDatabase(bundleDirectoryURL: insideRepoProj)
+        await expectExit2("project inside repo", args: ["run", validPlanPath, "--project", insideRepoProj.path, "--relay-sh", fx.fakeRelayShURL.path])
+        try FileManager.default.removeItem(at: insideRepoProj)
+
+        // 5. RELAY_BUDGET_USD set in environment (R44)
+        var budgetEnv = fx.baseEnvironment
+        budgetEnv["RELAY_BUDGET_USD"] = "10.00"
+        await expectExit2("RELAY_BUDGET_USD set", args: ["run", validPlanPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path], env: budgetEnv)
+
+        // 6. Malformed JSON & wrong field type
+        let malformedPath = try writePlan("malformed.json", rawJSON: "{not valid json")
+        await expectExit2("malformed JSON", args: ["run", malformedPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        let emptyLanesPath = try writePlan(
+            "empty-lanes.json",
+            rawJSON: #"{"repo": "\#(fx.repoURL.path)", "base": "main", "lanes": []}"#
+        )
+        await expectExit2("empty lanes", args: ["run", emptyLanesPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        // 7. Invalid lane IDs (each tested individually, including reserved 'integration')
+        let invalidLaneIDs = ["a/b", "../x", "-bad", "Upper", String(repeating: "a", count: 41), "integration"]
+        for (idx, badID) in invalidLaneIDs.enumerated() {
+            let p = try writePlan(
+                "bad-id-\(idx).json",
+                rawJSON: """
+                {
+                  "repo": "\(fx.repoURL.path)",
+                  "base": "main",
+                  "lanes": [{"id": "\(badID)", "agent": "claude", "prompt": "prompts/task.md", "after": []}]
+                }
+                """
+            )
+            await expectExit2("invalid lane id '\(badID)'", args: ["run", p, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+        }
+
+        // 8. Duplicate lane IDs
+        let dupPath = try writePlan(
+            "dup-lanes.json",
+            rawJSON: """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "main",
+              "lanes": [
+                {"id": "api", "agent": "claude", "prompt": "prompts/task.md", "after": []},
+                {"id": "api", "agent": "codex", "prompt": "prompts/task.md", "after": []}
+              ]
+            }
+            """
+        )
+        await expectExit2("duplicate lane id", args: ["run", dupPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        // 9. `after` references nonexistent lane (R38)
+        let badAfterPath = try writePlan(
+            "bad-after.json",
+            rawJSON: """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "main",
+              "lanes": [
+                {"id": "api", "agent": "claude", "prompt": "prompts/task.md", "after": ["nonexistent"]}
+              ]
+            }
+            """
+        )
+        await expectExit2("missing after lane", args: ["run", badAfterPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        // 10. Dependency cycle (2-node cycle & self-dependency)
+        let cyclePath = try writePlan(
+            "cycle.json",
+            rawJSON: """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "main",
+              "lanes": [
+                {"id": "a", "agent": "claude", "prompt": "prompts/task.md", "after": ["b"]},
+                {"id": "b", "agent": "codex", "prompt": "prompts/task.md", "after": ["a"]}
+              ]
+            }
+            """
+        )
+        await expectExit2("cycle a<->b", args: ["run", cyclePath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        let selfCyclePath = try writePlan(
+            "self-cycle.json",
+            rawJSON: """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "main",
+              "lanes": [
+                {"id": "a", "agent": "claude", "prompt": "prompts/task.md", "after": ["a"]}
+              ]
+            }
+            """
+        )
+        await expectExit2("self-cycle", args: ["run", selfCyclePath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        // 11. Multiple predecessors (`after.count > 1`)
+        let multiAfterPath = try writePlan(
+            "multi-after.json",
+            rawJSON: """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "main",
+              "lanes": [
+                {"id": "a", "agent": "claude", "prompt": "prompts/task.md", "after": []},
+                {"id": "b", "agent": "codex", "prompt": "prompts/task.md", "after": []},
+                {"id": "c", "agent": "agy", "prompt": "prompts/task.md", "after": ["a", "b"]}
+              ]
+            }
+            """
+        )
+        await expectExit2("multiple predecessors", args: ["run", multiAfterPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        // 12. Unknown agent (including customShell "shell" and "gpt")
+        for badAgent in ["gpt", "shell"] {
+            let badAgentPath = try writePlan(
+                "bad-agent-\(badAgent).json",
+                rawJSON: """
+                {
+                  "repo": "\(fx.repoURL.path)",
+                  "base": "main",
+                  "lanes": [
+                    {"id": "api", "agent": "\(badAgent)", "prompt": "prompts/task.md", "after": []}
+                  ]
+                }
+                """
+            )
+            await expectExit2("unknown agent \(badAgent)", args: ["run", badAgentPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+        }
+
+        // 13. Missing prompt file
+        let missingPromptPath = try writePlan(
+            "missing-prompt.json",
+            rawJSON: """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "main",
+              "lanes": [
+                {"id": "api", "agent": "claude", "prompt": "prompts/does-not-exist.md", "after": []}
+              ]
+            }
+            """
+        )
+        await expectExit2("missing prompt", args: ["run", missingPromptPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        // 14. `repo` is not a git repository
+        let nonGitDir = fx.rootURL.appendingPathComponent("not-a-git-repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: nonGitDir, withIntermediateDirectories: true)
+        let nonGitPlanPath = try writePlan(
+            "non-git.json",
+            rawJSON: """
+            {
+              "repo": "\(nonGitDir.path)",
+              "base": "main",
+              "lanes": [
+                {"id": "api", "agent": "claude", "prompt": "prompts/task.md", "after": []}
+              ]
+            }
+            """
+        )
+        await expectExit2("repo not git", args: ["run", nonGitPlanPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        // 15. `base` cannot be resolved
+        let badBasePath = try writePlan(
+            "bad-base.json",
+            rawJSON: """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "no-such-branch-or-tag",
+              "lanes": [
+                {"id": "api", "agent": "claude", "prompt": "prompts/task.md", "after": []}
+              ]
+            }
+            """
+        )
+        await expectExit2("bad base", args: ["run", badBasePath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path])
+
+        // 16. Repo missing git committer identity (R46: git -c user.useConfigOnly=true var GIT_COMMITTER_IDENT)
+        let noIdentFx = try makeIsolatedRunFixture(prefix: "relay-run-noident", configureGitIdentity: false)
+        defer { try? FileManager.default.removeItem(at: noIdentFx.rootURL) }
+        let noIdentPlanPath = try writePlan(
+            "no-ident.json",
+            rawJSON: """
+            {
+              "repo": "\(noIdentFx.repoURL.path)",
+              "base": "main",
+              "lanes": [
+                {"id": "api", "agent": "claude", "prompt": "prompts/task.md", "after": []}
+              ]
+            }
+            """
+        )
+        await expectExit2(
+            "missing git identity",
+            args: ["run", noIdentPlanPath, "--project", noIdentFx.projectURL.path, "--relay-sh", noIdentFx.fakeRelayShURL.path],
+            env: noIdentFx.baseEnvironment
+        )
+
+        // Verify zero side effects across repo & project bundle!
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
+        #expect(try db.allRuns().isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: fx.projectURL.appendingPathComponent("runs").path))
+        let wtList = try runTool("/usr/bin/git", ["worktree", "list", "--porcelain"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        let wtCount = wtList.stdout.components(separatedBy: "\n").filter { $0.hasPrefix("worktree ") }.count
+        #expect(wtCount == 1)
+        let branches = try runTool("/usr/bin/git", ["branch", "--format=%(refname:short)"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        #expect(branches.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "main")
+    }
+
+    @Test("RelayCLIRunner run rejects missing/non-executable/incomplete relay.sh, RELAY_WORKER, and held run.lock with exit 125 and zero side effects")
+    func cliRunRejectsPreStartEnvironmentAndLockErrorsWithExit125AndZeroSideEffects() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-exit125")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+        let promptURL = plansDir.appendingPathComponent("api.md")
+        try "STUB WRITE a.txt hi\n".write(to: promptURL, atomically: true, encoding: .utf8)
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "api", "agent": "claude", "prompt": "api.md", "after": []}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        let cli = RelayCLIRunner()
+
+        func expectExit125(_ label: String, args: [String], env: [String: String]? = nil, stderrContains: String? = nil) async {
+            let res = await cli.executeCommand(arguments: args, environment: env ?? fx.baseEnvironment)
+            #expect(res.exitCode == 125, "\(label): expected exit 125, got \(res.exitCode) (stderr=\(res.stderr))")
+            #expect(res.stdout.isEmpty, "\(label): stdout must be empty on exit 125, got '\(res.stdout)'")
+            #expect(!res.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "\(label): stderr must explain reason")
+            if let needle = stderrContains {
+                #expect(res.stderr.contains(needle), "\(label): expected '\(needle)' in stderr '\(res.stderr)'")
+            }
+        }
+
+        // 1. --relay-sh does not exist
+        let missingRelay = fx.rootURL.appendingPathComponent("no-such-relay.sh").path
+        await expectExit125(
+            "nonexistent --relay-sh",
+            args: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", missingRelay]
+        )
+
+        // 2. Default $HOME fallback when HOME is empty (no relay.sh installed in isolated HOME)
+        await expectExit125(
+            "missing relay.sh in isolated HOME",
+            args: ["run", planURL.path, "--project", fx.projectURL.path]
+        )
+
+        // 3. relay.sh exists with relay_util.py, but lacks +x permission
+        let nonExecDir = fx.rootURL.appendingPathComponent("nonexec-relay", isDirectory: true)
+        try FileManager.default.createDirectory(at: nonExecDir, withIntermediateDirectories: true)
+        let nonExecSh = nonExecDir.appendingPathComponent("relay.sh")
+        try "#!/bin/sh\nexit 0\n".write(to: nonExecSh, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: nonExecSh.path)
+        try "# util\n".write(to: nonExecDir.appendingPathComponent("relay_util.py"), atomically: true, encoding: .utf8)
+        await expectExit125(
+            "non-executable relay.sh",
+            args: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", nonExecSh.path]
+        )
+
+        // 4. Executable relay.sh, but sibling relay_util.py is missing
+        let noUtilDir = fx.rootURL.appendingPathComponent("noutil-relay", isDirectory: true)
+        try FileManager.default.createDirectory(at: noUtilDir, withIntermediateDirectories: true)
+        let noUtilSh = noUtilDir.appendingPathComponent("relay.sh")
+        try "#!/bin/sh\nexit 0\n".write(to: noUtilSh, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: noUtilSh.path)
+        await expectExit125(
+            "missing sibling relay_util.py",
+            args: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", noUtilSh.path]
+        )
+
+        // 5. RELAY_WORKER is set in environment (R45)
+        var workerEnv = fx.baseEnvironment
+        workerEnv["RELAY_WORKER"] = "agy-coder-test-worker"
+        await expectExit125(
+            "RELAY_WORKER set",
+            args: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+            env: workerEnv
+        )
+
+        // 6. Project run.lock is already held by another active run -> exit 125 naming holder runID!
+        let holdingRunID = "20261116-040000-beef"
+        let heldLock = try RelayProjectRunLock.acquire(
+            bundleDirectoryURL: fx.projectURL,
+            runID: holdingRunID,
+            pid: 7777
+        )
+        await expectExit125(
+            "project locked by active run",
+            args: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+            stderrContains: holdingRunID
+        )
+        heldLock.release()
+
+        // Verify zero side effects across repo & project bundle!
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
+        #expect(try db.allRuns().isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: fx.projectURL.appendingPathComponent("runs").path))
+        let wtList = try runTool("/usr/bin/git", ["worktree", "list", "--porcelain"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        let wtCount = wtList.stdout.components(separatedBy: "\n").filter { $0.hasPrefix("worktree ") }.count
+        #expect(wtCount == 1)
+    }
+
+    @Test("RelayCLIRunner run resolves relative repo/prompt paths and RELAYIDE_RELAY_SH, copies plan.json, records base OID & relay.sh SHA-256, marks run interrupted ('调度尚未实现'), releases lock, and exits 125")
+    func cliRunEndOfStage03PersistsPendingRunAndMarksInterruptedExit125() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-stage03")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        // Place plan.json in <root>/plans/plan.json using relative repo "../target-repo" and relative prompts
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        let promptsDir = plansDir.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "STUB WRITE api.txt 1\n".write(to: promptsDir.appendingPathComponent("api.md"), atomically: true, encoding: .utf8)
+        try "STUB WRITE docs.txt 2\n".write(to: promptsDir.appendingPathComponent("docs.md"), atomically: true, encoding: .utf8)
+
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        let rawPlanText = """
+        {
+          "repo": "../target-repo",
+          "base": "main",
+          "lanes": [
+            {"id": "api", "agent": "claude", "prompt": "prompts/api.md", "after": []},
+            {"id": "docs", "agent": "agy", "prompt": "prompts/docs.md", "after": ["api"]}
+          ],
+          "verify": "swift test"
+        }
+        """
+        try rawPlanText.write(to: planURL, atomically: true, encoding: .utf8)
+
+        // Provide fake relay.sh via RELAYIDE_RELAY_SH (testing env fallback when --relay-sh is omitted)
+        var env = fx.baseEnvironment
+        env["RELAYIDE_RELAY_SH"] = fx.fakeRelayShURL.path
+
+        let cli = RelayCLIRunner()
+        let runRes = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--lang", "zh"],
+            environment: env
+        )
+
+        // Stage 03 contract: never exit 0, exit 125 with empty stdout and explanatory stderr
+        #expect(runRes.exitCode == 125)
+        #expect(runRes.stdout.isEmpty)
+        #expect(runRes.stderr.contains("调度尚未实现"))
+        #expect(runRes.stderr.contains("M2"))
+
+        // Lock must have been cleanly released before returning!
+        #expect(RelayProjectRunLock.inspectActiveHolder(bundleDirectoryURL: fx.projectURL).isHeld == false)
+        let probeLock = try RelayProjectRunLock.acquire(bundleDirectoryURL: fx.projectURL, runID: "20261116-050000-0001")
+        probeLock.release()
+
+        // Inspect persisted run via `status --project <工程> --runs` and `status --project <工程> --run <id>`
+        let runsRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--runs"],
+            environment: fx.baseEnvironment
+        )
+        #expect(runsRes.exitCode == 0)
+        let runs = try RelayRunJSONCodec.decode([RelayRunRecord].self, from: runsRes.stdout)
+        let recorded = try #require(runs.first)
+        #expect(runs.count == 1)
+        #expect(recorded.runID.range(of: #"^\d{8}-\d{6}-[0-9a-f]{4}$"#, options: .regularExpression) != nil)
+        #expect(recorded.status == .interrupted)
+        #expect(recorded.reason == "调度尚未实现")
+        #expect(recorded.baseRef == "main")
+        #expect(recorded.baseCommitOID == fx.baseCommitOID)
+        #expect(recorded.verifyCommand == "swift test")
+        #expect(recorded.relayShSHA256 == fx.fakeRelaySHA256)
+
+        // Copied plan.json at <project>/runs/<runID>/plan.json must match input byte-for-byte
+        let expectedCopyURL = fx.projectURL
+            .appendingPathComponent("runs", isDirectory: true)
+            .appendingPathComponent(recorded.runID, isDirectory: true)
+            .appendingPathComponent("plan.json")
+        #expect(recorded.planCopyPath == expectedCopyURL.path)
+        let copiedData = try Data(contentsOf: expectedCopyURL)
+        #expect(copiedData == Data(rawPlanText.utf8))
+
+        // Lanes must be pending (never succeeded, never running), with resolved prompt paths and preserved order
+        #expect(recorded.lanes.count == 2)
+        #expect(recorded.lanes.map(\.laneID) == ["api", "docs"])
+        #expect(recorded.lanes.allSatisfy { $0.status == .pending })
+        #expect(recorded.lanes.allSatisfy { $0.status != .succeeded })
+        #expect(recorded.lanes[1].after == ["api"])
+        #expect(recorded.lanes[0].promptPath.hasSuffix("/plans/prompts/api.md"))
+
+        // Single-run status query matches
+        let singleStatusRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", recorded.runID],
+            environment: fx.baseEnvironment
+        )
+        #expect(singleStatusRes.exitCode == 0)
+        let singleDecoded = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: singleStatusRes.stdout)
+        #expect(singleDecoded == recorded)
+
+        // Also verify default $HOME discovery order (--relay-sh > RELAYIDE_RELAY_SH > $HOME/...) in isolated HOME
+        let homeScriptsDir = [".agents", "skills", "agent-relay", "scripts"].reduce(fx.homeURL) { partial, component in
+            partial.appendingPathComponent(component, isDirectory: true)
+        }
+        try FileManager.default.createDirectory(at: homeScriptsDir, withIntermediateDirectories: true)
+        let homeRelayURL = homeScriptsDir.appendingPathComponent("relay.sh")
+        try FileManager.default.copyItem(at: fx.fakeRelayShURL, to: homeRelayURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: homeRelayURL.path)
+        try "# stub\n".write(to: homeScriptsDir.appendingPathComponent("relay_util.py"), atomically: true, encoding: .utf8)
+        let resolvedFromHome = try RelayRunExecutor.resolveAndVerifyRelayScript(
+            explicitPath: nil,
+            environment: fx.baseEnvironment,
+            language: .en
+        )
+        #expect(resolvedFromHome.url.standardizedFileURL == homeRelayURL.standardizedFileURL)
+        #expect(resolvedFromHome.sha256Hex == fx.fakeRelaySHA256)
+
+        // Explicit --relay-sh takes precedence over RELAYIDE_RELAY_SH and $HOME
+        let resolvedFromFlag = try RelayRunExecutor.resolveAndVerifyRelayScript(
+            explicitPath: fx.fakeRelayShURL.path,
+            environment: env,
+            language: .en
+        )
+        #expect(resolvedFromFlag.url.standardizedFileURL == fx.fakeRelayShURL.standardizedFileURL)
+
+        // Also verify zero worktrees or relay/* branches were created in Stage 03
+        let wtList = try runTool("/usr/bin/git", ["worktree", "list", "--porcelain"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        let wtCount = wtList.stdout.components(separatedBy: "\n").filter { $0.hasPrefix("worktree ") }.count
+        #expect(wtCount == 1)
     }
 }

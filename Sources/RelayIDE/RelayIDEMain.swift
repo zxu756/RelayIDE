@@ -57,30 +57,13 @@ struct RelayStudioDesktopApp: App {
 @MainActor
 @main
 enum RelayIDEBootstrap {
-    private static let cliSubcommands: Set<String> = [
-        "init",
-        "status",
-        "lanes",
-        "dag-waves",
-        "semantic-merge",
-        "audit-plugins",
-        "export-html",
-        "mcp",
-        "help",
-        "--help",
-        "-h",
-        "version",
-        "--version"
-    ]
-
     static func main() async {
         let rawArguments = Array(CommandLine.arguments.dropFirst())
-        let filteredArgs = rawArguments.filter { arg in
-            !arg.hasPrefix("-psn_") && arg != "-NSDocumentRevisionsDebugMode" && arg != "YES" && arg != "NO"
-        }
+        let disposition = RelayCLIRunner.classifyLaunchArguments(rawArguments)
 
-        // 1. Deterministic 2x Retina Screenshot Export Mode
-        if let exportDir = parseExportScreenshotsDirectory(from: filteredArgs) {
+        switch disposition {
+        case .exportScreenshots(let exportDir):
+            let filteredArgs = RelayCLIRunner.filterSystemLaunchArguments(rawArguments)
             let cliLang = RelayLocalizer.parseCLILanguageOverride(arguments: filteredArgs)
             do {
                 let records = try runHeadlessRetinaExport(to: exportDir, language: cliLang)
@@ -90,34 +73,43 @@ enum RelayIDEBootstrap {
                 Darwin.exit(0)
             } catch {
                 FileHandle.standardError.write(Data("RelayIDE screenshot export error: \(error.localizedDescription)\n".utf8))
-                Darwin.exit(1)
+                Darwin.exit(125)
             }
-        }
 
-        // 2. Headless CLI & JSON-RPC 2.0 MCP Server Subcommands
-        let subcommandArgs = stripLeadingLanguageFlags(from: filteredArgs)
-        if let firstArg = subcommandArgs.first, cliSubcommands.contains(firstArg) {
+        case .headlessCLI(let filteredArgs, let subcommand):
             let runner = RelayCLIRunner()
             let result = await runner.executeCommand(arguments: filteredArgs)
-            if result.exitCode == 0, firstArg == "export-html", let htmlOutURL = parseExportHTMLTargetURL(from: subcommandArgs) {
-                try? RelayHallmarkDossierNormalizer.normalizeFileIfPresent(at: htmlOutURL)
-            }
-            if !result.stdout.isEmpty {
-                if result.stdoutIsVerbatim {
-                    // Merged file content: written byte for byte, without the newline `print` would append.
-                    FileHandle.standardOutput.write(Data(result.stdout.utf8))
-                } else {
-                    print(result.stdout)
+            if result.exitCode == 0, subcommand == "export-html" {
+                let subcommandArgs = stripLeadingLanguageFlags(from: filteredArgs)
+                if let htmlOutURL = parseExportHTMLTargetURL(from: subcommandArgs) {
+                    try? RelayHallmarkDossierNormalizer.normalizeFileIfPresent(at: htmlOutURL)
                 }
             }
-            if !result.stderr.isEmpty {
-                FileHandle.standardError.write(Data((result.stderr + "\n").utf8))
-            }
-            Darwin.exit(result.exitCode)
-        }
+            writeCLIResultAndExit(result)
 
-        // 3. Native macOS AppKit / SwiftUI Desktop Workbench Launch
-        launchDesktopWorkbench()
+        case .unknownSubcommand(let filteredArgs, _):
+            let runner = RelayCLIRunner()
+            let result = await runner.executeCommand(arguments: filteredArgs)
+            writeCLIResultAndExit(result)
+
+        case .desktopWorkbench:
+            launchDesktopWorkbench()
+        }
+    }
+
+    private static func writeCLIResultAndExit(_ result: RelayCLIExecutionResult) -> Never {
+        if !result.stdout.isEmpty {
+            if result.stdoutIsVerbatim {
+                // Merged file content: written byte for byte, without the newline `print` would append.
+                FileHandle.standardOutput.write(Data(result.stdout.utf8))
+            } else {
+                print(result.stdout)
+            }
+        }
+        if !result.stderr.isEmpty {
+            FileHandle.standardError.write(Data((result.stderr + "\n").utf8))
+        }
+        Darwin.exit(result.exitCode)
     }
 
     private static func stripLeadingLanguageFlags(from args: [String]) -> [String] {
@@ -137,18 +129,6 @@ enum RelayIDEBootstrap {
             idx += 1
         }
         return cleaned
-    }
-
-    private static func parseExportScreenshotsDirectory(from args: [String]) -> URL? {
-        if let flagIdx = args.firstIndex(of: "--export-screenshots") {
-            let path = (flagIdx + 1 < args.count && !args[flagIdx + 1].hasPrefix("-")) ? args[flagIdx + 1] : "./docs"
-            return URL(fileURLWithPath: path, isDirectory: true)
-        }
-        for arg in args where arg.hasPrefix("--export-screenshots=") {
-            let path = String(arg.dropFirst("--export-screenshots=".count))
-            return URL(fileURLWithPath: path.isEmpty ? "./docs" : path, isDirectory: true)
-        }
-        return nil
     }
 
     private static func parseExportHTMLTargetURL(from args: [String]) -> URL? {

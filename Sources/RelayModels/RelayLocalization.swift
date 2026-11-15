@@ -441,9 +441,15 @@ public extension RelayTaskStatus {
         case .running: return RelayLocalizer.select(language, "Running", "运行中")
         case .verifyingGate: return RelayLocalizer.select(language, "Verifying Gate", "门禁校验")
         case .completed: return RelayLocalizer.select(language, "Completed", "已完成")
+        case .partial: return RelayLocalizer.select(language, "Partial", "部分完成")
         case .failed: return RelayLocalizer.select(language, "Failed", "已失败")
+        case .timeout: return RelayLocalizer.select(language, "Timeout", "超时")
+        case .refused: return RelayLocalizer.select(language, "Refused", "被拒绝")
+        case .skipped: return RelayLocalizer.select(language, "Skipped", "已跳过")
         case .haltedByBudget: return RelayLocalizer.select(language, "Budget Halted", "预算熔断")
         case .cancelled: return RelayLocalizer.select(language, "Cancelled", "已取消")
+        case .killed: return RelayLocalizer.select(language, "Killed", "被强制结束")
+        case .interrupted: return RelayLocalizer.select(language, "Interrupted", "中断")
         }
     }
 }

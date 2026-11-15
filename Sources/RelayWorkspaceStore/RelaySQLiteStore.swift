@@ -2,12 +2,12 @@ import Foundation
 import RelayModels
 import SQLite3
 
-// MARK: - .relayproj SQLite3 WAL Persistence Engine (Schema v1..v4)
+// MARK: - .relayproj SQLite3 WAL Persistence Engine (Schema v1..v5)
 
 private let RELAY_SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 public final class RelayProjectDatabase: @unchecked Sendable {
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 5
     private let lock = NSLock()
     public let bundleDirectoryURL: URL
     public let sqliteFileURL: URL
@@ -50,6 +50,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
             throw RelayIDEError.databaseError(code: rc, message: msg)
         }
         self.db = opened
+        sqlite3_busy_timeout(opened, 5000)
         encoder.dateEncodingStrategy = .iso8601
         decoder.dateDecodingStrategy = .iso8601
         try migrateSchemaIfNeeded()
@@ -138,6 +139,50 @@ public final class RelayProjectDatabase: @unchecked Sendable {
                 created_at REAL NOT NULL
             );
             INSERT INTO schema_migrations (version, applied_at) VALUES (4, strftime('%s','now'));
+            """)
+        }
+        if current < 5 {
+            try execRaw("""
+            CREATE TABLE IF NOT EXISTS relay_runs (
+                run_id TEXT PRIMARY KEY,
+                repo_path TEXT NOT NULL,
+                plan_copy_path TEXT NOT NULL,
+                base_ref TEXT NOT NULL,
+                base_commit_oid TEXT NOT NULL,
+                verify_command TEXT,
+                relay_sh_path TEXT NOT NULL,
+                relay_sh_sha256 TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                finished_at REAL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                relayide_pid INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS relay_run_lanes (
+                run_id TEXT NOT NULL REFERENCES relay_runs(run_id) ON DELETE CASCADE,
+                lane_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                agent TEXT NOT NULL,
+                prompt_path TEXT NOT NULL,
+                after_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                signal INTEGER,
+                reason TEXT,
+                started_at REAL,
+                finished_at REAL,
+                pid INTEGER,
+                cost_usd REAL,
+                tokens INTEGER,
+                cost_source TEXT,
+                branch TEXT,
+                commit_oid TEXT,
+                worktree_path TEXT,
+                uncommitted_files_json TEXT,
+                PRIMARY KEY (run_id, lane_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_relay_run_lanes_run ON relay_run_lanes(run_id, ordinal);
+            INSERT INTO schema_migrations (version, applied_at) VALUES (5, strftime('%s','now'));
             """)
         }
     }
@@ -266,6 +311,414 @@ public final class RelayProjectDatabase: @unchecked Sendable {
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW, let ptr = sqlite3_column_text(stmt, 0) else { return false }
         return String(cString: ptr).lowercased() == "ok"
+    }
+
+    public func configuredBusyTimeoutMs() throws -> Int {
+        queryInt("PRAGMA busy_timeout;")
+    }
+
+    // MARK: - M1 Run & Lane Persistence (Schema v5)
+
+    public func createRun(_ run: RelayRunRecord) throws {
+        try withLockedHandle { db in
+            try Self.execImmediateSQL(db, sql: "BEGIN IMMEDIATE TRANSACTION;")
+            do {
+                try Self.runPreparedStatement(
+                    db,
+                    sql: """
+                    INSERT INTO relay_runs (
+                        run_id, repo_path, plan_copy_path, base_ref, base_commit_oid,
+                        verify_command, relay_sh_path, relay_sh_sha256,
+                        started_at, finished_at, status, reason, relayide_pid
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);
+                    """
+                ) { stmt in
+                    Self.bindText(stmt, 1, run.runID)
+                    Self.bindText(stmt, 2, run.repoPath)
+                    Self.bindText(stmt, 3, run.planCopyPath)
+                    Self.bindText(stmt, 4, run.baseRef)
+                    Self.bindText(stmt, 5, run.baseCommitOID)
+                    Self.bindOptionalText(stmt, 6, run.verifyCommand)
+                    Self.bindText(stmt, 7, run.relayShPath)
+                    Self.bindText(stmt, 8, run.relayShSHA256)
+                    sqlite3_bind_double(stmt, 9, run.startedAt.timeIntervalSince1970)
+                    Self.bindOptionalDate(stmt, 10, run.finishedAt)
+                    Self.bindText(stmt, 11, run.status.rawValue)
+                    Self.bindOptionalText(stmt, 12, run.reason)
+                    sqlite3_bind_int(stmt, 13, run.relayidePID)
+                }
+
+                for lane in run.lanes {
+                    let afterJSON = try encodeJSONString(lane.after)
+                    let uncommittedJSON = try lane.uncommittedFiles.map { try encodeJSONString($0) }
+                    try Self.runPreparedStatement(
+                        db,
+                        sql: """
+                        INSERT INTO relay_run_lanes (
+                            run_id, lane_id, ordinal, agent, prompt_path, after_json,
+                            status, exit_code, signal, reason, started_at, finished_at,
+                            pid, cost_usd, tokens, cost_source, branch, commit_oid,
+                            worktree_path, uncommitted_files_json
+                        ) VALUES (
+                            ?1, ?2, ?3, ?4, ?5, ?6,
+                            ?7, ?8, ?9, ?10, ?11, ?12,
+                            ?13, ?14, ?15, ?16, ?17, ?18,
+                            ?19, ?20
+                        );
+                        """
+                    ) { stmt in
+                        Self.bindText(stmt, 1, lane.runID)
+                        Self.bindText(stmt, 2, lane.laneID)
+                        sqlite3_bind_int(stmt, 3, Int32(lane.ordinal))
+                        Self.bindText(stmt, 4, lane.agent.rawValue)
+                        Self.bindText(stmt, 5, lane.promptPath)
+                        Self.bindText(stmt, 6, afterJSON)
+                        Self.bindText(stmt, 7, lane.status.rawValue)
+                        Self.bindOptionalInt32(stmt, 8, lane.exitCode)
+                        Self.bindOptionalInt32(stmt, 9, lane.signal)
+                        Self.bindOptionalText(stmt, 10, lane.reason)
+                        Self.bindOptionalDate(stmt, 11, lane.startedAt)
+                        Self.bindOptionalDate(stmt, 12, lane.finishedAt)
+                        Self.bindOptionalInt32(stmt, 13, lane.pid)
+                        Self.bindOptionalDouble(stmt, 14, lane.costUSD)
+                        Self.bindOptionalInt(stmt, 15, lane.tokens)
+                        Self.bindOptionalText(stmt, 16, lane.costSource)
+                        Self.bindOptionalText(stmt, 17, lane.branch)
+                        Self.bindOptionalText(stmt, 18, lane.commitOID)
+                        Self.bindOptionalText(stmt, 19, lane.worktreePath)
+                        Self.bindOptionalText(stmt, 20, uncommittedJSON)
+                    }
+                }
+
+                try Self.execImmediateSQL(db, sql: "COMMIT;")
+            } catch {
+                _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+                throw error
+            }
+        }
+    }
+
+    public func updateRunStatus(
+        runID: String,
+        status: RelayRunStatus,
+        reason: String?,
+        finishedAt: Date? = nil
+    ) throws {
+        try runBound("""
+        UPDATE relay_runs
+        SET status = ?1,
+            reason = ?2,
+            finished_at = COALESCE(?3, finished_at)
+        WHERE run_id = ?4;
+        """) { stmt in
+            Self.bindText(stmt, 1, status.rawValue)
+            Self.bindOptionalText(stmt, 2, reason)
+            Self.bindOptionalDate(stmt, 3, finishedAt)
+            Self.bindText(stmt, 4, runID)
+        }
+    }
+
+    public func updateRunLane(_ lane: RelayRunLaneRecord) throws {
+        let uncommittedJSON = try lane.uncommittedFiles.map { try encodeJSONString($0) }
+        try runBound("""
+        UPDATE relay_run_lanes
+        SET status = ?1,
+            exit_code = ?2,
+            signal = ?3,
+            reason = ?4,
+            started_at = ?5,
+            finished_at = ?6,
+            pid = ?7,
+            cost_usd = ?8,
+            tokens = ?9,
+            cost_source = ?10,
+            branch = ?11,
+            commit_oid = ?12,
+            worktree_path = ?13,
+            uncommitted_files_json = ?14
+        WHERE run_id = ?15 AND lane_id = ?16;
+        """) { stmt in
+            Self.bindText(stmt, 1, lane.status.rawValue)
+            Self.bindOptionalInt32(stmt, 2, lane.exitCode)
+            Self.bindOptionalInt32(stmt, 3, lane.signal)
+            Self.bindOptionalText(stmt, 4, lane.reason)
+            Self.bindOptionalDate(stmt, 5, lane.startedAt)
+            Self.bindOptionalDate(stmt, 6, lane.finishedAt)
+            Self.bindOptionalInt32(stmt, 7, lane.pid)
+            Self.bindOptionalDouble(stmt, 8, lane.costUSD)
+            Self.bindOptionalInt(stmt, 9, lane.tokens)
+            Self.bindOptionalText(stmt, 10, lane.costSource)
+            Self.bindOptionalText(stmt, 11, lane.branch)
+            Self.bindOptionalText(stmt, 12, lane.commitOID)
+            Self.bindOptionalText(stmt, 13, lane.worktreePath)
+            Self.bindOptionalText(stmt, 14, uncommittedJSON)
+            Self.bindText(stmt, 15, lane.runID)
+            Self.bindText(stmt, 16, lane.laneID)
+        }
+    }
+
+    public func fetchRun(runID: String, reconcileWithLock: Bool = true) throws -> RelayRunRecord? {
+        let rawRecord: RelayRunRecord? = try withLockedHandle { db in
+            let sql = """
+            SELECT run_id, repo_path, plan_copy_path, base_ref, base_commit_oid,
+                   verify_command, relay_sh_path, relay_sh_sha256,
+                   started_at, finished_at, status, reason, relayide_pid
+            FROM relay_runs
+            WHERE run_id = ?1;
+            """
+            var stmt: OpaquePointer?
+            let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+            guard rc == SQLITE_OK, let prepared = stmt else {
+                throw RelayIDEError.databaseError(code: rc, message: String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(prepared) }
+            Self.bindText(prepared, 1, runID)
+            guard sqlite3_step(prepared) == SQLITE_ROW else {
+                return nil
+            }
+            var run = Self.decodeRunRow(prepared)
+            run.lanes = try fetchLanesUnlocked(db: db, runID: run.runID)
+            return run
+        }
+
+        guard let record = rawRecord else { return nil }
+        guard reconcileWithLock else { return record }
+        let activeLock = RelayProjectRunLock.inspectActiveHolder(bundleDirectoryURL: bundleDirectoryURL)
+        return Self.reconcileWithActiveLock(record, activeLock: activeLock)
+    }
+
+    public func allRuns(reconcileWithLock: Bool = true) throws -> [RelayRunRecord] {
+        let rawRuns: [RelayRunRecord] = try withLockedHandle { db in
+            let sql = """
+            SELECT run_id, repo_path, plan_copy_path, base_ref, base_commit_oid,
+                   verify_command, relay_sh_path, relay_sh_sha256,
+                   started_at, finished_at, status, reason, relayide_pid
+            FROM relay_runs
+            ORDER BY started_at ASC, run_id ASC;
+            """
+            var stmt: OpaquePointer?
+            let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+            guard rc == SQLITE_OK, let prepared = stmt else {
+                throw RelayIDEError.databaseError(code: rc, message: String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(prepared) }
+            var list: [RelayRunRecord] = []
+            while sqlite3_step(prepared) == SQLITE_ROW {
+                list.append(Self.decodeRunRow(prepared))
+            }
+            for idx in list.indices {
+                list[idx].lanes = try fetchLanesUnlocked(db: db, runID: list[idx].runID)
+            }
+            return list
+        }
+
+        guard reconcileWithLock else { return rawRuns }
+        let activeLock = RelayProjectRunLock.inspectActiveHolder(bundleDirectoryURL: bundleDirectoryURL)
+        return rawRuns.map { Self.reconcileWithActiveLock($0, activeLock: activeLock) }
+    }
+
+    private func fetchLanesUnlocked(db: OpaquePointer, runID: String) throws -> [RelayRunLaneRecord] {
+        let sql = """
+        SELECT run_id, lane_id, ordinal, agent, prompt_path, after_json,
+               status, exit_code, signal, reason, started_at, finished_at,
+               pid, cost_usd, tokens, cost_source, branch, commit_oid,
+               worktree_path, uncommitted_files_json
+        FROM relay_run_lanes
+        WHERE run_id = ?1
+        ORDER BY ordinal ASC, lane_id ASC;
+        """
+        var stmt: OpaquePointer?
+        let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard rc == SQLITE_OK, let prepared = stmt else {
+            throw RelayIDEError.databaseError(code: rc, message: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(prepared) }
+        Self.bindText(prepared, 1, runID)
+
+        var lanes: [RelayRunLaneRecord] = []
+        while sqlite3_step(prepared) == SQLITE_ROW {
+            let afterJSON = Self.columnText(prepared, 5) ?? "[]"
+            let after = (try? decoder.decode([String].self, from: Data(afterJSON.utf8))) ?? []
+            let uncommitted: [String]?
+            if let rawUncommitted = Self.columnText(prepared, 19) {
+                uncommitted = try? decoder.decode([String].self, from: Data(rawUncommitted.utf8))
+            } else {
+                uncommitted = nil
+            }
+            let agent = RelayPlanAgent(rawValue: Self.columnText(prepared, 3) ?? "") ?? .claude
+            let status = RelayRunStatus(rawValue: Self.columnText(prepared, 6) ?? "") ?? .interrupted
+            lanes.append(
+                RelayRunLaneRecord(
+                    runID: Self.columnText(prepared, 0) ?? runID,
+                    laneID: Self.columnText(prepared, 1) ?? "",
+                    ordinal: Int(sqlite3_column_int(prepared, 2)),
+                    agent: agent,
+                    promptPath: Self.columnText(prepared, 4) ?? "",
+                    after: after,
+                    status: status,
+                    exitCode: Self.columnOptionalInt32(prepared, 7),
+                    signal: Self.columnOptionalInt32(prepared, 8),
+                    reason: Self.columnText(prepared, 9),
+                    startedAt: Self.columnOptionalDate(prepared, 10),
+                    finishedAt: Self.columnOptionalDate(prepared, 11),
+                    pid: Self.columnOptionalInt32(prepared, 12),
+                    costUSD: Self.columnOptionalDouble(prepared, 13),
+                    tokens: Self.columnOptionalInt(prepared, 14),
+                    costSource: Self.columnText(prepared, 15),
+                    branch: Self.columnText(prepared, 16),
+                    commitOID: Self.columnText(prepared, 17),
+                    worktreePath: Self.columnText(prepared, 18),
+                    uncommittedFiles: uncommitted
+                )
+            )
+        }
+        return lanes
+    }
+
+    private static func decodeRunRow(_ stmt: OpaquePointer) -> RelayRunRecord {
+        let status = RelayRunStatus(rawValue: columnText(stmt, 10) ?? "") ?? .interrupted
+        return RelayRunRecord(
+            runID: columnText(stmt, 0) ?? "",
+            repoPath: columnText(stmt, 1) ?? "",
+            planCopyPath: columnText(stmt, 2) ?? "",
+            baseRef: columnText(stmt, 3) ?? "",
+            baseCommitOID: columnText(stmt, 4) ?? "",
+            verifyCommand: columnText(stmt, 5),
+            relayShPath: columnText(stmt, 6) ?? "",
+            relayShSHA256: columnText(stmt, 7) ?? "",
+            startedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 8)),
+            finishedAt: columnOptionalDate(stmt, 9),
+            status: status,
+            reason: columnText(stmt, 11),
+            relayidePID: sqlite3_column_int(stmt, 12),
+            lanes: []
+        )
+    }
+
+    private static func reconcileWithActiveLock(
+        _ record: RelayRunRecord,
+        activeLock: (isHeld: Bool, holder: RelayRunLockHolderInfo?)
+    ) -> RelayRunRecord {
+        guard record.status == .running else {
+            return record
+        }
+        let isOwnedByThisRun = activeLock.isHeld && (activeLock.holder == nil || activeLock.holder?.runID == record.runID)
+        guard !isOwnedByThisRun else {
+            return record
+        }
+
+        var reconciled = record
+        reconciled.status = .interrupted
+        if reconciled.reason == nil {
+            reconciled.reason = "run.lock is no longer held by active RelayIDE process"
+        }
+        for idx in reconciled.lanes.indices where reconciled.lanes[idx].status == .running {
+            reconciled.lanes[idx].status = .interrupted
+            if reconciled.lanes[idx].reason == nil {
+                reconciled.lanes[idx].reason = "interrupted (owner process exited without releasing run)"
+            }
+        }
+        return reconciled
+    }
+
+    private static func execImmediateSQL(_ db: OpaquePointer, sql: String) throws {
+        var errMsg: UnsafeMutablePointer<CChar>?
+        let rc = sqlite3_exec(db, sql, nil, nil, &errMsg)
+        if rc != SQLITE_OK {
+            let msg = errMsg.map { String(cString: $0) } ?? "SQLite error"
+            sqlite3_free(errMsg)
+            throw RelayIDEError.databaseError(code: rc, message: msg)
+        }
+    }
+
+    private static func runPreparedStatement(
+        _ db: OpaquePointer,
+        sql: String,
+        bind: (OpaquePointer) -> Void
+    ) throws {
+        var stmt: OpaquePointer?
+        let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard rc == SQLITE_OK, let prepared = stmt else {
+            throw RelayIDEError.databaseError(code: rc, message: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(prepared) }
+        bind(prepared)
+        let stepRC = sqlite3_step(prepared)
+        guard stepRC == SQLITE_DONE || stepRC == SQLITE_ROW else {
+            throw RelayIDEError.databaseError(code: stepRC, message: String(cString: sqlite3_errmsg(db)))
+        }
+    }
+
+    private static func bindText(_ stmt: OpaquePointer, _ index: Int32, _ value: String) {
+        sqlite3_bind_text(stmt, index, value, -1, RELAY_SQLITE_TRANSIENT)
+    }
+
+    private static func bindOptionalText(_ stmt: OpaquePointer, _ index: Int32, _ value: String?) {
+        if let value {
+            sqlite3_bind_text(stmt, index, value, -1, RELAY_SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, index)
+        }
+    }
+
+    private static func bindOptionalInt32(_ stmt: OpaquePointer, _ index: Int32, _ value: Int32?) {
+        if let value {
+            sqlite3_bind_int(stmt, index, value)
+        } else {
+            sqlite3_bind_null(stmt, index)
+        }
+    }
+
+    private static func bindOptionalInt(_ stmt: OpaquePointer, _ index: Int32, _ value: Int?) {
+        if let value {
+            sqlite3_bind_int64(stmt, index, Int64(value))
+        } else {
+            sqlite3_bind_null(stmt, index)
+        }
+    }
+
+    private static func bindOptionalDouble(_ stmt: OpaquePointer, _ index: Int32, _ value: Double?) {
+        if let value {
+            sqlite3_bind_double(stmt, index, value)
+        } else {
+            sqlite3_bind_null(stmt, index)
+        }
+    }
+
+    private static func bindOptionalDate(_ stmt: OpaquePointer, _ index: Int32, _ value: Date?) {
+        if let value {
+            sqlite3_bind_double(stmt, index, value.timeIntervalSince1970)
+        } else {
+            sqlite3_bind_null(stmt, index)
+        }
+    }
+
+    private static func columnText(_ stmt: OpaquePointer, _ col: Int32) -> String? {
+        guard sqlite3_column_type(stmt, col) != SQLITE_NULL,
+              let ptr = sqlite3_column_text(stmt, col) else {
+            return nil
+        }
+        return String(cString: ptr)
+    }
+
+    private static func columnOptionalInt32(_ stmt: OpaquePointer, _ col: Int32) -> Int32? {
+        guard sqlite3_column_type(stmt, col) != SQLITE_NULL else { return nil }
+        return sqlite3_column_int(stmt, col)
+    }
+
+    private static func columnOptionalInt(_ stmt: OpaquePointer, _ col: Int32) -> Int? {
+        guard sqlite3_column_type(stmt, col) != SQLITE_NULL else { return nil }
+        return Int(sqlite3_column_int64(stmt, col))
+    }
+
+    private static func columnOptionalDouble(_ stmt: OpaquePointer, _ col: Int32) -> Double? {
+        guard sqlite3_column_type(stmt, col) != SQLITE_NULL else { return nil }
+        return sqlite3_column_double(stmt, col)
+    }
+
+    private static func columnOptionalDate(_ stmt: OpaquePointer, _ col: Int32) -> Date? {
+        guard sqlite3_column_type(stmt, col) != SQLITE_NULL else { return nil }
+        return Date(timeIntervalSince1970: sqlite3_column_double(stmt, col))
     }
 
     public func computeStats() throws -> RelayWorkspaceStats {

@@ -95,6 +95,44 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
     case databaseError(code: Int32, message: String)
     case pluginError(pluginID: String, reason: String)
     case invalidCLIUsage(String)
+    case invalidRunPlan(String)
+    case relayEnvironmentFailure(String)
+    case projectRunLocked(projectPath: String, holderRunID: String?, holderPID: Int32?)
+    case relayRunInterrupted(runID: String, reason: String)
+
+    /// Canonical CLI exit code (`03-relayide.md` §3, R40).
+    /// Exit code `1` is reserved for completed `run` where at least one lane failed or `semantic-merge` conflicts.
+    public var cliExitCode: Int32 {
+        switch self {
+        case .invalidCLIUsage,
+             .invalidRunPlan,
+             .workspaceBundleNotFound,
+             .cyclicTaskDependency,
+             .gitRepositoryNotFound:
+            return 2
+        case .semanticMergeConflictsDetected:
+            return 1
+        case .semanticMergeSyntaxCheckFailed:
+            return 3
+        case .semanticMergeFailure:
+            return 4
+        case .ptyAllocationFailed,
+             .ptySessionAlreadyRunning,
+             .rawTranscriptOpenFailed,
+             .processSpawnFailed,
+             .gitPlumbingFailure,
+             .worktreeAlreadyExists,
+             .ownershipViolation,
+             .proxyBindFailure,
+             .budgetCircuitTripped,
+             .databaseError,
+             .pluginError,
+             .relayEnvironmentFailure,
+             .projectRunLocked,
+             .relayRunInterrupted:
+            return 125
+        }
+    }
 
     public var errorDescription: String? {
         localizedDescription(in: .en)
@@ -175,6 +213,41 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
             return isZh
                 ? "命令行参数无效：\(msg)"
                 : "Invalid CLI arguments: \(msg)"
+        case .invalidRunPlan(let msg):
+            return isZh
+                ? "计划或参数错误：\(msg)"
+                : "Invalid run plan: \(msg)"
+        case .relayEnvironmentFailure(let msg):
+            return isZh
+                ? "RelayIDE 运行环境错误：\(msg)"
+                : "RelayIDE environment error: \(msg)"
+        case .projectRunLocked(let projectPath, let holderRunID, let holderPID):
+            let runNote: String
+            switch (holderRunID, holderPID) {
+            case (let runID?, let pid?):
+                runNote = isZh
+                    ? "正在被运行 \(runID)（PID \(pid)）占用"
+                    : "held by active run \(runID) (PID \(pid))"
+            case (let runID?, nil):
+                runNote = isZh
+                    ? "正在被运行 \(runID) 占用"
+                    : "held by active run \(runID)"
+            case (nil, let pid?):
+                runNote = isZh
+                    ? "正在被另一个进程（PID \(pid)）占用"
+                    : "held by another process (PID \(pid))"
+            case (nil, nil):
+                runNote = isZh
+                    ? "正在被另一个 run 占用"
+                    : "held by another active run"
+            }
+            return isZh
+                ? "工程 '\(projectPath)' 无法启动新的运行：\(runNote)"
+                : "Project '\(projectPath)' cannot start a new run: \(runNote)"
+        case .relayRunInterrupted(let runID, let reason):
+            return isZh
+                ? "运行 \(runID) 已中断：\(reason)"
+                : "Run \(runID) interrupted: \(reason)"
         }
     }
 }

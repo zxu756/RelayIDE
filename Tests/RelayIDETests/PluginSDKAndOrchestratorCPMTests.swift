@@ -717,4 +717,31 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(result.succeeded == false)
         #expect(result.exceptionMessage?.contains("Intentional sandbox fault") == true)
     }
+
+    // MARK: - 17. M1 `RelayRunIDGenerator` & `RelayPlanValidator` Direct Unit Tests (§3, §4)
+
+    @Test("RelayRunIDGenerator emits UTC YYYYMMDD-HHMMSS-<4hex> and RelayPlanValidator enforces ASCII lane ID rules")
+    func relayRunIDGeneratorAndLaneIDRules() {
+        let fixedEpoch = Date(timeIntervalSince1970: 1_794_787_205) // 2026-11-16 00:00:05 UTC
+        let generated = RelayRunIDGenerator.generate(now: fixedEpoch, randomSuffix: 0x0a3f)
+        #expect(generated == "20261116-000005-0a3f")
+
+        let randomRunID = RelayRunIDGenerator.generate(now: fixedEpoch)
+        #expect(randomRunID.range(of: #"^\d{8}-\d{6}-[0-9a-f]{4}$"#, options: .regularExpression) != nil)
+
+        // Valid lane IDs: ^[a-z0-9][a-z0-9-]{0,39}$ excluding reserved "integration"
+        #expect(RelayPlanValidator.isValidLaneID("a") == true)
+        #expect(RelayPlanValidator.isValidLaneID("0-lane-alpha") == true)
+        #expect(RelayPlanValidator.isValidLaneID(String(repeating: "z", count: 40)) == true)
+
+        // Invalid lane IDs
+        #expect(RelayPlanValidator.isValidLaneID("") == false)
+        #expect(RelayPlanValidator.isValidLaneID("integration") == false)
+        #expect(RelayPlanValidator.isValidLaneID("a/b") == false)
+        #expect(RelayPlanValidator.isValidLaneID("../escape") == false)
+        #expect(RelayPlanValidator.isValidLaneID("-leading-dash") == false)
+        #expect(RelayPlanValidator.isValidLaneID("Upper") == false)
+        #expect(RelayPlanValidator.isValidLaneID("under_score") == false)
+        #expect(RelayPlanValidator.isValidLaneID(String(repeating: "z", count: 41)) == false)
+    }
 }

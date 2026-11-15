@@ -181,11 +181,64 @@ public enum RelaySchemaMigrationCatalog {
         expectedTables: ["undo_redo_stack", "relay_fts5_doc_meta", "wal_checkpoint_history"]
     )
 
+    public static let v5RelayRunsAndRunLanes = RelaySchemaMigrationDescriptor(
+        version: 5,
+        codename: "v5_relay_runs_and_run_lanes",
+        summary: "Adds relay_runs and relay_run_lanes ledgers for M1 headless agent-relay execution and crash reconciliation.",
+        ddlStatements: [
+            """
+            CREATE TABLE IF NOT EXISTS relay_runs (
+                run_id TEXT PRIMARY KEY,
+                repo_path TEXT NOT NULL,
+                plan_copy_path TEXT NOT NULL,
+                base_ref TEXT NOT NULL,
+                base_commit_oid TEXT NOT NULL,
+                verify_command TEXT,
+                relay_sh_path TEXT NOT NULL,
+                relay_sh_sha256 TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                finished_at REAL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                relayide_pid INTEGER NOT NULL
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS relay_run_lanes (
+                run_id TEXT NOT NULL REFERENCES relay_runs(run_id) ON DELETE CASCADE,
+                lane_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                agent TEXT NOT NULL,
+                prompt_path TEXT NOT NULL,
+                after_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                signal INTEGER,
+                reason TEXT,
+                started_at REAL,
+                finished_at REAL,
+                pid INTEGER,
+                cost_usd REAL,
+                tokens INTEGER,
+                cost_source TEXT,
+                branch TEXT,
+                commit_oid TEXT,
+                worktree_path TEXT,
+                uncommitted_files_json TEXT,
+                PRIMARY KEY (run_id, lane_id)
+            );
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_relay_run_lanes_run ON relay_run_lanes(run_id, ordinal);"
+        ],
+        expectedTables: ["relay_runs", "relay_run_lanes"]
+    )
+
     public static let allMigrations: [RelaySchemaMigrationDescriptor] = [
         v1CoreWorkspaceAndDAG,
         v2SemanticMergeLedger,
         v3WiretapAndGuardrails,
-        v4UndoJournalAndFTS5Index
+        v4UndoJournalAndFTS5Index,
+        v5RelayRunsAndRunLanes
     ]
 
     public static func descriptor(forVersion version: Int) -> RelaySchemaMigrationDescriptor? {
@@ -1325,7 +1378,9 @@ public extension RelayProjectDatabase {
             ("wiretap_spans", "payload_json"),
             ("guardrail_findings", "payload_json"),
             ("undo_redo_stack", "mutation_json"),
-            ("relay_fts5_doc_meta", "body_text")
+            ("relay_fts5_doc_meta", "body_text"),
+            ("relay_runs", "plan_copy_path"),
+            ("relay_run_lanes", "prompt_path")
         ]
 
         let tableRows: [SQLiteTableTelemetryRow] = try withLockedHandle { db in
