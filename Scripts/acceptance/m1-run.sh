@@ -1164,6 +1164,454 @@ PY
     rm -f "${d}/secret.val"
 }
 
+# ------------------------------------------------------------------
+# Rows 12..17: Signal death (kill -9 relay.sh), SIGINT/SIGTERM cancellation, kill -9 RelayIDE crash recovery,
+#              same-project lock contention, and two projects concurrently on one repository
+# ------------------------------------------------------------------
+row_12_kill9_lane_relay_sh_records_signal_9() {
+    local d="${WORK_TMP}/r12"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    cat > "${d}/prompts/s.md" <<'EOF'
+STUB WRITE dirty_s.txt killed-mid-flight
+STUB SLEEP 30
+EOF
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "s", "agent": "claude", "prompt": "prompts/s.md", "after": []}
+  ]
+}
+EOF
+
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${d}/traces" \
+        "${RELAY_CLI}" run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run.stdout" 2>"${d}/run.stderr" ) &
+    local bg_pid=$!
+    start_pid_watchdog "${bg_pid}" 120
+    local wpid="${WATCHDOG_PID}"
+
+    if ! wait_for_trace_start "${d}/traces/s.trace" "${bg_pid}" 60; then
+        stop_pid_watchdog "${wpid}"
+        kill_procs_for_dir "${d}"
+        return 1
+    fi
+    verify_pid_is_tested_binary "${bg_pid}" "${d}/Proj.relayproj"
+
+    local run_id wt_path relay_sh_pid
+    run_id="$(read_lock_run_id "${d}/Proj.relayproj")"
+    wt_path="${d}/Proj.relayproj/runs/${run_id}/worktrees/s"
+
+    # Match the session/process-group leader (`pid == pgid`) for this lane's `relay.sh` (not its subshell).
+    relay_sh_pid="$(ps -axo pid=,pgid=,command= | awk -v wt="${wt_path}" -v rsh="${REAL_RELAY_SH}" '
+        $1 == $2 && index($0, rsh) > 0 && index($0, wt) > 0 { print $1; exit }
+    ')"
+    if [[ ! "${relay_sh_pid}" =~ ^[0-9]+$ ]]; then
+        echo "failed to locate top-level relay.sh PID for worktree ${wt_path}" >&2
+        stop_pid_watchdog "${wpid}"
+        kill_procs_for_dir "${d}"
+        return 1
+    fi
+
+    kill -9 "${relay_sh_pid}"
+    set +e
+    wait "${bg_pid}"
+    local rc=$?
+    set -e
+    stop_pid_watchdog "${wpid}"
+
+    # Clean up the orphaned independent-process-group stub sleep left behind by external `kill -9 relay.sh`.
+    kill_procs_for_dir "${d}"
+    poll_until_no_procs "${d}" 10
+
+    [[ "${rc}" -eq 1 ]] || { echo "expected run exit 1 after kill -9 relay.sh, got ${rc}" >&2; return 1; }
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["status"] == "failed", d
+lane = d["lanes"][0]
+assert lane["status"] == "failed" and lane["status"] != "succeeded", lane
+assert lane["signal"] == 9 and lane["exitCode"] is None and lane["commitOID"] is None, lane
+PY
+}
+
+check_signal_cancellation() {
+    local d="$1"
+    local sig_name="$2"
+    local expected_rc="$3"
+    local gate="${d}/release.gate"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+    init_temp_project "${d}/Proj.relayproj"
+
+    cat > "${d}/prompts/a.md" <<EOF
+STUB WRITE dirty_a.txt wip-a
+STUB WAIT ${gate} 90
+EOF
+    cat > "${d}/prompts/b.md" <<EOF
+STUB WRITE dirty_b.txt wip-b
+STUB WAIT ${gate} 90
+EOF
+    printf 'STUB WRITE src/c.txt should-not-start\n' > "${d}/prompts/c.md"
+
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []},
+    {"id": "c", "agent": "agy",    "prompt": "prompts/c.md", "after": ["a"]}
+  ]
+}
+EOF
+
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${d}/traces" \
+        "${RELAY_CLI}" run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run.stdout" 2>"${d}/run.stderr" ) &
+    local bg_pid=$!
+    start_pid_watchdog "${bg_pid}" 120
+    local wpid="${WATCHDOG_PID}"
+
+    if ! wait_for_trace_start "${d}/traces/a.trace" "${bg_pid}" 60 || ! wait_for_trace_start "${d}/traces/b.trace" "${bg_pid}" 60; then
+        stop_pid_watchdog "${wpid}"
+        kill_procs_for_dir "${d}"
+        return 1
+    fi
+    verify_pid_is_tested_binary "${bg_pid}" "${d}/Proj.relayproj"
+    local run_id
+    run_id="$(read_lock_run_id "${d}/Proj.relayproj")"
+
+    kill "-${sig_name}" "${bg_pid}"
+    set +e
+    wait "${bg_pid}"
+    local rc=$?
+    set -e
+    stop_pid_watchdog "${wpid}"
+
+    [[ "${rc}" -eq "${expected_rc}" ]] || { echo "expected exit ${expected_rc} on SIG${sig_name}, got ${rc}" >&2; return 1; }
+    poll_until_no_procs "${WORK_TMP}" 20
+
+    local wt_a="${d}/Proj.relayproj/runs/${run_id}/worktrees/a"
+    local wt_b="${d}/Proj.relayproj/runs/${run_id}/worktrees/b"
+    local wt_c="${d}/Proj.relayproj/runs/${run_id}/worktrees/c"
+    [[ -d "${wt_a}" && -d "${wt_b}" ]] || { echo "cancelled worktrees a/b missing" >&2; return 1; }
+    [[ ! -e "${wt_c}" && ! -e "${d}/traces/c.trace" ]] || { echo "skipped lane c should have no worktree/trace" >&2; return 1; }
+    if HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" show-ref --verify --quiet "refs/heads/relay/${run_id}/c"; then
+        echo "skipped lane c should have no branch" >&2
+        return 1
+    fi
+
+    local ahead_a ahead_b
+    ahead_a="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-list --count "${base_oid}..relay/${run_id}/a")"
+    ahead_b="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-list --count "${base_oid}..relay/${run_id}/b")"
+    [[ "${ahead_a}" == "0" && "${ahead_b}" == "0" ]] || {
+        echo "cancelled branches must have 0 new commits (a=${ahead_a}, b=${ahead_b})" >&2
+        return 1
+    }
+
+    grep -q 'exit 130' "${wt_a}/.relay/LOG.md" || { echo "a LOG.md missing exit 130" >&2; return 1; }
+    grep -q 'exit 130' "${wt_b}/.relay/LOG.md" || { echo "b LOG.md missing exit 130" >&2; return 1; }
+
+    invoke_product "${d}/status.stdout" "${d}/status.stderr" -- \
+        status --project "${d}/Proj.relayproj" --run "${run_id}" --lang zh
+    cmp -s "${d}/run.stdout" "${d}/status.stdout" || { echo "run stdout != status --run stdout" >&2; return 1; }
+
+    /usr/bin/python3 - "${d}/status.stdout" <<'PY'
+import json, sys
+st = json.load(open(sys.argv[1], encoding="utf-8"))
+assert st["status"] == "cancelled", st
+lanes = {l["laneID"]: l for l in st["lanes"]}
+assert all(l["status"] != "running" for l in lanes.values()), lanes
+assert lanes["a"]["status"] == "cancelled" and lanes["a"]["commitOID"] is None, lanes["a"]
+assert lanes["b"]["status"] == "cancelled" and lanes["b"]["commitOID"] is None, lanes["b"]
+assert lanes["c"]["status"] == "skipped" and lanes["c"]["worktreePath"] is None and lanes["c"]["branch"] is None, lanes["c"]
+PY
+}
+
+row_13_sigint_cancels_lanes() {
+    check_signal_cancellation "${WORK_TMP}/r13" "INT" 130
+}
+
+row_14_sigterm_cancels_lanes() {
+    check_signal_cancellation "${WORK_TMP}/r14" "TERM" 143
+}
+
+row_15_kill9_relayide_reconciles_interrupted_and_recovers() {
+    local d="${WORK_TMP}/r15"
+    local gate="${d}/release.gate"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    cat > "${d}/prompts/a.md" <<EOF
+STUB WRITE dirty_a.txt crash-a
+STUB WAIT ${gate} 90
+EOF
+    cat > "${d}/prompts/b.md" <<EOF
+STUB WRITE dirty_b.txt crash-b
+STUB WAIT ${gate} 90
+EOF
+    printf 'STUB WRITE src/c.txt should-not-start\n' > "${d}/prompts/c.md"
+
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []},
+    {"id": "c", "agent": "agy",    "prompt": "prompts/c.md", "after": ["a"]}
+  ]
+}
+EOF
+
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${d}/traces" \
+        "${RELAY_CLI}" run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run.stdout" 2>"${d}/run.stderr" ) &
+    local bg_pid=$!
+    start_pid_watchdog "${bg_pid}" 120
+    local wpid="${WATCHDOG_PID}"
+
+    if ! wait_for_trace_start "${d}/traces/a.trace" "${bg_pid}" 60 || ! wait_for_trace_start "${d}/traces/b.trace" "${bg_pid}" 60; then
+        stop_pid_watchdog "${wpid}"
+        kill_procs_for_dir "${d}"
+        return 1
+    fi
+    verify_pid_is_tested_binary "${bg_pid}" "${d}/Proj.relayproj"
+    local run_id
+    run_id="$(read_lock_run_id "${d}/Proj.relayproj")"
+
+    kill -9 "${bg_pid}"
+    set +e
+    wait "${bg_pid}" 2>/dev/null
+    set -e
+    stop_pid_watchdog "${wpid}"
+
+    poll_until_no_procs "${WORK_TMP}" 20
+
+    invoke_product "${d}/status.stdout" "${d}/status.stderr" -- \
+        status --project "${d}/Proj.relayproj" --run "${run_id}" --lang zh
+
+    /usr/bin/python3 - "${d}/status.stdout" <<'PY'
+import json, sys
+st = json.load(open(sys.argv[1], encoding="utf-8"))
+assert st["status"] == "interrupted", st
+lanes = {l["laneID"]: l for l in st["lanes"]}
+assert all(l["status"] != "running" for l in lanes.values()), lanes
+assert lanes["a"]["status"] == "interrupted", lanes["a"]
+assert lanes["b"]["status"] == "interrupted", lanes["b"]
+assert lanes["c"]["status"] == "skipped", lanes["c"]
+PY
+
+    # Subsequent small plan on the exact same project must succeed with exit 0.
+    printf 'STUB WRITE src/recovered.txt after-crash\n' > "${d}/prompts/recover.md"
+    cat > "${d}/small-plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "recover", "agent": "claude", "prompt": "prompts/recover.md", "after": []}
+  ]
+}
+EOF
+    invoke_product "${d}/small.stdout" "${d}/small.stderr" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/small-plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    /usr/bin/python3 - "${d}/small.stdout" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["status"] == "succeeded" and d["lanes"][0]["status"] == "succeeded", d
+PY
+}
+
+row_16_concurrent_same_project_locked_125() {
+    local d="${WORK_TMP}/r16"
+    local gate="${d}/release.gate"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    cat > "${d}/prompts/hold.md" <<EOF
+STUB WRITE src/hold.txt first-run
+STUB WAIT ${gate} 90
+EOF
+    printf 'STUB WRITE src/second.txt second-run\n' > "${d}/prompts/second.md"
+
+    cat > "${d}/plan1.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "hold", "agent": "claude", "prompt": "prompts/hold.md", "after": []}
+  ]
+}
+EOF
+    cat > "${d}/plan2.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "second", "agent": "codex", "prompt": "prompts/second.md", "after": []}
+  ]
+}
+EOF
+
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${d}/traces" \
+        "${RELAY_CLI}" run "${d}/plan1.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run1.stdout" 2>"${d}/run1.stderr" ) &
+    local bg_pid=$!
+    start_pid_watchdog "${bg_pid}" 120
+    local wpid="${WATCHDOG_PID}"
+
+    if ! wait_for_trace_start "${d}/traces/hold.trace" "${bg_pid}" 60; then
+        stop_pid_watchdog "${wpid}"
+        kill_procs_for_dir "${d}"
+        return 1
+    fi
+    verify_pid_is_tested_binary "${bg_pid}" "${d}/Proj.relayproj"
+    local run1_id
+    run1_id="$(read_lock_run_id "${d}/Proj.relayproj")"
+
+    local wt_before br_before wt_after br_after
+    wt_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" worktree list --porcelain)"
+    br_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" for-each-ref --format='%(refname)' refs/heads/ | sort)"
+
+    set +e
+    invoke_product "${d}/run2.stdout" "${d}/run2.stderr" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan2.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    local rc2=$?
+    set -e
+
+    wt_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" worktree list --porcelain)"
+    br_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" for-each-ref --format='%(refname)' refs/heads/ | sort)"
+
+    : > "${gate}"
+    set +e
+    wait "${bg_pid}"
+    local rc1=$?
+    set -e
+    stop_pid_watchdog "${wpid}"
+
+    [[ "${rc2}" -eq 125 ]] || { echo "expected second run exit 125, got ${rc2}" >&2; return 1; }
+    [[ ! -s "${d}/run2.stdout" ]] || { echo "expected empty stdout on second run" >&2; return 1; }
+    grep -Fq -- "${run1_id}" "${d}/run2.stderr" || { echo "second run stderr missing first runID ${run1_id}" >&2; return 1; }
+    [[ "${wt_after}" == "${wt_before}" && "${br_after}" == "${br_before}" && ! -e "${d}/traces/second.trace" ]] || {
+        echo "second run created unexpected worktree, branch, or trace" >&2
+        return 1
+    }
+    [[ "${rc1}" -eq 0 ]] || { echo "expected first run exit 0 after gate release, got ${rc1}" >&2; return 1; }
+}
+
+row_17_two_projects_same_repo_concurrent_0() {
+    local d="${WORK_TMP}/r17"
+    local gate="${d}/release.gate"
+    mkdir -p "${d}/prompts" "${d}/traces1" "${d}/traces2"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj1.relayproj"
+    init_temp_project "${d}/Proj2.relayproj"
+
+    cat > "${d}/prompts/p1.md" <<EOF
+STUB WRITE src/p1.txt from-proj-1
+STUB WAIT ${gate} 90
+EOF
+    cat > "${d}/prompts/p2.md" <<EOF
+STUB WRITE src/p2.txt from-proj-2
+STUB WAIT ${gate} 90
+EOF
+
+    cat > "${d}/plan1.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "lane", "agent": "claude", "prompt": "prompts/p1.md", "after": []}
+  ]
+}
+EOF
+    cat > "${d}/plan2.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "lane", "agent": "vibe", "prompt": "prompts/p2.md", "after": []}
+  ]
+}
+EOF
+
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${d}/traces1" \
+        "${RELAY_CLI}" run "${d}/plan1.json" --project "${d}/Proj1.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run1.stdout" 2>"${d}/run1.stderr" ) &
+    local bg1=$!
+    start_pid_watchdog "${bg1}" 120
+    local wpid1="${WATCHDOG_PID}"
+
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${d}/traces2" \
+        "${RELAY_CLI}" run "${d}/plan2.json" --project "${d}/Proj2.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run2.stdout" 2>"${d}/run2.stderr" ) &
+    local bg2=$!
+    start_pid_watchdog "${bg2}" 120
+    local wpid2="${WATCHDOG_PID}"
+
+    local ok_wait=1
+    if ! wait_for_trace_start "${d}/traces1/lane.trace" "${bg1}" 60 || ! wait_for_trace_start "${d}/traces2/lane.trace" "${bg2}" 60; then
+        ok_wait=0
+    fi
+
+    : > "${gate}"
+    set +e
+    wait "${bg1}"; local rc1=$?
+    wait "${bg2}"; local rc2=$?
+    set -e
+    stop_pid_watchdog "${wpid1}"
+    stop_pid_watchdog "${wpid2}"
+
+    [[ "${ok_wait}" -eq 1 && "${rc1}" -eq 0 && "${rc2}" -eq 0 ]] || {
+        echo "concurrent two-project run failed: ok_wait=${ok_wait}, rc1=${rc1}, rc2=${rc2}" >&2
+        return 1
+    }
+
+    /usr/bin/python3 - "${d}/run1.stdout" "${d}/run2.stdout" "${d}/repo" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+d1 = json.load(open(sys.argv[1], encoding="utf-8"))
+d2 = json.load(open(sys.argv[2], encoding="utf-8"))
+repo_dir, empty_home = sys.argv[3], sys.argv[4]
+
+assert d1["status"] == "succeeded" and d2["status"] == "succeeded", (d1, d2)
+b1 = d1["lanes"][0]["branch"]
+b2 = d2["lanes"][0]["branch"]
+assert b1 and b2 and b1 != b2, (b1, b2)
+
+env = dict(os.environ, HOME=empty_home)
+refs = subprocess.check_output(["git", "-C", repo_dir, "for-each-ref", "--format=%(refname:short)", "refs/heads/"], text=True, env=env).splitlines()
+assert b1 in refs and b2 in refs, (b1, b2, refs)
+PY
+}
+
 run_full_suite() {
     echo "================================================================"
     echo "RelayIDE M1 Acceptance Suite"
@@ -1188,6 +1636,12 @@ run_full_suite() {
     run_row "9"  "Stub exit 125 and stub exit 2 -> lane failed (125 / 2), both runs exit 1 (not 125 or 2)" row_09_lane_exit_125_and_2_never_leak_to_run_exit
     run_row "10" "Stub sleeps 60s with RELAY_TIMEOUT=2 -> lane timeout (124), run exit 1, zero processes left within 30s" row_10_timeout_124_and_no_leftover_processes
     run_row "11" "Runtime-generated secret in prompt -> refused (exit 2, not sent), no trace/LOG.md step, value absent from stdout/stderr/DB/.pty" row_11_secret_prompt_refused_without_leaking_value
+    run_row "12" "kill -9 lane's relay.sh process -> lane failed (signal 9, exitCode null, not succeeded), run exit 1" row_12_kill9_lane_relay_sh_records_signal_9
+    run_row "13" "SIGINT to RelayIDE -> exit 130, a & b cancelled (worktrees kept, 0 commits, LOG.md exit 130), c skipped, 0 procs <=20s, status --run has no running" row_13_sigint_cancels_lanes
+    run_row "14" "SIGTERM to RelayIDE -> exit 143, same invariants as Row 13" row_14_sigterm_cancels_lanes
+    run_row "15" "kill -9 RelayIDE -> 0 procs <=20s, status --run shows interrupted (no running), subsequent small run on same project exits 0" row_15_kill9_relayide_reconciles_interrupted_and_recovers
+    run_row "16" "Concurrent second run on locked project -> exit 125, empty stdout, stderr names first runID, no new worktree/branch, first run exits 0 after gate" row_16_concurrent_same_project_locked_125
+    run_row "17" "Two separate projects concurrently running on the same repository -> both exit 0 with distinct branches" row_17_two_projects_same_repo_concurrent_0
 
     local sha_sh_after sha_util_after
     sha_sh_after="$(shasum -a 256 "${REAL_RELAY_SH}" | awk '{print $1}')"
