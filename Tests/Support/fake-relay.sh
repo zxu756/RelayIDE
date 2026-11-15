@@ -11,6 +11,10 @@
 #   --repeat-bytes <count>    Emit <count> deterministic ASCII bytes to stdout
 #   --ready-file <path>       Create <path> once traps and helper children are armed
 #   --child-pid-file <path>   Spawn a SIGHUP-ignoring child in the same process group and record its PID
+#   --subgroup-pid-file <p>   Spawn a SIGHUP/SIGINT/SIGTERM-ignoring child in its own process group (setpgid)
+#   --ignore-int              Ignore SIGINT (logging "INT" to --signal-log if set)
+#   --ignore-term             Ignore SIGTERM (logging "TERM" to --signal-log if set)
+#   --signal-log <path>       Append received signal names ("INT", "TERM") one per line
 #   --slow-term <seconds>     Catch SIGTERM, sleep <seconds>, then re-raise SIGTERM with SIG_DFL
 #
 # Mode 2 — Relay step invocation `<fake-relay.sh> <agent> <workdir> <prompt-file>` (when invoked with
@@ -42,7 +46,9 @@ now_epoch_ts() {
 HAS_FAKE_ENV=0
 if [[ -n "${FAKE_RELAY_EXIT:-}" || -n "${FAKE_RELAY_SLEEP:-}" || -n "${FAKE_RELAY_KILL_SELF:-}" || \
       -n "${FAKE_RELAY_MESSAGE:-}" || -n "${FAKE_RELAY_STDOUT:-}" || -n "${FAKE_RELAY_REPEAT_BYTES:-}" || \
-      -n "${FAKE_RELAY_READY_FILE:-}" || -n "${FAKE_RELAY_CHILD_PID_FILE:-}" || -n "${FAKE_RELAY_SLOW_TERM:-}" ]]; then
+      -n "${FAKE_RELAY_READY_FILE:-}" || -n "${FAKE_RELAY_CHILD_PID_FILE:-}" || -n "${FAKE_RELAY_SLOW_TERM:-}" || \
+      -n "${FAKE_RELAY_IGNORE_INT:-}" || -n "${FAKE_RELAY_IGNORE_TERM:-}" || -n "${FAKE_RELAY_SIGNAL_LOG:-}" || \
+      -n "${FAKE_RELAY_SUBGROUP_PID_FILE:-}" ]]; then
     HAS_FAKE_ENV=1
 fi
 
@@ -155,6 +161,11 @@ if [[ $HAS_FAKE_ENV -eq 0 && $HAS_DASH_FLAG -eq 0 && $# -eq 3 && -f "$3" ]]; the
     BLOCK_TARGET=""
     BLOCK_EOF=""
     BLOCK_BUF=""
+    IGNORE_INT=0
+    IGNORE_TERM=0
+    SIGNAL_LOG=""
+    SUBGROUP_PID_FILE=""
+    ARM_READY_FILE=""
     TRACE_TAG="stub-trace-dir=${STUB_TRACE_DIR:-untagged}"
 
     while IFS= read -r -u 3 raw_line || [[ -n "$raw_line" ]]; do
@@ -211,6 +222,49 @@ if [[ $HAS_FAKE_ENV -eq 0 && $HAS_DASH_FLAG -eq 0 && $# -eq 3 && -f "$3" ]]; the
                 ;;
             NO_COST)
                 NO_COST=1
+                ;;
+            IGNORE_INT)
+                IGNORE_INT=1
+                trap ':' INT
+                ;;
+            IGNORE_TERM)
+                IGNORE_TERM=1
+                trap ':' TERM
+                ;;
+            SIGNAL_LOG)
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                if [[ -n "$trimmed" ]]; then
+                    SIGNAL_LOG="$(resolve_path "${trimmed%%[[:space:]]*}")"
+                    mkdir -p "$(dirname "$SIGNAL_LOG")"
+                    trap ':' INT TERM
+                fi
+                ;;
+            ARM_READY)
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                if [[ -n "$trimmed" ]]; then
+                    ARM_READY_FILE="$(resolve_path "${trimmed%%[[:space:]]*}")"
+                    mkdir -p "$(dirname "$ARM_READY_FILE")"
+                fi
+                ;;
+            SUBGROUP_PID_FILE)
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                if [[ -n "$trimmed" ]]; then
+                    SUBGROUP_PID_FILE="$(resolve_path "${trimmed%%[[:space:]]*}")"
+                    mkdir -p "$(dirname "$SUBGROUP_PID_FILE")"
+                    /usr/bin/perl -MPOSIX=setpgid -e '
+                        my ($pid_file, $tag) = @ARGV;
+                        setpgid(0, 0);
+                        $SIG{INT} = $SIG{TERM} = $SIG{HUP} = "IGNORE";
+                        open(my $fh, ">", $pid_file) or die $!;
+                        print $fh "$$\n";
+                        close($fh);
+                        select(undef, undef, undef, 60);
+                    ' "$SUBGROUP_PID_FILE" "$TRACE_TAG" </dev/null >/dev/null 2>&1 &
+                    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+                        [[ -s "$SUBGROUP_PID_FILE" ]] && break
+                        /usr/bin/perl -e 'select(undef, undef, undef, 0.01)' </dev/null
+                    done
+                fi
                 ;;
             TIMEOUT)
                 ensure_start_trace
@@ -284,10 +338,46 @@ if [[ $HAS_FAKE_ENV -eq 0 && $HAS_DASH_FLAG -eq 0 && $# -eq 3 && -f "$3" ]]; the
                 trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
                 sleep_sec="${trimmed%%[[:space:]]*}"
                 if [[ -n "$sleep_sec" ]]; then
-                    /usr/bin/perl -e '
-                        my ($sec, $tag) = @ARGV;
-                        select(undef, undef, undef, $sec + 0);
-                    ' "$sleep_sec" "$TRACE_TAG" < /dev/null
+                    /usr/bin/perl -MTime::HiRes=time -e '
+                        my ($sec, $ig_int, $ig_term, $sig_log, $arm_ready, $tag) = @ARGV;
+                        sub log_sig {
+                            my ($name) = @_;
+                            return unless defined($sig_log) && $sig_log ne "";
+                            if (open(my $fh, ">>", $sig_log)) {
+                                select((select($fh), $| = 1)[0]);
+                                print $fh "$name\n";
+                                close($fh);
+                            }
+                        }
+                        if ($ig_int) {
+                            $SIG{INT} = sub { log_sig("INT"); };
+                        } elsif (defined($sig_log) && $sig_log ne "") {
+                            $SIG{INT} = sub { log_sig("INT"); $SIG{INT} = "DEFAULT"; kill "INT", $$; };
+                        }
+                        if ($ig_term) {
+                            $SIG{TERM} = sub { log_sig("TERM"); };
+                        } elsif (defined($sig_log) && $sig_log ne "") {
+                            $SIG{TERM} = sub { log_sig("TERM"); $SIG{TERM} = "DEFAULT"; kill "TERM", $$; };
+                        }
+                        if (defined($arm_ready) && $arm_ready ne "") {
+                            if (open(my $rf, ">", $arm_ready)) { close($rf); }
+                        }
+                        my $deadline = time() + ($sec + 0);
+                        while (1) {
+                            my $rem = $deadline - time();
+                            last if $rem <= 0;
+                            select(undef, undef, undef, $rem > 0.05 ? 0.05 : $rem);
+                        }
+                    ' "$sleep_sec" "$IGNORE_INT" "$IGNORE_TERM" "$SIGNAL_LOG" "$ARM_READY_FILE" "$TRACE_TAG" < /dev/null
+                    sleep_rc=$?
+                    ARM_READY_FILE=""
+                    if [[ $sleep_rc -eq 130 && $IGNORE_INT -eq 0 ]]; then
+                        die_by_signal INT
+                    elif [[ $sleep_rc -eq 143 && $IGNORE_TERM -eq 0 ]]; then
+                        die_by_signal TERM
+                    elif [[ $sleep_rc -eq 129 ]]; then
+                        die_by_signal HUP
+                    fi
                 fi
                 ;;
             WAIT|WAIT_FILE|BARRIER)
@@ -300,16 +390,45 @@ if [[ $HAS_FAKE_ENV -eq 0 && $HAS_DASH_FLAG -eq 0 && $# -eq 3 && -f "$3" ]]; the
                 wait_timeout="${rem%%[[:space:]]*}"
                 wait_target="$(resolve_path "$wait_raw")"
                 /usr/bin/perl -MTime::HiRes=time -e '
-                    my ($p, $t, $tag) = @ARGV;
+                    my ($p, $t, $ig_int, $ig_term, $sig_log, $arm_ready, $tag) = @ARGV;
+                    sub log_sig {
+                        my ($name) = @_;
+                        return unless defined($sig_log) && $sig_log ne "";
+                        if (open(my $fh, ">>", $sig_log)) {
+                            select((select($fh), $| = 1)[0]);
+                            print $fh "$name\n";
+                            close($fh);
+                        }
+                    }
+                    if ($ig_int) {
+                        $SIG{INT} = sub { log_sig("INT"); };
+                    } elsif (defined($sig_log) && $sig_log ne "") {
+                        $SIG{INT} = sub { log_sig("INT"); $SIG{INT} = "DEFAULT"; kill "INT", $$; };
+                    }
+                    if ($ig_term) {
+                        $SIG{TERM} = sub { log_sig("TERM"); };
+                    } elsif (defined($sig_log) && $sig_log ne "") {
+                        $SIG{TERM} = sub { log_sig("TERM"); $SIG{TERM} = "DEFAULT"; kill "TERM", $$; };
+                    }
+                    if (defined($arm_ready) && $arm_ready ne "") {
+                        if (open(my $rf, ">", $arm_ready)) { close($rf); }
+                    }
                     my $limit = ($t ne "" ? $t + 0 : 0);
                     my $t0 = time();
                     while (! -e $p) {
                         if ($limit > 0 && (time() - $t0) >= $limit) { exit 124; }
                         select(undef, undef, undef, 0.02);
                     }
-                ' "$wait_target" "${wait_timeout:-0}" "$TRACE_TAG" < /dev/null
+                ' "$wait_target" "${wait_timeout:-0}" "$IGNORE_INT" "$IGNORE_TERM" "$SIGNAL_LOG" "$ARM_READY_FILE" "$TRACE_TAG" < /dev/null
                 wait_rc=$?
-                if [[ $wait_rc -ne 0 ]]; then
+                ARM_READY_FILE=""
+                if [[ $wait_rc -eq 130 && $IGNORE_INT -eq 0 ]]; then
+                    die_by_signal INT
+                elif [[ $wait_rc -eq 143 && $IGNORE_TERM -eq 0 ]]; then
+                    die_by_signal TERM
+                elif [[ $wait_rc -eq 129 ]]; then
+                    die_by_signal HUP
+                elif [[ $wait_rc -ne 0 ]]; then
                     EXIT_CODE="$wait_rc"
                     NO_COST=1
                     break
@@ -433,6 +552,10 @@ STDOUT_TEXT="${FAKE_RELAY_STDOUT:-}"
 REPEAT_BYTES="${FAKE_RELAY_REPEAT_BYTES:-0}"
 READY_FILE="${FAKE_RELAY_READY_FILE:-}"
 CHILD_PID_FILE="${FAKE_RELAY_CHILD_PID_FILE:-}"
+SUBGROUP_PID_FILE="${FAKE_RELAY_SUBGROUP_PID_FILE:-}"
+IGNORE_INT="${FAKE_RELAY_IGNORE_INT:-0}"
+IGNORE_TERM="${FAKE_RELAY_IGNORE_TERM:-0}"
+SIGNAL_LOG="${FAKE_RELAY_SIGNAL_LOG:-}"
 SLOW_TERM_SECONDS="${FAKE_RELAY_SLOW_TERM:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -469,6 +592,22 @@ while [[ $# -gt 0 ]]; do
             CHILD_PID_FILE="${2:?missing value for --child-pid-file}"
             shift 2
             ;;
+        --subgroup-pid-file)
+            SUBGROUP_PID_FILE="${2:?missing value for --subgroup-pid-file}"
+            shift 2
+            ;;
+        --ignore-int)
+            IGNORE_INT=1
+            shift
+            ;;
+        --ignore-term)
+            IGNORE_TERM=1
+            shift
+            ;;
+        --signal-log)
+            SIGNAL_LOG="${2:?missing value for --signal-log}"
+            shift 2
+            ;;
         --slow-term)
             SLOW_TERM_SECONDS="${2:?missing value for --slow-term}"
             shift 2
@@ -495,6 +634,23 @@ if [[ -n "${CHILD_PID_FILE}" ]]; then
     printf '%s\n' "$!" > "${CHILD_PID_FILE}"
 fi
 
+if [[ -n "${SUBGROUP_PID_FILE}" ]]; then
+    mkdir -p "$(dirname "${SUBGROUP_PID_FILE}")"
+    /usr/bin/perl -MPOSIX=setpgid -e '
+        my ($pid_file) = @ARGV;
+        setpgid(0, 0);
+        $SIG{INT} = $SIG{TERM} = $SIG{HUP} = "IGNORE";
+        open(my $fh, ">", $pid_file) or die $!;
+        print $fh "$$\n";
+        close($fh);
+        select(undef, undef, undef, 60);
+    ' "${SUBGROUP_PID_FILE}" </dev/null >/dev/null 2>&1 &
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+        [[ -s "${SUBGROUP_PID_FILE}" ]] && break
+        /usr/bin/perl -e 'select(undef, undef, undef, 0.01)' </dev/null
+    done
+fi
+
 if [[ -n "${RELAY_MESSAGE}" ]]; then
     printf 'relay: %s\n' "${RELAY_MESSAGE}" >&2
 fi
@@ -516,6 +672,50 @@ while rem > 0:
     rem -= len(chunk)
 out.flush()
 ' "${REPEAT_BYTES}"
+fi
+
+if [[ "${IGNORE_INT}" == "1" || "${IGNORE_TERM}" == "1" || -n "${SIGNAL_LOG}" ]]; then
+    [[ -n "${SIGNAL_LOG}" ]] && mkdir -p "$(dirname "${SIGNAL_LOG}")"
+    exec /usr/bin/perl -MPOSIX -MTime::HiRes=time -e '
+        my ($sleep_sec, $ig_int, $ig_term, $sig_log, $ready_file, $kill_sig, $exit_code) = @ARGV;
+        sub log_sig {
+            my ($name) = @_;
+            return unless defined($sig_log) && $sig_log ne "";
+            if (open(my $fh, ">>", $sig_log)) {
+                select((select($fh), $| = 1)[0]);
+                print $fh "$name\n";
+                close($fh);
+            }
+        }
+        if ($ig_int) {
+            $SIG{INT} = sub { log_sig("INT"); };
+        } else {
+            $SIG{INT} = sub { log_sig("INT"); $SIG{INT} = "DEFAULT"; kill "INT", $$; };
+        }
+        if ($ig_term) {
+            $SIG{TERM} = sub { log_sig("TERM"); };
+        } else {
+            $SIG{TERM} = sub { log_sig("TERM"); $SIG{TERM} = "DEFAULT"; kill "TERM", $$; };
+        }
+        if (defined($ready_file) && $ready_file ne "") {
+            if (open(my $rf, ">", $ready_file)) { close($rf); }
+        }
+        if (defined($sleep_sec) && ($sleep_sec + 0) > 0) {
+            my $deadline = time() + ($sleep_sec + 0);
+            while (1) {
+                my $rem = $deadline - time();
+                last if $rem <= 0;
+                select(undef, undef, undef, $rem > 0.05 ? 0.05 : $rem);
+            }
+        }
+        if (defined($kill_sig) && $kill_sig ne "") {
+            $kill_sig =~ s/^SIG//i;
+            $SIG{INT} = $SIG{TERM} = $SIG{HUP} = $SIG{QUIT} = $SIG{ALRM} = "DEFAULT";
+            kill $kill_sig, $$;
+            sleep 1;
+        }
+        exit($exit_code + 0);
+    ' "${SLEEP_SECONDS}" "${IGNORE_INT}" "${IGNORE_TERM}" "${SIGNAL_LOG}" "${READY_FILE}" "${KILL_SELF_SIGNAL}" "${EXIT_CODE}"
 fi
 
 if [[ -n "${READY_FILE}" ]]; then

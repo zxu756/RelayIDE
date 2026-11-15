@@ -1761,4 +1761,187 @@ struct PTYAndTerminalMultiplexerTests {
         #expect(!stubSource.contains("/" + "Users" + "/"))
         #expect(FileManager.default.fileExists(atPath: decoyMarker.path) == false)
     }
+
+    // MARK: - M1 Stage 05: Multi-Lane PTY FD Isolation on Crash & Escalating Cancellation Ladder (R42)
+
+    @Test("Closing one PTY session's master FD delivers SIGHUP even while sibling PTY sessions remain open (crash FD isolation)")
+    func ptyMultiSessionMasterHangupDoesNotLeakAcrossSiblingSessions() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relayide-pty-s05-cloexec-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let readyA = tmpDir.appendingPathComponent("ready-a")
+        let readyB = tmpDir.appendingPathComponent("ready-b")
+
+        let ptyA = POSIXPseudoTerminalSession(laneID: "lane-crash-a")
+        let ptyB = POSIXPseudoTerminalSession(laneID: "lane-crash-b")
+        var pidA: pid_t = -1
+        var pidB: pid_t = -1
+        defer {
+            if pidA > 0 { _ = Darwin.kill(-pidA, SIGKILL); _ = Darwin.kill(pidA, SIGKILL) }
+            if pidB > 0 { _ = Darwin.kill(-pidB, SIGKILL); _ = Darwin.kill(pidB, SIGKILL) }
+            ptyA.terminate(signal: SIGKILL)
+            ptyB.terminate(signal: SIGKILL)
+        }
+
+        try ptyA.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: ["--ready-file", readyA.path, "--sleep", "30"]
+        )
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: readyA.path) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        pidA = ptyA.metrics().pid
+        #expect(pidA > 0)
+
+        // Spawn sibling session B AFTER session A's master FD is open in parent.
+        try ptyB.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: ["--ready-file", readyB.path, "--sleep", "30"]
+        )
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: readyB.path) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        pidB = ptyB.metrics().pid
+        #expect(pidB > 0)
+
+        // Simulate RelayIDE crashing/closing A's master FD without sending kill(), while B stays running.
+        ptyA.closeMasterFDSimulatingCrash()
+
+        let aExited = ptyA.waitForExit(timeout: 1.5)
+        #expect(aExited == true, "Session A failed to receive SIGHUP on master FD close because sibling session B leaked A's master FD")
+        let metricsA = ptyA.metrics()
+        #expect(metricsA.isRunning == false)
+        #expect(metricsA.exitStatus == nil)
+        #expect(metricsA.terminationSignal == SIGHUP)
+        #expect(ptyB.metrics().isRunning == true)
+    }
+
+    @Test("terminateWithEscalation enforces INT -> TERM -> KILL order and kills separate-process-group descendants (R42)")
+    func ptyEscalatingTerminationOrderAndDescendantProcessGroupKill() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relayide-pty-s05-ladder-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        // 1. Cooperative child exits on initial SIGINT without escalating to SIGTERM or SIGKILL.
+        let ready1 = tmpDir.appendingPathComponent("ready-1")
+        let sigLog1 = tmpDir.appendingPathComponent("sig-1.log")
+        let pty1 = POSIXPseudoTerminalSession(laneID: "lane-ladder-1")
+        var pid1: pid_t = -1
+        defer {
+            if pid1 > 0 { _ = Darwin.kill(-pid1, SIGKILL); _ = Darwin.kill(pid1, SIGKILL) }
+            pty1.terminate(signal: SIGKILL)
+        }
+        try pty1.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: ["--signal-log", sigLog1.path, "--ready-file", ready1.path, "--sleep", "30"]
+        )
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: ready1.path) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        pid1 = pty1.metrics().pid
+        let steps1 = pty1.terminateWithEscalation(sigintGraceSeconds: 1.0, sigtermGraceSeconds: 1.0)
+        #expect(steps1 == [.sentSIGINT(pid: pid1)])
+        #expect(pty1.metrics().isRunning == false)
+        let logged1 = (try? String(contentsOf: sigLog1, encoding: .utf8))?
+            .split(separator: "\n").map(String.init) ?? []
+        #expect(logged1 == ["INT"])
+
+        // 2. Child ignoring SIGINT survives grace window, then exits on SIGTERM without SIGKILL.
+        let ready2 = tmpDir.appendingPathComponent("ready-2")
+        let sigLog2 = tmpDir.appendingPathComponent("sig-2.log")
+        let pty2 = POSIXPseudoTerminalSession(laneID: "lane-ladder-2")
+        var pid2: pid_t = -1
+        defer {
+            if pid2 > 0 { _ = Darwin.kill(-pid2, SIGKILL); _ = Darwin.kill(pid2, SIGKILL) }
+            pty2.terminate(signal: SIGKILL)
+        }
+        try pty2.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: ["--ignore-int", "--signal-log", sigLog2.path, "--ready-file", ready2.path, "--sleep", "30"]
+        )
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: ready2.path) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        pid2 = pty2.metrics().pid
+        let steps2 = pty2.terminateWithEscalation(sigintGraceSeconds: 0.15, sigtermGraceSeconds: 1.0)
+        #expect(steps2 == [.sentSIGINT(pid: pid2), .sentSIGTERM(pid: pid2)])
+        #expect(pty2.metrics().isRunning == false)
+        let logged2 = (try? String(contentsOf: sigLog2, encoding: .utf8))?
+            .split(separator: "\n").map(String.init) ?? []
+        #expect(logged2 == ["INT", "TERM"])
+
+        // 3. Child ignoring SIGINT and SIGTERM + spawning a separate-pgid descendant (setpgid(0,0))
+        //    enumerates descendants BEFORE SIGKILL and kills both process groups.
+        let ready3 = tmpDir.appendingPathComponent("ready-3")
+        let sigLog3 = tmpDir.appendingPathComponent("sig-3.log")
+        let subPIDFile3 = tmpDir.appendingPathComponent("sub-3.pid")
+        let pty3 = POSIXPseudoTerminalSession(laneID: "lane-ladder-3")
+        var pid3: pid_t = -1
+        var subgroupPID: pid_t = -1
+        defer {
+            if subgroupPID > 0 { _ = Darwin.kill(-subgroupPID, SIGKILL); _ = Darwin.kill(subgroupPID, SIGKILL) }
+            if pid3 > 0 { _ = Darwin.kill(-pid3, SIGKILL); _ = Darwin.kill(pid3, SIGKILL) }
+            pty3.terminate(signal: SIGKILL)
+        }
+        try pty3.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: [
+                "--ignore-int",
+                "--ignore-term",
+                "--signal-log", sigLog3.path,
+                "--subgroup-pid-file", subPIDFile3.path,
+                "--ready-file", ready3.path,
+                "--sleep", "30"
+            ]
+        )
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: ready3.path) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        pid3 = pty3.metrics().pid
+        let rawSubPID = try String(contentsOf: subPIDFile3, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        subgroupPID = try #require(pid_t(rawSubPID))
+        let subgroupPGID = Darwin.getpgid(subgroupPID)
+        #expect(subgroupPID > 0 && subgroupPID != pid3)
+        #expect(subgroupPGID == subgroupPID)
+
+        let discoveredDescendants = POSIXProcessTree.allDescendants(of: pid3)
+        #expect(discoveredDescendants.contains(subgroupPID))
+        let discoveredPGIDs = POSIXProcessTree.processGroupIDs(for: [pid3] + discoveredDescendants)
+        #expect(discoveredPGIDs.contains(subgroupPGID))
+
+        let steps3 = pty3.terminateWithEscalation(sigintGraceSeconds: 0.15, sigtermGraceSeconds: 0.15)
+        #expect(steps3.count == 3)
+        if steps3.count == 3 {
+            #expect(steps3[0] == .sentSIGINT(pid: pid3))
+            #expect(steps3[1] == .sentSIGTERM(pid: pid3))
+            if case .sentSIGKILL(let killedLeader, let descPIDs, let pgids) = steps3[2] {
+                #expect(killedLeader == pid3)
+                #expect(descPIDs.contains(subgroupPID))
+                #expect(pgids.contains(subgroupPGID))
+            } else {
+                Issue.record("Expected third escalation step to be .sentSIGKILL")
+            }
+        }
+        let logged3 = (try? String(contentsOf: sigLog3, encoding: .utf8))?
+            .split(separator: "\n").map(String.init) ?? []
+        #expect(logged3 == ["INT", "TERM"])
+        #expect(pty3.metrics().isRunning == false)
+        #expect(pty3.metrics().terminationSignal == SIGKILL)
+        #expect(Darwin.kill(pid3, 0) != 0, "Leader PID \(pid3) still alive after SIGKILL escalation")
+
+        // Poll briefly for kernel reap of reparented separate-pgid child after SIGKILL
+        for _ in 0..<50 {
+            if Darwin.kill(subgroupPID, 0) != 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(Darwin.kill(subgroupPID, 0) != 0, "Separate-process-group descendant \(subgroupPID) survived SIGKILL escalation")
+    }
 }

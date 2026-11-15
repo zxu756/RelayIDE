@@ -50,6 +50,90 @@ public enum POSIXWaitStatus: Sendable {
     }
 }
 
+// MARK: - Descendant Process Enumeration & Escalation Step Telemetry (R42)
+
+@_silgen_name("proc_listchildpids")
+private func darwinProcListChildPIDs(
+    _ ppid: pid_t,
+    _ buffer: UnsafeMutableRawPointer?,
+    _ buffersize: Int32
+) -> Int32
+
+public enum PTYTerminationEscalationStep: Sendable, Equatable {
+    case sentSIGINT(pid: pid_t)
+    case sentSIGTERM(pid: pid_t)
+    case sentSIGKILL(pid: pid_t, descendantPIDs: [pid_t], processGroupIDs: [pid_t])
+}
+
+public enum POSIXProcessTree: Sendable {
+    /// Lists immediate child PIDs of `ppid` via Darwin's `proc_listchildpids` (which returns element count, not bytes).
+    public static func directChildren(of ppid: pid_t) -> [pid_t] {
+        guard ppid > 1 else { return [] }
+        let hint = darwinProcListChildPIDs(ppid, nil, 0)
+        var capacity = max(256, Int(max(0, hint)) + 64)
+        while capacity <= 65_536 {
+            var buffer = [pid_t](repeating: 0, count: capacity)
+            let byteSize = Int32(clamping: capacity * MemoryLayout<pid_t>.stride)
+            let count = buffer.withUnsafeMutableBytes { raw -> Int32 in
+                darwinProcListChildPIDs(ppid, raw.baseAddress, byteSize)
+            }
+            if count <= 0 {
+                return []
+            }
+            if Int(count) >= capacity {
+                capacity *= 2
+                continue
+            }
+            var seen = Set<pid_t>()
+            var result: [pid_t] = []
+            for idx in 0..<Int(count) {
+                let child = buffer[idx]
+                if child > 1 && child != ppid && seen.insert(child).inserted {
+                    result.append(child)
+                }
+            }
+            return result
+        }
+        return []
+    }
+
+    /// Recursively enumerates all descendants of `rootPID` (across `setsid` and `setpgid` boundaries) via BFS.
+    public static func allDescendants(of rootPID: pid_t) -> [pid_t] {
+        guard rootPID > 1 else { return [] }
+        var visited: Set<pid_t> = [rootPID]
+        var queue: [pid_t] = [rootPID]
+        var descendants: [pid_t] = []
+        var head = 0
+        while head < queue.count {
+            let current = queue[head]
+            head += 1
+            for child in directChildren(of: current) {
+                if visited.insert(child).inserted {
+                    descendants.append(child)
+                    queue.append(child)
+                }
+            }
+        }
+        return descendants
+    }
+
+    /// Collects unique process group IDs (`getpgid`) for `pids`, excluding `<= 1` and `excludingProcessGroup`.
+    public static func processGroupIDs(
+        for pids: [pid_t],
+        excludingProcessGroup: pid_t = Darwin.getpgrp()
+    ) -> [pid_t] {
+        var seen = Set<pid_t>()
+        var groups: [pid_t] = []
+        for pid in pids where pid > 1 {
+            let pgid = Darwin.getpgid(pid)
+            if pgid > 1 && pgid != excludingProcessGroup && seen.insert(pgid).inserted {
+                groups.append(pgid)
+            }
+        }
+        return groups
+    }
+}
+
 // MARK: - Internal Reaper-Safe Session State
 
 private final class PTYSessionState: @unchecked Sendable {
@@ -181,6 +265,8 @@ private final class PTYSessionState: @unchecked Sendable {
 // MARK: - POSIX Pseudo-Terminal (`posix_openpt` / `grantpt` / `unlockpt` / `ptsname` + `posix_spawn`) Multiplexer
 
 public final class POSIXPseudoTerminalSession: @unchecked Sendable {
+    private static let ptyOpenLock = NSLock()
+
     public let laneID: String
     public var screenBuffer: VT100TerminalScreenBuffer { state.screenBuffer }
 
@@ -262,27 +348,45 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
             }
         }
 
-        let mfd = Darwin.posix_openpt(O_RDWR | O_NOCTTY)
-        guard mfd >= 0 else {
+        // Serialize `posix_openpt` + `FD_CLOEXEC` + `ptsname` + slave `O_CLOEXEC` open so concurrent
+        // `Process.run()` / `posix_spawn` calls can neither race `ptsname`'s static buffer nor inherit
+        // another lane's PTY master FD across sibling sessions.
+        let mfd: Int32
+        let sfd: Int32
+        Self.ptyOpenLock.lock()
+        let allocatedMaster = Darwin.posix_openpt(O_RDWR | O_NOCTTY)
+        if allocatedMaster < 0 {
             let code = errno
+            Self.ptyOpenLock.unlock()
             if openedRawFD >= 0 { Darwin.close(openedRawFD) }
             throw RelayIDEError.ptyAllocationFailed(errnoCode: code, message: String(cString: strerror(code)))
         }
-        guard Darwin.grantpt(mfd) == 0, Darwin.unlockpt(mfd) == 0, let slaveNamePtr = Darwin.ptsname(mfd) else {
+        let existingFDFlags = fcntl(allocatedMaster, F_GETFD)
+        _ = fcntl(allocatedMaster, F_SETFD, (existingFDFlags >= 0 ? existingFDFlags : 0) | FD_CLOEXEC)
+
+        guard Darwin.grantpt(allocatedMaster) == 0,
+              Darwin.unlockpt(allocatedMaster) == 0,
+              let slaveNamePtr = Darwin.ptsname(allocatedMaster)
+        else {
             let code = errno
-            Darwin.close(mfd)
+            Darwin.close(allocatedMaster)
+            Self.ptyOpenLock.unlock()
             if openedRawFD >= 0 { Darwin.close(openedRawFD) }
             throw RelayIDEError.ptyAllocationFailed(errnoCode: code, message: String(cString: strerror(code)))
         }
 
         let slavePath = String(cString: slaveNamePtr)
-        let sfd = Darwin.open(slavePath, O_RDWR)
-        guard sfd >= 0 else {
+        let allocatedSlave = Darwin.open(slavePath, O_RDWR | O_CLOEXEC)
+        Self.ptyOpenLock.unlock()
+
+        guard allocatedSlave >= 0 else {
             let code = errno
-            Darwin.close(mfd)
+            Darwin.close(allocatedMaster)
             if openedRawFD >= 0 { Darwin.close(openedRawFD) }
             throw RelayIDEError.ptyAllocationFailed(errnoCode: code, message: String(cString: strerror(code)))
         }
+        mfd = allocatedMaster
+        sfd = allocatedSlave
 
         var ws = winsize(
             ws_row: UInt16(clamping: screenBuffer.rows),
@@ -292,7 +396,8 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
         )
         _ = ioctl(mfd, TIOCSWINSZ, &ws)
 
-        // Configure `posix_spawn_file_actions_t` & `posix_spawnattr_t`
+        // Configure `posix_spawn_file_actions_t` & `posix_spawnattr_t` with `POSIX_SPAWN_CLOEXEC_DEFAULT`
+        // so only `0, 1, 2` (dup'd from the slave PTY) are inherited by the child.
         var fileActions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&fileActions)
         defer { posix_spawn_file_actions_destroy(&fileActions) }
@@ -300,13 +405,9 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
         posix_spawn_file_actions_adddup2(&fileActions, sfd, STDIN_FILENO)
         posix_spawn_file_actions_adddup2(&fileActions, sfd, STDOUT_FILENO)
         posix_spawn_file_actions_adddup2(&fileActions, sfd, STDERR_FILENO)
-        posix_spawn_file_actions_addclose(&fileActions, mfd)
-        if sfd > STDERR_FILENO {
-            posix_spawn_file_actions_addclose(&fileActions, sfd)
-        }
-        if openedRawFD > STDERR_FILENO {
-            posix_spawn_file_actions_addclose(&fileActions, openedRawFD)
-        }
+        posix_spawn_file_actions_addinherit_np(&fileActions, STDIN_FILENO)
+        posix_spawn_file_actions_addinherit_np(&fileActions, STDOUT_FILENO)
+        posix_spawn_file_actions_addinherit_np(&fileActions, STDERR_FILENO)
         if let wd = workingDirectory {
             _ = wd.withCString { cwd in
                 posix_spawn_file_actions_addchdir_np(&fileActions, cwd)
@@ -324,7 +425,7 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
         _ = posix_spawnattr_setsigmask(&spawnAttrs, &emptyMask)
         _ = posix_spawnattr_setflags(
             &spawnAttrs,
-            Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK)
+            Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)
         )
 
         // Build argv & envp
@@ -508,6 +609,105 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
                 let reason = self.metrics().exitReason ?? .waitFailed(errnoCode: ECHILD)
                 continuation.resume(returning: reason)
             }
+        }
+    }
+
+    /// Closes the PTY master descriptor without sending signals via `kill()`, matching kernel FD teardown when RelayIDE crashes (`SIGKILL`).
+    public func closeMasterFDSimulatingCrash() {
+        state.condition.lock()
+        let src = state.readSource
+        state.readSource = nil
+        let fd = state.masterFD
+        state.masterFD = -1
+        state.condition.unlock()
+
+        if let src {
+            src.cancel()
+        } else if fd >= 0 {
+            Darwin.close(fd)
+        }
+    }
+
+    /// Escalates `SIGINT -> wait(sigintGraceSeconds) -> SIGTERM -> wait(sigtermGraceSeconds) -> descendant-PGID SIGKILL` (R42).
+    @discardableResult
+    public func terminateWithEscalation(
+        sigintGraceSeconds: TimeInterval = 10.0,
+        sigtermGraceSeconds: TimeInterval = 5.0,
+        onStep: (@Sendable (PTYTerminationEscalationStep) -> Void)? = nil
+    ) -> [PTYTerminationEscalationStep] {
+        state.condition.lock()
+        let pid = state.childPID
+        let running = state.isRunningFlag
+        state.condition.unlock()
+
+        guard running, pid > 0 else { return [] }
+        var steps: [PTYTerminationEscalationStep] = []
+        let callerPGID = Darwin.getpgrp()
+
+        // 1. SIGINT to relay.sh's process group (-pid), wait sigintGraceSeconds
+        let step1 = PTYTerminationEscalationStep.sentSIGINT(pid: pid)
+        steps.append(step1)
+        onStep?(step1)
+        if Darwin.kill(-pid, SIGINT) != 0 && errno == ESRCH {
+            _ = Darwin.kill(pid, SIGINT)
+        }
+        if state.waitForExit(timeout: max(0.0, sigintGraceSeconds)) {
+            Self.waitBrieflyForProcessGroupDrain(pgid: pid)
+            return steps
+        }
+
+        // 2. SIGTERM to relay.sh's process group (-pid), wait sigtermGraceSeconds
+        let step2 = PTYTerminationEscalationStep.sentSIGTERM(pid: pid)
+        steps.append(step2)
+        onStep?(step2)
+        if Darwin.kill(-pid, SIGTERM) != 0 && errno == ESRCH {
+            _ = Darwin.kill(pid, SIGTERM)
+        }
+        if state.waitForExit(timeout: max(0.0, sigtermGraceSeconds)) {
+            Self.waitBrieflyForProcessGroupDrain(pgid: pid)
+            return steps
+        }
+
+        // 3. Snapshot all descendants and their process groups BEFORE sending SIGKILL, because
+        //    killing `pid` first reparents its children to PID 1 and the agent runs in its own pgid.
+        let descendants = POSIXProcessTree.allDescendants(of: pid)
+        let pgids = POSIXProcessTree.processGroupIDs(
+            for: [pid] + descendants,
+            excludingProcessGroup: callerPGID
+        )
+        let step3 = PTYTerminationEscalationStep.sentSIGKILL(
+            pid: pid,
+            descendantPIDs: descendants,
+            processGroupIDs: pgids
+        )
+        steps.append(step3)
+        onStep?(step3)
+
+        if pid != callerPGID {
+            _ = Darwin.kill(-pid, SIGKILL)
+        }
+        _ = Darwin.kill(pid, SIGKILL)
+        for pgid in pgids {
+            _ = Darwin.kill(-pgid, SIGKILL)
+        }
+        for descPID in descendants where descPID > 1 && descPID != Darwin.getpid() {
+            _ = Darwin.kill(descPID, SIGKILL)
+        }
+
+        _ = state.waitForExit(timeout: 5.0)
+        Self.waitBrieflyForProcessGroupDrain(pgid: pid)
+        for pgid in pgids {
+            Self.waitBrieflyForProcessGroupDrain(pgid: pgid)
+        }
+        return steps
+    }
+
+    private static func waitBrieflyForProcessGroupDrain(pgid: pid_t) {
+        guard pgid > 1, pgid != Darwin.getpgrp() else { return }
+        var checks = 0
+        while Darwin.kill(-pgid, 0) == 0 && checks < 100 {
+            checks += 1
+            usleep(5_000)
         }
     }
 
