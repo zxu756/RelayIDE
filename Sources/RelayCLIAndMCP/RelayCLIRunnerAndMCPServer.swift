@@ -288,8 +288,8 @@ public struct RelayCLIRunner: Sendable {
 
             case "version", "--version":
                 let msg = lang.isChinese
-                    ? "RelayIDE 1.2.0 (macOS arm64 · 工作区台账、MCP 所有权校验与实验性三路合并；M0 尚未接入智能体执行)"
-                    : "RelayIDE 1.2.0 (macOS arm64 · Workspace Ledger, MCP Ownership Check & Experimental 3-Way Merge; M0 does not launch coding agents yet)"
+                    ? "RelayIDE 1.2.0 (macOS arm64 · M1：可用 run 经 agent-relay 在各自 git worktree 中运行智能体，需先安装 agent-relay；还不合并分支、不执行 verify、没有整单预算)"
+                    : "RelayIDE 1.2.0 (macOS arm64 · M1: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first]; does not merge branches, execute verify, or enforce whole-job budgets yet)"
                 return RelayCLIExecutionResult(stdout: msg, exitCode: 0)
 
             case "init":
@@ -753,10 +753,16 @@ public struct RelayCLIRunner: Sendable {
     public static func helpBanner(language: RelayLanguage) -> String {
         if language.isChinese {
             return """
-            RelayIDE 1.2.0 · 多智能体并行工作台原型（M0：当前版本尚不会启动任何 coding agent，排在 M1）
+            RelayIDE 1.2.0 · 基于 agent-relay 的多智能体工作树运行器与工作区工具（M1：可用 run 经 agent-relay 在各自 git worktree 中运行智能体，需先安装 agent-relay；还不合并分支、不执行 verify、没有整单预算、未接入桌面界面）
             命令（可执行文件名：RelayIDE；Homebrew Cask 软链名：relayide）：
               init [--project <path.relayproj>] [--seed-demo]       新建 .relayproj SQLite WAL 工作区（--seed-demo 会写入带 [演示数据] 标记的合成样本）
-              status [--project <path.relayproj>]                   输出已有工作区的 JSON 统计（工程不存在时报错，不会自动新建）
+              run <plan.json> --project <path.relayproj> [--relay-sh <path>]
+                                                                    经 agent-relay (relay.sh) 在各自隔离 git worktree 的伪终端中运行 claude/codex/agy/vibe，
+                                                                    并将成功或部分完成的通道提交到各自分支（还不合并分支、不执行 verify、不支持整单预算 RELAY_BUDGET_USD；
+                                                                    <lane>.pty 为伪终端记录而非 agent 逐字节原始输出，原始输出以 .relay/NN-<agent>.log 为准）。
+                                                                    退出码：0 全部成功；1 至少一条通道非成功；2 计划或参数错误；125 环境或内部错误；130/143 收到 SIGINT/SIGTERM
+              status [--project <path.relayproj>] [--run <id> | --runs]
+                                                                    输出已有工作区的 JSON 统计，或输出指定运行 (--run) / 全部运行 (--runs) 的台账 JSON（工程不存在时报错，不自动新建）
               lanes [--project <path.relayproj>]                    列出工作区已登记的通道与路径归属规则
               dag-waves [--project <path.relayproj>]                按拓扑排序计算已登记 DAG 的并行执行波次
               semantic-merge <base> <left> <right>                  【实验性】以 git merge-file 为准的三路合并：git 能干净合并时原样输出它的行级结果；git 报冲突时，
@@ -772,10 +778,17 @@ public struct RelayCLIRunner: Sendable {
             """
         }
         return """
-        RelayIDE 1.2.0 · Multi-Agent Workbench Prototype (M0: does not launch coding agents yet; scheduled for M1)
+        RelayIDE 1.2.0 · Multi-Agent Worktree Runner & Workspace Tool over agent-relay (M1: runs coding agents in isolated git worktrees via agent-relay with 'run', install agent-relay first; does not merge branches, execute verify, enforce whole-job budgets, or connect the desktop UI yet)
         Commands (built executable: RelayIDE; Homebrew Cask symlink: relayide):
           init [--project <path.relayproj>] [--seed-demo]       Initialize .relayproj SQLite WAL workspace (--seed-demo writes [DEMO] synthetic fixtures)
-          status [--project <path.relayproj>]                   Print JSON workspace statistics (errors if --project does not exist; never auto-creates)
+          run <plan.json> --project <path.relayproj> [--relay-sh <path>]
+                                                                Run claude/codex/agy/vibe lanes headlessly in isolated git worktrees via agent-relay (relay.sh) and commit
+                                                                succeeded/partial lanes to their own branches (does not merge branches, execute verify, or enforce whole-job
+                                                                RELAY_BUDGET_USD yet; <lane>.pty is the PTY terminal transcript, not byte-for-byte raw agent output, which
+                                                                relay.sh writes to .relay/NN-<agent>.log).
+                                                                Exit codes: 0 all succeeded; 1 at least one lane not succeeded; 2 plan/usage error; 125 environment/internal error; 130/143 SIGINT/SIGTERM
+          status [--project <path.relayproj>] [--run <id> | --runs]
+                                                                Print workspace JSON statistics, or JSON ledger for one run (--run) or all runs (--runs); errors if --project is missing
           lanes [--project <path.relayproj>]                    List registered worktree lanes & ownership globs
           dag-waves [--project <path.relayproj>]                Compute topological execution waves for registered DAG
           semantic-merge <base> <left> <right>                  EXPERIMENTAL 3-way merge anchored on git merge-file: prints git's line-level result when git merges cleanly. When git

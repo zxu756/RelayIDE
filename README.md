@@ -4,21 +4,26 @@
 
 **macOS Workbench & Workspace Store for Multi-Agent Relay Workflows**
 
-`RelayIDE` is a native macOS SwiftUI workbench, SQLite workspace store, and CLI/MCP utility for inspecting isolated Git worktree lanes, topological task waves, guardrail policies, and merge artifacts. **Current status (M0): This version does not launch coding agents yet; headless multi-agent execution via `agent-relay` is scheduled for M1.**
+`RelayIDE` is a native macOS CLI, SQLite workspace store, MCP utility, and SwiftUI workbench built on top of `agent-relay` (`relay.sh`; you must install `agent-relay` first). **Current status (M1): `RelayIDE run` launches headless coding agents (`claude`, `codex`, `agy`, `vibe`) in isolated Git worktrees via `agent-relay` and commits succeeded or partial lanes to their own branches; this version does not merge branches, does not execute `verify` commands, has no whole-job budget (`RELAY_BUDGET_USD`), and does not connect the desktop UI to live runs yet.**
 
 ![RelayIDE Synthetic Demo Preview](docs/screenshot-pty-grid.png)
 *Figure 1 (`[DEMO]`): Synthetic 4-lane preview rendered with `--demo` (`--export-screenshots`). Launching `RelayIDE` without `--demo` opens an empty workspace with `0` lanes, no terminal transcripts, no spend figures, and no active proxy.*
 
 ---
 
-## What Works Today (M0)
+## What Works Today (M1)
 
+- **Headless Multi-Agent Worktree Runner (`run`, `status --run`, `status --runs`)**: `RelayIDE run <plan.json> --project <dir> [--relay-sh <path>] [--lang zh|en]` executes a multi-lane plan on a real Git repository through `agent-relay` (`relay.sh`, resolved from `--relay-sh`, `RELAYIDE_RELAY_SH`, or `~/.agents/skills/agent-relay/scripts/relay.sh` alongside `relay_util.py`).
+  - **Validation & locking.** Validates `plan.json` before touching disk (agents `claude`, `codex`, `agy`, `vibe`; lane IDs matching `^[a-z0-9][a-z0-9-]{0,39}$` with `integration` reserved for M2; at most one predecessor per lane in M1; acyclicity; configured repository Git `user.name` and `user.email`; `--project` existing outside the repository working tree; `RELAY_BUDGET_USD` unset; `RELAY_WORKER` unset) and acquires a non-blocking `flock` on `<project>/run.lock`.
+  - **Execution, transcripts & commits.** Serially creates isolated worktrees at `<project>/runs/<run-id>/worktrees/<lane>` on new branches `relay/<run-id>/<lane>` (`git worktree add -b`, never resetting existing branches), runs `<relay.sh> <agent> <worktree> <prompt>` inside a POSIX PTY, and appends PTY master output to `<project>/runs/<run-id>/lanes/<lane>.pty` (this `.pty` file is the PTY terminal transcript with `\r\n` line discipline, not byte-for-byte raw agent output; raw CLI output is written by `relay.sh` to `<worktree>/.relay/NN-<agent>.log`). Independent lanes start immediately; a dependent lane starts from its predecessor's committed branch head as soon as the predecessor finishes `succeeded` or `succeeded-no-changes`, and is marked `skipped` without creating a worktree or branch otherwise. `succeeded` and `partial` lanes commit their changes (`git commit --no-verify`, excluding `.relay/`) using the repository's configured Git identity; failed, timed-out, refused, cancelled, or killed lanes are not committed and record their uncommitted file list.
+  - **Spend, signals & exit codes.** Parses USD spend (`costSource: "usd"`), unpriced token counts (`costUSD: null`, `costSource: "unpriced"`), or missing records (`costSource: "no_record"`) from `<worktree>/.relay/LOG.md`. Handles `SIGINT` (`130`) and `SIGTERM` (`143`) via a `SIGINT -> SIGTERM -> descendant process-group SIGKILL` escalation ladder without committing cancelled lanes, and reconciles runs orphaned by `kill -9` to `interrupted` when `run.lock` is no longer held. Exit codes of `run`: `0` all lanes succeeded; `1` completed with at least one non-succeeded lane; `2` plan/usage/identity validation error (empty stdout); `125` environment/lock/internal error (empty stdout); `130` / `143` cancelled by `SIGINT` / `SIGTERM`. Prints the run JSON ledger on stdout, byte-identical to `RelayIDE status --project <dir> --run <run-id>`.
+  - **Current M1 boundaries.** Does not merge lane branches into an integration branch (M2); records `verify` in SQLite and notes on stderr that `verify` executes in M2; rejects `RELAY_BUDGET_USD` (exit `2`) because per-worktree `LOG.md` files do not accumulate whole-job spend across lanes (M4); unknown non-flag non-`.relayproj` first arguments exit `2` on stderr instead of opening the desktop window.
 - **Empty-by-Default Bilingual Workbench (`中文 / EN`)**: Launching the macOS app without `--demo` starts in an honest empty state (`0` lanes, empty terminal buffers, no spend numbers, and no proxy address). Live `中文 | EN` switching works across the toolbar pill, `⇧⌘L` shortcut, `⌘,` Preferences modal, `--lang zh|en`, and `RELAYIDE_LANG=zh|en`. Passing `--demo` (or clicking **Load Demo**) loads a clearly badged `[DEMO]` synthetic preview in a temporary bundle without touching user `.relayproj` directories.
-- **`.relayproj` SQLite WAL Store, FTS5 Search & Checkpoints (`RelayWorkspaceStore`)**: Persists workspace metadata, lane records, DAG specs, merge reports, guardrail findings, FTS5 `BM25` search documents, SHA-256 checkpoints, and Undo/Redo history. Read-only CLI subcommands (`status`, `lanes`, `dag-waves`, `audit-plugins`, `export-html`, `mcp --project`) fail fast with a non-zero exit code if `--project <dir>` does not exist instead of creating directories behind the user's back. **These subcommands are read-only inspection: this version has no command that creates a lane or a DAG.** On a workspace made with `init`, `lanes` prints nothing and `dag-waves` prints `No DAG registered`; only `init --seed-demo` fills them, with synthetic `[DEMO]` rows.
+- **`.relayproj` SQLite WAL Store, Run Ledger, FTS5 Search & Checkpoints (`RelayWorkspaceStore`)**: Schema v5 (with `busy_timeout`) persists M1 run and lane ledgers (`relay_runs`, `relay_run_lanes`, queried via `status --run <id>` and `status --runs`) alongside workspace metadata, lane records, DAG specs, merge reports, guardrail findings, FTS5 `BM25` search documents, SHA-256 checkpoints, and Undo/Redo history. Read-only CLI subcommands (`status`, `lanes`, `dag-waves`, `audit-plugins`, `export-html`, `mcp --project`) fail fast with a non-zero exit code if `--project <dir>` does not exist instead of creating directories behind the user's back. On a workspace made with `init`, plain `status` reports `activeLaneCount: 0`, `status --runs` prints `[]`, `lanes` prints nothing, and `dag-waves` prints `No DAG registered`; `init --seed-demo` populates the M0 preview tables with synthetic `[DEMO]` rows.
 - **Standalone Engine Primitives (Unit-Tested Libraries)**:
-  - `RelayPTYCore`: `posix_openpt(2)` child-process PTY session wrapper, VT100 / `xterm-256color` / TrueColor screen buffer, Boyer-Moore scrollback search, and `.cast` v2 transcript codec.
-  - `RelayWorktreeGit`: `git worktree` creation/inspection plumbing, glob territory rule evaluation (`FileOwnershipRule`), and `.relay/LOG.md` handoff parsing.
-  - `RelayOrchestrator`: Kahn topological wave sort and Critical Path Method (`ES`/`EF`/`LS`/`LF`/slack) analyzer.
+  - `RelayPTYCore`: `posix_openpt(2)` child-process PTY session wrapper, `<sys/wait.h>` exit/signal decoder (`POSIXWaitStatus`), descendant process-tree enumeration (`proc_listchildpids`), VT100 / `xterm-256color` / TrueColor screen buffer, Boyer-Moore scrollback search, and `.cast` v2 transcript codec.
+  - `RelayWorktreeGit`: `git worktree add -b` creation, lane change staging/committing (`--no-verify`, excluding `.relay/`), glob territory rule evaluation (`FileOwnershipRule`), and `.relay/LOG.md` handoff parsing.
+  - `RelayOrchestrator`: Event-driven single-predecessor lane scheduler (`RelayDAGRunScheduler`), `.relay/LOG.md` spend/token parser, Kahn topological wave sort, and Critical Path Method (`ES`/`EF`/`LS`/`LF`/slack) analyzer.
   - `RelayPluginSDK`: Sandboxed `JavaScriptCore` policy-pack & hook scratchpad evaluator (`audit-plugins` and interactive GUI scratchpad).
   - `RelayWiretapProxy`: Standalone loopback HTTP/1.1 + SSE token dissector, regex secret scanner, and in-memory budget circuit-breaker ledger.
 - **Stdio JSON-RPC 2.0 MCP Server (`2` Tools)**: `RelayIDE mcp [--project <dir>]` exposes **2 MCP tools** over stdio:
@@ -35,12 +40,12 @@
 
 ---
 
-## Planned Roadmap (Not Implemented in M0)
+## Planned Roadmap (Not Implemented Yet)
 
-- **M1 (Real Multi-Agent Relay Runner)**: `RelayIDE run` spawning real `claude`, `codex`, `agy`, and `vibe` headless CLI workers in isolated Git worktrees via `.relay/` file handoff, live PTY stdout/stderr streaming, and real broadcast command execution (`⌘⇧B` currently reports `"Broadcast command is not implemented yet (M1)"`).
-- **M2 (Post-Run Git Worktree Integration & Verification Gate)**: Deterministic branch integration via `git merge-tree` / `git merge-file`, post-merge build/test verification gate, and automatic territory violation checks across real agent runs.
-- **M3 (Parser-Backed Semantic Merge)**: Replacing regex/indentation declaration heuristics with real AST parsers (`SwiftSyntax` / `tree-sitter`) across edge cases before enabling semantic merge in automated pipelines.
-- **M4 (Live Loopback Wiretap & Outbound DLP Gateway)**: Wiring `LoopbackWiretapProxyServer` into child agent `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` environment variables, enforcing live HTTP `429` budget circuit breakers, and redacting outbound secrets on live network traffic.
+- **M2 (Branch Merge Pipeline & `verify` Gate)**: Merging completed lane branches onto `relay/<run-id>/integration` via `git merge --no-ff`, aborting cleanly on conflicts, and streaming `verify` command output with process-group timeout cleanup.
+- **M3 (Semantic Merge Evaluation)**: Corpus evaluation against real open-source merge commits (`git merge-file` vs current engine vs `mergiraf`) to decide whether semantic merge is replaced with `SwiftSyntax` / `tree-sitter` or removed.
+- **M4 (Spend & Whole-Job Budget)**: Cross-lane whole-job budget enforcement and deciding whether to keep or remove the standalone loopback proxy.
+- **M5 (Desktop UI Connected to Live Runs)**: Wiring the SwiftUI terminal grid, lane status/spend list, file ownership view, and merge studio to live M1/M2 runs, plus real broadcast command execution (`⌘⇧B` currently reports `"Broadcast command is not implemented yet (M1)"`).
 
 ---
 
@@ -48,9 +53,9 @@
 
 - **`semantic-merge` and TypeScript without `tsc`.** When `tsc` is not on `PATH`, TypeScript is checked with Node's built-in type stripping, which rejects syntax that cannot simply be erased (`enum`, `namespace`, constructor parameter properties) and JSX in `.tsx`. A merge of such a file exits `3` even when the merge itself is fine.
 - **`semantic-merge` resolves few conflicts.** It only ever keeps both sides of "both inserted at the same place" conflicts, and only when the declaration-level engine reproduces every non-blank line. Renames, edits to adjacent lines and anything the engine misreads stay conflicts, as with `git merge-file`.
-- **Verification gate hangs on large output (library only).** `VerificationCommandGateEvaluator.runGateCommand` reads the child's stdout and stderr only after the child has exited. A command that prints more than the pipe buffer (about 64 KB) blocks, runs into the timeout and is reported as exit `124` instead of its real status. No command in this version calls this function; it must be fixed before M2 uses it.
+- **Verification gate hangs on large output (library only).** `VerificationCommandGateEvaluator.runGateCommand` reads the child's stdout and stderr only after the child has exited. A command that prints more than the pipe buffer (about 64 KB) blocks, runs into the timeout and is reported as exit `124` instead of its real status. `RelayIDE run` does not execute `verify` in M1; this must be fixed before M2 uses it.
 - **Verification gate timeout kills one process only (library only).** On timeout the same function terminates the shell it started, not the shell's process group, so child processes of the verification command keep running.
-- **No CLI command creates lanes or DAGs.** `lanes`, `dag-waves` and `audit-plugins` only list what is already in the workspace store, and the only CLI command that writes lanes, DAGs or guardrail findings is `init --seed-demo`, which writes synthetic data.
+- **Legacy workspace inspection tables vs M1 run ledger.** `RelayIDE run` writes runs and lanes into the v5 `relay_runs` and `relay_run_lanes` tables queried via `status --run <id>` and `status --runs`. The older `lanes`, `dag-waves`, `audit-plugins`, and `export-html` commands and the desktop UI still read the M0 workspace tables (only populated by `init --seed-demo`) until M5 connects the UI to live runs.
 
 ---
 
@@ -70,14 +75,31 @@ All four views below are rendered from synthetic sample data (`--export-screensh
 
 ## Build, Verify & Usage
 
-> **Executable name**: Building from source with SwiftPM produces `.build/debug/RelayIDE` (and `./Scripts/build-app.sh` packages `build/RelayIDE.app/Contents/MacOS/RelayIDE`). Installing via Homebrew Cask (`brew install --cask zxu756/tap/relayide`) links the lowercase `relayide` CLI wrapper into `/opt/homebrew/bin/relayide`.
+> **Executable name & prerequisite**: Building from source with SwiftPM produces `.build/debug/RelayIDE` (and `./Scripts/build-app.sh` packages `build/RelayIDE.app/Contents/MacOS/RelayIDE`). Installing via Homebrew Cask (`brew install --cask zxu756/tap/relayide`) links the lowercase `relayide` CLI wrapper into `/opt/homebrew/bin/relayide`. Running `RelayIDE run` requires `agent-relay` installed at `~/.agents/skills/agent-relay/scripts/relay.sh` (or passed via `--relay-sh` / `RELAYIDE_RELAY_SH`).
 
 ### Build & Run Tests From Source
 
 ```bash
 swift build
 ./Scripts/test.sh milestone 0
+./Scripts/test.sh milestone 1
 ./Scripts/build-app.sh
+```
+
+### `plan.json` Format for `RelayIDE run`
+
+Invoke `.build/debug/RelayIDE run <plan.json> --project <dir.relayproj> [--relay-sh <path>] [--lang zh|en]` against an existing `.relayproj` outside the target Git repository (with `user.name` and `user.email` configured in that repository):
+
+```json
+{
+  "repo": "../target-repo",
+  "base": "main",
+  "lanes": [
+    {"id": "api",  "agent": "claude", "prompt": "prompts/api.md",  "after": []},
+    {"id": "docs", "agent": "agy",    "prompt": "prompts/docs.md", "after": ["api"]}
+  ],
+  "verify": "swift build && swift test"
+}
 ```
 
 ### Headless CLI & MCP Commands
@@ -88,10 +110,13 @@ Run these from the repository root after `swift build`. They are exactly the com
 # 0. Scratch directory for the examples below
 WORK="$(mktemp -d)"
 
-# 1. Initialize an empty workspace (0 lanes) and inspect its status
-.build/debug/RelayIDE init --project "$WORK/my-empty.relayproj"
-.build/debug/RelayIDE status --project "$WORK/my-empty.relayproj"
-.build/debug/RelayIDE lanes --project "$WORK/my-empty.relayproj"
+# 1. Inspect CLI help, initialize an empty workspace (0 lanes), and inspect its status and run ledger
+.build/debug/RelayIDE --help --lang en
+.build/debug/RelayIDE version --lang en
+.build/debug/RelayIDE init --project "$WORK/my-empty.relayproj" --lang en
+.build/debug/RelayIDE status --project "$WORK/my-empty.relayproj" --lang en
+.build/debug/RelayIDE status --project "$WORK/my-empty.relayproj" --runs --lang en
+.build/debug/RelayIDE lanes --project "$WORK/my-empty.relayproj" --lang en
 
 # 2. Seed an explicit [DEMO] synthetic workspace and export a [DEMO] HTML report
 .build/debug/RelayIDE init --project "$WORK/demo.relayproj" --seed-demo --lang en

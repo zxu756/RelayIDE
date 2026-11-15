@@ -77,10 +77,10 @@ run_suite() {
     }
 
     # ------------------------------------------------------------------
-    # Row 1: build + README first paragraph says that no agent is launched
+    # Row 1: build + README first paragraph states M1 scope & boundaries truthfully (R48)
     # ------------------------------------------------------------------
     echo ""
-    echo "--- Row 1: swift build + README.md & README.zh-CN.md opening M0 disclosure ---"
+    echo "--- Row 1: swift build + README.md & README.zh-CN.md opening M1 scope disclosure (R48) ---"
     "${RELAY_CLI}" version >/dev/null || fail_row "Row 1: built executable does not answer 'version' through ${RELAY_CLI}"
     /usr/bin/python3 - "${ROOT_DIR}/README.md" "${ROOT_DIR}/README.zh-CN.md" <<'PY'
 import sys
@@ -104,13 +104,33 @@ zh_p1 = first_prose_paragraph(zh_text)
 print("EN para 1:", en_p1)
 print("ZH para 1:", zh_p1)
 
-assert "does not launch coding agents yet" in en_p1, "README.md first paragraph missing M0 no-agent statement"
-assert "尚不会启动任何 coding agent" in zh_p1, "README.zh-CN.md first paragraph missing M0 no-agent statement"
+for req_en in [
+    "install `agent-relay` first",
+    "`RelayIDE run`",
+    "isolated Git worktrees via `agent-relay`",
+    "does not merge branches",
+    "does not execute `verify`",
+    "no whole-job budget",
+]:
+    assert req_en in en_p1, f"README.md first paragraph missing M1 disclosure {req_en!r}"
+assert "does not launch coding agents yet" not in en_text, "Stale M0 no-agent statement left in README.md"
+
+for req_zh in [
+    "先安装 `agent-relay`",
+    "`RelayIDE run`",
+    "Git worktree",
+    "还不自动合并分支",
+    "不执行 `verify`",
+    "没有整单预算",
+]:
+    assert req_zh in zh_p1, f"README.zh-CN.md first paragraph missing M1 disclosure {req_zh!r}"
+assert "尚不会启动任何 coding agent" not in zh_text, "Stale M0 no-agent statement left in README.zh-CN.md"
+
 assert "—" not in en_text and "—" not in zh_text, "Em-dash found in README"
 for forbidden in ["LOC", "zero external dependencies", "129 automated", "129 项", "forkpty"]:
     assert forbidden not in en_text and forbidden not in zh_text, f"Token {forbidden!r} found in README"
 PY
-    pass_row "Row 1: swift build succeeded and README.md & README.zh-CN.md state in paragraph 1 that M0 does not launch coding agents yet"
+    pass_row "Row 1: swift build succeeded and README.md & README.zh-CN.md state M1 agent-relay runner scope, agent-relay prerequisite, and unmerged/no-verify/no-budget boundaries in paragraph 1"
 
     # ------------------------------------------------------------------
     # Row 2: --help, version, status (empty project) exit 0; [DEMO] / [演示数据] markers

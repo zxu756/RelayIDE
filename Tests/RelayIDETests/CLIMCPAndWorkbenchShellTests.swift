@@ -48,9 +48,25 @@ struct CLIMCPAndWorkbenchShellTests {
 
         let helpOut = try await cli.execute(arguments: ["--help"])
         #expect(helpOut == RelayCLIRunner.helpBanner)
+        #expect(helpOut.contains("run <plan.json> --project"))
+        #expect(helpOut.contains("agent-relay"))
+        #expect(!helpOut.contains("does not launch coding agents yet"))
+
+        let helpZhOut = try await cli.execute(arguments: ["--help", "--lang", "zh"])
+        #expect(helpZhOut.contains("run <plan.json> --project"))
+        #expect(helpZhOut.contains("agent-relay"))
+        #expect(!helpZhOut.contains("尚不会启动任何 coding agent"))
 
         let versionOut = try await cli.execute(arguments: ["--version"])
         #expect(versionOut.contains("RelayIDE 1.2.0"))
+        #expect(versionOut.contains("M1"))
+        #expect(versionOut.contains("agent-relay"))
+        #expect(!versionOut.contains("does not launch coding agents yet"))
+
+        let versionZhOut = try await cli.execute(arguments: ["version", "--lang", "zh"])
+        #expect(versionZhOut.contains("M1"))
+        #expect(versionZhOut.contains("agent-relay"))
+        #expect(!versionZhOut.contains("尚不会启动任何 coding agent"))
 
         await #expect(throws: RelayIDEError.self) {
             _ = try await cli.execute(arguments: ["non-existent-subcommand"])
