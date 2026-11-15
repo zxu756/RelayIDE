@@ -2924,4 +2924,723 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(recZH.lanes[0].status.rawValue == "succeeded")
         #expect(recEN.lanes[0].status.rawValue == "succeeded")
     }
+
+    // MARK: - 28. M1 Stage 05: Cancellation (`130`/`143`), Hard Limit (`killed`), Internal `125` Abort & Concurrent Runs
+
+    @Test("RelayCancellationPolicy computes default 1860s hard limit, honors RELAY_TIMEOUT+60s, and supports short test overrides")
+    func cliRunCancellationPolicyHardLimitCalculation() {
+        let def = RelayCancellationPolicy.default
+        #expect(def.sigintGraceSeconds == 10.0)
+        #expect(def.sigtermGraceSeconds == 5.0)
+        #expect(def.effectiveHardLimitSeconds(environment: [:]) == 1860.0)
+        #expect(def.effectiveHardLimitSeconds(environment: ["RELAY_TIMEOUT": "120"]) == 180.0)
+        #expect(def.effectiveHardLimitSeconds(environment: ["RELAY_TIMEOUT": "invalid"]) == 1860.0)
+
+        let injected = RelayCancellationPolicy(
+            sigintGraceSeconds: 0.12,
+            sigtermGraceSeconds: 0.12,
+            hardLimitOverrideSeconds: 0.25
+        )
+        #expect(injected.effectiveHardLimitSeconds(environment: ["RELAY_TIMEOUT": "1800"]) == 0.25)
+    }
+
+    @Test("RelayCLIRunner run cancels active lanes on SIGINT (130) and SIGTERM (143), skips unstarted lanes, preserves worktrees without committing, and matches status --run JSON")
+    func cliRunSignalCancellationMarksCancelledAndSkippedWithoutCommitting() async throws {
+        for (sig, expectedExitCode) in [(SIGINT, Int32(130)), (SIGTERM, Int32(143))] {
+            let fx = try makeIsolatedRunFixture(prefix: "relay-run-cancel-\(expectedExitCode)")
+            defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+            let gatesDir = fx.rootURL.appendingPathComponent("gates", isDirectory: true)
+            let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+            let traceDir = fx.rootURL.appendingPathComponent("traces", isDirectory: true)
+            try FileManager.default.createDirectory(at: gatesDir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: traceDir, withIntermediateDirectories: true)
+
+            let readyA = gatesDir.appendingPathComponent("ready-a")
+            let readyB = gatesDir.appendingPathComponent("ready-b")
+            let neverGate = gatesDir.appendingPathComponent("never-release")
+
+            try """
+            STUB WRITE dirty-a.txt uncommitted-a
+            FAKE_RELAY ARM_READY \(readyA.path)
+            STUB WAIT \(neverGate.path) 4
+            """.write(to: plansDir.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+
+            try """
+            STUB WRITE dirty-b.txt uncommitted-b
+            FAKE_RELAY ARM_READY \(readyB.path)
+            STUB WAIT \(neverGate.path) 4
+            """.write(to: plansDir.appendingPathComponent("b.md"), atomically: true, encoding: .utf8)
+
+            try "STUB WRITE should-not-run-c.txt x\n".write(
+                to: plansDir.appendingPathComponent("c.md"),
+                atomically: true,
+                encoding: .utf8
+            )
+
+            let planURL = plansDir.appendingPathComponent("plan.json")
+            try """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "main",
+              "lanes": [
+                {"id": "a", "agent": "claude", "prompt": "a.md", "after": []},
+                {"id": "b", "agent": "codex", "prompt": "b.md", "after": []},
+                {"id": "c", "agent": "agy", "prompt": "c.md", "after": ["a"]}
+              ]
+            }
+            """.write(to: planURL, atomically: true, encoding: .utf8)
+
+            var env = fx.baseEnvironment
+            env["STUB_TRACE_DIR"] = traceDir.path
+
+            let registry = RelayActiveLaneRegistry()
+            let policy = RelayCancellationPolicy(sigintGraceSeconds: 0.25, sigtermGraceSeconds: 0.25)
+            let cli = RelayCLIRunner(activeLaneRegistry: registry, cancellationPolicy: policy)
+
+            let runTask = Task {
+                await cli.executeCommand(
+                    arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "zh"],
+                    environment: env
+                )
+            }
+
+            for _ in 0..<200 {
+                if FileManager.default.fileExists(atPath: readyA.path)
+                    && FileManager.default.fileExists(atPath: readyB.path) {
+                    break
+                }
+                try await Task.sleep(nanoseconds: 15_000_000)
+            }
+            #expect(FileManager.default.fileExists(atPath: readyA.path))
+            #expect(FileManager.default.fileExists(atPath: readyB.path))
+
+            registry.requestCancellation(signal: sig)
+            let res = await runTask.value
+
+            #expect(res.exitCode == expectedExitCode)
+            #expect(!res.stdout.isEmpty)
+            #expect(!res.stderr.isEmpty)
+
+            let record = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res.stdout)
+            #expect(record.status == .cancelled)
+
+            let statusRes = await cli.executeCommand(
+                arguments: ["status", "--project", fx.projectURL.path, "--run", record.runID],
+                environment: fx.baseEnvironment
+            )
+            #expect(statusRes.exitCode == 0)
+            #expect(statusRes.stdout == res.stdout)
+
+            let byID = Dictionary(uniqueKeysWithValues: record.lanes.map { ($0.laneID, $0) })
+            for (laneID, dirtyName) in [("a", "dirty-a.txt"), ("b", "dirty-b.txt")] {
+                let lane = try #require(byID[laneID])
+                #expect(lane.status == .cancelled)
+                #expect(lane.commitOID == nil)
+                #expect(lane.uncommittedFiles == [dirtyName])
+                let wtPath = try #require(lane.worktreePath)
+                #expect(FileManager.default.fileExists(atPath: wtPath))
+                let ahead = try runTool(
+                    "/usr/bin/git",
+                    ["rev-list", "--count", "\(fx.baseCommitOID)..relay/\(record.runID)/\(laneID)"],
+                    environment: fx.baseEnvironment,
+                    currentDirectory: fx.repoURL
+                ).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                #expect(ahead == "0")
+            }
+
+            let laneC = try #require(byID["c"])
+            #expect(laneC.status == .skipped)
+            #expect(laneC.reason?.contains("运行被取消") == true)
+            #expect(laneC.worktreePath == nil)
+            #expect(laneC.branch == nil)
+            #expect(!FileManager.default.fileExists(atPath: traceDir.appendingPathComponent("c.trace").path))
+            let cRefCheck = try runTool(
+                "/usr/bin/git",
+                ["show-ref", "--verify", "--quiet", "refs/heads/relay/\(record.runID)/c"],
+                environment: fx.baseEnvironment,
+                currentDirectory: fx.repoURL
+            )
+            #expect(cRefCheck.exitCode != 0)
+        }
+    }
+
+    @Test("RelayCLIRunner run cancellation escalates INT -> TERM -> KILL and kills separate-process-group agent descendants")
+    func cliRunCancellationEscalatesIntTermKillAndCleansSubgroup() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-cancel-ladder")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let gatesDir = fx.rootURL.appendingPathComponent("gates", isDirectory: true)
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: gatesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+
+        let readyURL = gatesDir.appendingPathComponent("stubborn-ready")
+        let sigLogURL = gatesDir.appendingPathComponent("stubborn-signals.log")
+        let subPIDURL = gatesDir.appendingPathComponent("stubborn-sub.pid")
+        let neverURL = gatesDir.appendingPathComponent("never")
+        var trackedSubPID: pid_t = -1
+        defer {
+            if trackedSubPID > 0 {
+                _ = Darwin.kill(-trackedSubPID, SIGKILL)
+                _ = Darwin.kill(trackedSubPID, SIGKILL)
+            }
+        }
+
+        try """
+        FAKE_RELAY IGNORE_INT
+        FAKE_RELAY IGNORE_TERM
+        FAKE_RELAY SIGNAL_LOG \(sigLogURL.path)
+        FAKE_RELAY SUBGROUP_PID_FILE \(subPIDURL.path)
+        FAKE_RELAY ARM_READY \(readyURL.path)
+        STUB WRITE dirty-stubborn.txt uncommitted
+        STUB WAIT \(neverURL.path) 4
+        """.write(to: plansDir.appendingPathComponent("stubborn.md"), atomically: true, encoding: .utf8)
+
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "stubborn", "agent": "claude", "prompt": "stubborn.md", "after": []}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        let registry = RelayActiveLaneRegistry()
+        let policy = RelayCancellationPolicy(sigintGraceSeconds: 0.14, sigtermGraceSeconds: 0.14)
+        let cli = RelayCLIRunner(activeLaneRegistry: registry, cancellationPolicy: policy)
+
+        let runTask = Task {
+            await cli.executeCommand(
+                arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment
+            )
+        }
+
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: readyURL.path) { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: readyURL.path))
+
+        let rawSubPID = try String(contentsOf: subPIDURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        trackedSubPID = try #require(pid_t(rawSubPID))
+        #expect(trackedSubPID > 0)
+        #expect(Darwin.kill(trackedSubPID, 0) == 0)
+
+        registry.requestCancellation(signal: SIGINT)
+        let res = await runTask.value
+
+        #expect(res.exitCode == 130)
+        let loggedSigs = (try? String(contentsOf: sigLogURL, encoding: .utf8))?
+            .split(separator: "\n").map(String.init) ?? []
+        #expect(loggedSigs == ["INT", "TERM"])
+
+        for _ in 0..<50 {
+            if Darwin.kill(trackedSubPID, 0) != 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(Darwin.kill(trackedSubPID, 0) != 0, "Separate-process-group child \(trackedSubPID) survived run cancellation")
+
+        let record = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res.stdout)
+        #expect(record.status == .cancelled)
+        #expect(record.lanes[0].status == .cancelled)
+        #expect(record.lanes[0].commitOID == nil)
+        #expect(record.lanes[0].uncommittedFiles == ["dirty-stubborn.txt"])
+    }
+
+    @Test("RelayCLIRunner run enforces per-lane hard time limit, marks hung lane killed without committing, skips successor, and exits 1")
+    func cliRunHardLimitKillsHungLaneSkipsSuccessorAndExits1() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-hard-limit")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let gatesDir = fx.rootURL.appendingPathComponent("gates", isDirectory: true)
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: gatesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+
+        let sigLogURL = gatesDir.appendingPathComponent("hung-signals.log")
+        let subPIDURL = gatesDir.appendingPathComponent("hung-sub.pid")
+        var trackedSubPID: pid_t = -1
+        defer {
+            if trackedSubPID > 0 {
+                _ = Darwin.kill(-trackedSubPID, SIGKILL)
+                _ = Darwin.kill(trackedSubPID, SIGKILL)
+            }
+        }
+
+        try """
+        FAKE_RELAY IGNORE_INT
+        FAKE_RELAY IGNORE_TERM
+        FAKE_RELAY SIGNAL_LOG \(sigLogURL.path)
+        FAKE_RELAY SUBGROUP_PID_FILE \(subPIDURL.path)
+        STUB WRITE hung-dirty.txt partial-work
+        STUB SLEEP 4
+        """.write(to: plansDir.appendingPathComponent("hung.md"), atomically: true, encoding: .utf8)
+
+        try "STUB WRITE should-not-run.txt x\n".write(
+            to: plansDir.appendingPathComponent("after-hung.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "STUB WRITE sibling-ok.txt done\n".write(
+            to: plansDir.appendingPathComponent("sibling.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "hung", "agent": "codex", "prompt": "hung.md", "after": []},
+            {"id": "after-hung", "agent": "vibe", "prompt": "after-hung.md", "after": ["hung"]},
+            {"id": "sibling", "agent": "claude", "prompt": "sibling.md", "after": []}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        let policy = RelayCancellationPolicy(
+            sigintGraceSeconds: 0.12,
+            sigtermGraceSeconds: 0.12,
+            hardLimitOverrideSeconds: 0.22
+        )
+        let cli = RelayCLIRunner(cancellationPolicy: policy)
+        let res = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+            environment: fx.baseEnvironment
+        )
+
+        if let rawSub = try? String(contentsOf: subPIDURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           let parsedPID = pid_t(rawSub) {
+            trackedSubPID = parsedPID
+        }
+
+        #expect(res.exitCode == 1)
+        #expect(!res.stdout.isEmpty)
+
+        let record = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res.stdout)
+        let statusRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", record.runID],
+            environment: fx.baseEnvironment
+        )
+        #expect(statusRes.stdout == res.stdout)
+
+        let byID = Dictionary(uniqueKeysWithValues: record.lanes.map { ($0.laneID, $0) })
+        let hung = try #require(byID["hung"])
+        #expect(hung.status == .killed)
+        #expect(hung.commitOID == nil)
+        #expect(hung.uncommittedFiles == ["hung-dirty.txt"])
+
+        let loggedSigs = (try? String(contentsOf: sigLogURL, encoding: .utf8))?
+            .split(separator: "\n").map(String.init) ?? []
+        #expect(loggedSigs == ["INT", "TERM"])
+        if trackedSubPID > 0 {
+            for _ in 0..<50 {
+                if Darwin.kill(trackedSubPID, 0) != 0 { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            #expect(Darwin.kill(trackedSubPID, 0) != 0)
+        }
+
+        let afterHung = try #require(byID["after-hung"])
+        #expect(afterHung.status == .skipped)
+        #expect(afterHung.reason?.contains("hung") == true)
+        #expect(afterHung.reason?.contains("killed") == true)
+        #expect(afterHung.worktreePath == nil)
+        #expect(afterHung.branch == nil)
+
+        let sibling = try #require(byID["sibling"])
+        #expect(sibling.status == .succeeded)
+        #expect(sibling.commitOID != nil)
+    }
+
+    @Test("RelayCLIRunner run cancels already-started lanes via escalation and marks them interrupted on mid-run internal 125 error")
+    func cliRunInternalError125CancelsRunningLanesAndMarksInterrupted() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-internal125")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let gatesDir = fx.rootURL.appendingPathComponent("gates", isDirectory: true)
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: gatesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+
+        let fixedRunID = "20261116-120000-f125"
+        // Pre-create `relay/<fixedRunID>/boom` so successor `boom` fails worktree creation with exit 125
+        _ = try runTool(
+            "/usr/bin/git",
+            ["branch", "relay/\(fixedRunID)/boom", fx.baseCommitOID],
+            environment: fx.baseEnvironment,
+            currentDirectory: fx.repoURL
+        )
+
+        let activeReady = gatesDir.appendingPathComponent("active-ready")
+        let sigLogURL = gatesDir.appendingPathComponent("active-signals.log")
+        let subPIDURL = gatesDir.appendingPathComponent("active-sub.pid")
+        let neverURL = gatesDir.appendingPathComponent("never")
+        var trackedSubPID: pid_t = -1
+        defer {
+            if trackedSubPID > 0 {
+                _ = Darwin.kill(-trackedSubPID, SIGKILL)
+                _ = Darwin.kill(trackedSubPID, SIGKILL)
+            }
+        }
+
+        try """
+        FAKE_RELAY IGNORE_INT
+        FAKE_RELAY IGNORE_TERM
+        FAKE_RELAY SIGNAL_LOG \(sigLogURL.path)
+        FAKE_RELAY SUBGROUP_PID_FILE \(subPIDURL.path)
+        FAKE_RELAY ARM_READY \(activeReady.path)
+        STUB WRITE dirty-active.txt uncommitted
+        STUB WAIT \(neverURL.path) 4
+        """.write(to: plansDir.appendingPathComponent("active.md"), atomically: true, encoding: .utf8)
+
+        // `trigger` waits until `active` is armed and running, then finishes 0 so `boom` triggers the 125 error!
+        try """
+        STUB WAIT \(activeReady.path) 4
+        STUB WRITE trigger.txt ok
+        """.write(to: plansDir.appendingPathComponent("trigger.md"), atomically: true, encoding: .utf8)
+
+        try "STUB WRITE boom.txt x\n".write(to: plansDir.appendingPathComponent("boom.md"), atomically: true, encoding: .utf8)
+
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "active", "agent": "claude", "prompt": "active.md", "after": []},
+            {"id": "trigger", "agent": "codex", "prompt": "trigger.md", "after": []},
+            {"id": "boom", "agent": "agy", "prompt": "boom.md", "after": ["trigger"]}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        let policy = RelayCancellationPolicy(sigintGraceSeconds: 0.12, sigtermGraceSeconds: 0.12)
+        let cli = RelayCLIRunner(runIDProvider: { fixedRunID }, cancellationPolicy: policy)
+        let res = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "zh"],
+            environment: fx.baseEnvironment
+        )
+
+        if let rawSub = try? String(contentsOf: subPIDURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           let parsedPID = pid_t(rawSub) {
+            trackedSubPID = parsedPID
+        }
+
+        #expect(res.exitCode == 125)
+        #expect(res.stdout.isEmpty)
+        #expect(!res.stderr.isEmpty)
+
+        let loggedSigs = (try? String(contentsOf: sigLogURL, encoding: .utf8))?
+            .split(separator: "\n").map(String.init) ?? []
+        #expect(loggedSigs == ["INT", "TERM"])
+        if trackedSubPID > 0 {
+            for _ in 0..<50 {
+                if Darwin.kill(trackedSubPID, 0) != 0 { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            #expect(Darwin.kill(trackedSubPID, 0) != 0)
+        }
+
+        let statusRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", fixedRunID],
+            environment: fx.baseEnvironment
+        )
+        #expect(statusRes.exitCode == 0)
+        let persisted = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: statusRes.stdout)
+        #expect(persisted.status == .interrupted)
+        #expect(persisted.reason?.contains("RelayIDE 出错") == true)
+
+        let byID = Dictionary(uniqueKeysWithValues: persisted.lanes.map { ($0.laneID, $0) })
+        let activeLane = try #require(byID["active"])
+        #expect(activeLane.status == .interrupted)
+        #expect(activeLane.reason?.contains("RelayIDE 出错") == true)
+        #expect(activeLane.commitOID == nil)
+        #expect(activeLane.uncommittedFiles == ["dirty-active.txt"])
+    }
+
+    @Test("Concurrent run on same project returns 125 naming active runID without creating worktrees/branches, while concurrent runs on different projects targeting the same repo both exit 0")
+    func cliRunConcurrentSameProject125AndDifferentProjectsSameRepo0() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-concurrent")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let gatesDir = fx.rootURL.appendingPathComponent("gates", isDirectory: true)
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: gatesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+
+        let ready1 = gatesDir.appendingPathComponent("ready-1")
+        let release1 = gatesDir.appendingPathComponent("release-1")
+
+        try """
+        STUB READY \(ready1.path)
+        STUB WAIT \(release1.path) 15
+        STUB WRITE first.txt from-first
+        """.write(to: plansDir.appendingPathComponent("first.md"), atomically: true, encoding: .utf8)
+        try "STUB WRITE second.txt from-second\n".write(
+            to: plansDir.appendingPathComponent("second.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let plan1URL = plansDir.appendingPathComponent("plan1.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "hold", "agent": "claude", "prompt": "first.md", "after": []}
+          ]
+        }
+        """.write(to: plan1URL, atomically: true, encoding: .utf8)
+
+        let plan2URL = plansDir.appendingPathComponent("plan2.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "contender", "agent": "codex", "prompt": "second.md", "after": []}
+          ]
+        }
+        """.write(to: plan2URL, atomically: true, encoding: .utf8)
+
+        let cli = RelayCLIRunner()
+        let firstRunTask = Task {
+            await cli.executeCommand(
+                arguments: ["run", plan1URL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+                environment: fx.baseEnvironment
+            )
+        }
+
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: ready1.path) { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: ready1.path))
+
+        let worktreesBefore = try runTool("/usr/bin/git", ["worktree", "list", "--porcelain"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL).stdout
+        let branchesBefore = try runTool("/usr/bin/git", ["for-each-ref", "--format=%(refname)", "refs/heads/"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL).stdout
+        let activeHolder = try #require(RelayProjectRunLock.inspectActiveHolder(bundleDirectoryURL: fx.projectURL).holder)
+
+        // 1. Contending run on the SAME project must exit 125 with empty stdout, naming activeHolder.runID, and zero new worktrees/branches!
+        let secondSameProj = await cli.executeCommand(
+            arguments: ["run", plan2URL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+            environment: fx.baseEnvironment
+        )
+        #expect(secondSameProj.exitCode == 125)
+        #expect(secondSameProj.stdout.isEmpty)
+        #expect(secondSameProj.stderr.contains(activeHolder.runID))
+
+        let worktreesAfterContend = try runTool("/usr/bin/git", ["worktree", "list", "--porcelain"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL).stdout
+        let branchesAfterContend = try runTool("/usr/bin/git", ["for-each-ref", "--format=%(refname)", "refs/heads/"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL).stdout
+        #expect(worktreesAfterContend == worktreesBefore)
+        #expect(branchesAfterContend == branchesBefore)
+
+        // 2. While first project is STILL holding its barrier, a DIFFERENT project on the SAME repo succeeds concurrently!
+        let otherProjectURL = fx.rootURL.appendingPathComponent("SecondCampaign.relayproj", isDirectory: true)
+        let initOther = await cli.executeCommand(
+            arguments: ["init", "--project", otherProjectURL.path],
+            environment: fx.baseEnvironment
+        )
+        #expect(initOther.exitCode == 0)
+
+        let otherProjRun = await cli.executeCommand(
+            arguments: ["run", plan2URL.path, "--project", otherProjectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+            environment: fx.baseEnvironment
+        )
+        #expect(otherProjRun.exitCode == 0)
+        let otherRecord = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: otherProjRun.stdout)
+
+        // Release first project's barrier -> first run also finishes 0 with distinct branch!
+        try Data().write(to: release1)
+        let firstRes = await firstRunTask.value
+        #expect(firstRes.exitCode == 0)
+        let firstRecord = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: firstRes.stdout)
+        #expect(firstRecord.runID != otherRecord.runID)
+        #expect(firstRecord.lanes[0].branch != otherRecord.lanes[0].branch)
+    }
+
+    @Test("Crashed run with genuinely spawned PTY lanes (master FD hangup + flock release) reconciles to interrupted in status --run and allows subsequent run to exit 0")
+    func cliRunRealSpawnedLanesCrashViaMasterHangupAndLockReleaseReconcilesInterrupted() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-live-crash")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let gatesDir = fx.rootURL.appendingPathComponent("gates", isDirectory: true)
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: gatesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+
+        let readyA = gatesDir.appendingPathComponent("crash-ready-a")
+        let readyB = gatesDir.appendingPathComponent("crash-ready-b")
+        let neverGate = gatesDir.appendingPathComponent("never")
+
+        try """
+        STUB READY \(readyA.path)
+        STUB WAIT \(neverGate.path) 20
+        """.write(to: plansDir.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        try """
+        STUB READY \(readyB.path)
+        STUB WAIT \(neverGate.path) 20
+        """.write(to: plansDir.appendingPathComponent("b.md"), atomically: true, encoding: .utf8)
+        try "STUB WRITE c.txt ok\n".write(to: plansDir.appendingPathComponent("c.md"), atomically: true, encoding: .utf8)
+
+        let crashPlanURL = plansDir.appendingPathComponent("crash-plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "a", "agent": "claude", "prompt": "a.md", "after": []},
+            {"id": "b", "agent": "codex", "prompt": "b.md", "after": []},
+            {"id": "c", "agent": "agy", "prompt": "c.md", "after": ["a"]}
+          ]
+        }
+        """.write(to: crashPlanURL, atomically: true, encoding: .utf8)
+
+        let validated = try RelayPlanValidator.validate(
+            planFileURL: crashPlanURL,
+            projectBundleURL: fx.projectURL,
+            environment: fx.baseEnvironment,
+            language: .zhHans
+        )
+        let relayScript = try RelayRunExecutor.resolveAndVerifyRelayScript(
+            explicitPath: fx.fakeRelayShURL.path,
+            environment: fx.baseEnvironment,
+            language: .zhHans
+        )
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
+        let crashedRunID = "20261116-130000-dead"
+        let runLock = try RelayProjectRunLock.acquire(
+            bundleDirectoryURL: fx.projectURL,
+            runID: crashedRunID,
+            pid: getpid()
+        )
+        let runDir = fx.projectURL.appendingPathComponent("runs/\(crashedRunID)", isDirectory: true)
+        try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+        let planCopyURL = runDir.appendingPathComponent("plan.json")
+        try validated.rawPlanData.write(to: planCopyURL, options: .atomic)
+        try db.createRun(
+            RelayRunRecord(
+                runID: crashedRunID,
+                repoPath: validated.resolvedRepoURL.path,
+                planCopyPath: planCopyURL.path,
+                baseRef: validated.baseRef,
+                baseCommitOID: validated.baseCommitOID,
+                verifyCommand: nil,
+                relayShPath: relayScript.url.path,
+                relayShSHA256: relayScript.sha256Hex,
+                startedAt: Date(),
+                finishedAt: nil,
+                status: .running,
+                reason: nil,
+                relayidePID: getpid(),
+                lanes: validated.lanes.map {
+                    RelayRunLaneRecord(
+                        runID: crashedRunID,
+                        laneID: $0.id,
+                        ordinal: $0.ordinal,
+                        agent: $0.agent,
+                        promptPath: $0.resolvedPromptURL.path,
+                        after: $0.after,
+                        status: .pending
+                    )
+                }
+            )
+        )
+
+        let registry = RelayActiveLaneRegistry()
+        let scheduler = RelayDAGRunScheduler(
+            runID: crashedRunID,
+            validatedPlan: validated,
+            relayScript: relayScript,
+            runDirectoryURL: runDir,
+            projectBundleURL: fx.projectURL,
+            database: db,
+            language: .zhHans,
+            environment: fx.baseEnvironment,
+            activeLaneRegistry: registry,
+            emitStderrLine: { _ in }
+        )
+        let bgScheduler = Task { try? await scheduler.run() }
+
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: readyA.path)
+                && FileManager.default.fileExists(atPath: readyB.path) {
+                break
+            }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: readyA.path))
+        #expect(FileManager.default.fileExists(atPath: readyB.path))
+
+        // Verify both lanes are persisted as `running` in SQLite while lock is held
+        let activeProcs = registry.snapshotActiveProcesses()
+        #expect(activeProcs.count == 2)
+        defer {
+            for p in activeProcs {
+                _ = Darwin.kill(-p.pid, SIGKILL)
+                _ = Darwin.kill(p.pid, SIGKILL)
+            }
+        }
+
+        let cli = RelayCLIRunner()
+        let whileAliveStatus = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", crashedRunID],
+            environment: fx.baseEnvironment
+        )
+        let aliveDecoded = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: whileAliveStatus.stdout)
+        #expect(aliveDecoded.status == .running)
+
+        // Snapshot exact DB state at the moment of SIGKILL (running run + 2 running lanes + 1 pending lane),
+        // close both PTY master FDs without kill() (kernel hangup), and release flock without truncating run.lock!
+        let snapshotAtCrash = try #require(try db.fetchRun(runID: crashedRunID, reconcileWithLock: false))
+        for p in activeProcs {
+            p.session.closeMasterFDSimulatingCrash()
+            #expect(p.session.waitForExit(timeout: 2.0) == true)
+        }
+        _ = await bgScheduler.value
+
+        // Restore the exact pre-reap DB snapshot that a real SIGKILL leaves on disk (since RelayIDE never gets to run post-exit SQL on SIGKILL)
+        for lane in snapshotAtCrash.lanes {
+            try db.updateRunLane(lane)
+        }
+        try db.updateRunStatus(runID: crashedRunID, status: .running, reason: nil, finishedAt: nil)
+        runLock.closeDescriptorSimulatingCrash()
+
+        let afterCrashStatus = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", crashedRunID],
+            environment: fx.baseEnvironment
+        )
+        #expect(afterCrashStatus.exitCode == 0)
+        let crashedDecoded = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: afterCrashStatus.stdout)
+        #expect(crashedDecoded.status == .interrupted)
+        #expect(crashedDecoded.lanes.allSatisfy { $0.status != .running })
+        #expect(crashedDecoded.lanes.allSatisfy { $0.status.isTerminal })
+
+        // Now run a small follow-up plan on the SAME project -> must exit 0 and persist the orphaned run!
+        let smallPlanURL = plansDir.appendingPathComponent("small-plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "recover", "agent": "claude", "prompt": "c.md", "after": []}
+          ]
+        }
+        """.write(to: smallPlanURL, atomically: true, encoding: .utf8)
+
+        let recoveryRes = await cli.executeCommand(
+            arguments: ["run", smallPlanURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+            environment: fx.baseEnvironment
+        )
+        #expect(recoveryRes.exitCode == 0)
+    }
 }

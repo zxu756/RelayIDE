@@ -1,5 +1,10 @@
+import CryptoKit
+import Darwin
 import Foundation
 import RelayModels
+
+@_silgen_name("flock")
+private func gitPlumbingFlock(_ fd: Int32, _ operation: Int32) -> Int32
 
 // MARK: - Git Worktree Matrix, Commit DAG & Merge-Base Plumbing Engine
 
@@ -57,40 +62,82 @@ public struct GitWorktreePlumbingEngine: Sendable {
         let worktreePath = (worktreesRootDirectory as NSString).appendingPathComponent(laneID)
         let branchName = "relay/\(runID)/\(laneID)"
 
-        if FileManager.default.fileExists(atPath: worktreePath) {
-            throw RelayIDEError.worktreeAlreadyExists(worktreePath)
-        }
+        return try withExclusiveRepositoryWorktreeLock(repositoryPath: repositoryPath, environment: environment) {
+            if FileManager.default.fileExists(atPath: worktreePath) {
+                throw RelayIDEError.worktreeAlreadyExists(worktreePath)
+            }
 
-        let branchExistsCheck = try runGitCommand(
-            ["show-ref", "--verify", "--quiet", "refs/heads/\(branchName)"],
-            cwd: repositoryPath,
-            environment: environment
-        )
-        if branchExistsCheck.exitCode == 0 {
-            throw RelayIDEError.gitPlumbingFailure(
-                command: "git worktree add -b \(branchName) \(worktreePath) \(baseOID)",
-                exitCode: 128,
-                stderr: "fatal: a branch named '\(branchName)' already exists"
+            let branchExistsCheck = try runGitCommand(
+                ["show-ref", "--verify", "--quiet", "refs/heads/\(branchName)"],
+                cwd: repositoryPath,
+                environment: environment
+            )
+            if branchExistsCheck.exitCode == 0 {
+                throw RelayIDEError.gitPlumbingFailure(
+                    command: "git worktree add -b \(branchName) \(worktreePath) \(baseOID)",
+                    exitCode: 128,
+                    stderr: "fatal: a branch named '\(branchName)' already exists"
+                )
+            }
+
+            try FileManager.default.createDirectory(
+                atPath: worktreesRootDirectory,
+                withIntermediateDirectories: true
+            )
+
+            _ = try runGit(["worktree", "add", "-b", branchName, worktreePath, baseOID], cwd: repositoryPath, environment: environment)
+            return ManagedWorktreeLane(
+                id: laneID,
+                displayName: displayName,
+                assignedVendor: vendor,
+                worktreePath: worktreePath,
+                branchName: branchName,
+                baseCommitOID: baseOID,
+                headCommitOID: baseOID,
+                dirtyFiles: [],
+                ownershipRule: ownershipRule
             )
         }
+    }
 
-        try FileManager.default.createDirectory(
-            atPath: worktreesRootDirectory,
-            withIntermediateDirectories: true
-        )
+    private func withExclusiveRepositoryWorktreeLock<T>(
+        repositoryPath: String,
+        environment: [String: String]?,
+        body: () throws -> T
+    ) throws -> T {
+        let commonDirOut = (try? runGitCommand(["rev-parse", "--git-common-dir"], cwd: repositoryPath, environment: environment))
+        let rawKeyPath: String
+        if let out = commonDirOut, out.exitCode == 0 {
+            let trimmed = out.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if (trimmed as NSString).isAbsolutePath {
+                rawKeyPath = URL(fileURLWithPath: trimmed).resolvingSymlinksInPath().standardizedFileURL.path
+            } else {
+                rawKeyPath = URL(fileURLWithPath: trimmed, relativeTo: URL(fileURLWithPath: repositoryPath, isDirectory: true))
+                    .resolvingSymlinksInPath()
+                    .standardizedFileURL
+                    .path
+            }
+        } else {
+            rawKeyPath = URL(fileURLWithPath: repositoryPath).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        let digestHex = SHA256.hash(data: Data(rawKeyPath.utf8)).map { String(format: "%02x", $0) }.joined()
+        let lockURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relayide-repo-wt-\(digestHex.prefix(24)).lock")
 
-        _ = try runGit(["worktree", "add", "-b", branchName, worktreePath, baseOID], cwd: repositoryPath, environment: environment)
-        return ManagedWorktreeLane(
-            id: laneID,
-            displayName: displayName,
-            assignedVendor: vendor,
-            worktreePath: worktreePath,
-            branchName: branchName,
-            baseCommitOID: baseOID,
-            headCommitOID: baseOID,
-            dirtyFiles: [],
-            ownershipRule: ownershipRule
-        )
+        let fd = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else {
+            return try body()
+        }
+        while gitPlumbingFlock(fd, LOCK_EX) != 0 {
+            if errno == EINTR { continue }
+            Darwin.close(fd)
+            return try body()
+        }
+        defer {
+            _ = gitPlumbingFlock(fd, LOCK_UN)
+            Darwin.close(fd)
+        }
+        return try body()
     }
 
     public func commitLaneChangesIfNeeded(

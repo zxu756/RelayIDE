@@ -234,10 +234,57 @@ public enum RelayLaneOutcomeClassifier {
     }
 }
 
-// MARK: - Active Per-Lane Process Handle & Thread-Safe Registry (Prepared for Stage 05 Cancellation)
+// MARK: - Cancellation & Per-Lane Hard-Limit Policy (`03-relayide.md` §7, §8, R42)
+
+public struct RelayCancellationPolicy: Sendable, Equatable {
+    public static let defaultSigintGraceSeconds: TimeInterval = 10.0
+    public static let defaultSigtermGraceSeconds: TimeInterval = 5.0
+    public static let defaultRelayTimeoutSeconds: TimeInterval = 1800.0
+    public static let defaultHardLimitSlackSeconds: TimeInterval = 60.0
+
+    public var sigintGraceSeconds: TimeInterval
+    public var sigtermGraceSeconds: TimeInterval
+    public var defaultRelayTimeoutSeconds: TimeInterval
+    public var hardLimitSlackSeconds: TimeInterval
+    public var hardLimitOverrideSeconds: TimeInterval?
+
+    public static let `default` = RelayCancellationPolicy()
+
+    public init(
+        sigintGraceSeconds: TimeInterval = RelayCancellationPolicy.defaultSigintGraceSeconds,
+        sigtermGraceSeconds: TimeInterval = RelayCancellationPolicy.defaultSigtermGraceSeconds,
+        defaultRelayTimeoutSeconds: TimeInterval = RelayCancellationPolicy.defaultRelayTimeoutSeconds,
+        hardLimitSlackSeconds: TimeInterval = RelayCancellationPolicy.defaultHardLimitSlackSeconds,
+        hardLimitOverrideSeconds: TimeInterval? = nil
+    ) {
+        self.sigintGraceSeconds = sigintGraceSeconds
+        self.sigtermGraceSeconds = sigtermGraceSeconds
+        self.defaultRelayTimeoutSeconds = defaultRelayTimeoutSeconds
+        self.hardLimitSlackSeconds = hardLimitSlackSeconds
+        self.hardLimitOverrideSeconds = hardLimitOverrideSeconds
+    }
+
+    public func effectiveHardLimitSeconds(environment: [String: String]) -> TimeInterval {
+        if let override = hardLimitOverrideSeconds {
+            return max(0.01, override)
+        }
+        let baseTimeout: TimeInterval
+        if let raw = environment["RELAY_TIMEOUT"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let parsed = TimeInterval(raw),
+           parsed.isFinite,
+           parsed > 0 {
+            baseTimeout = parsed
+        } else {
+            baseTimeout = defaultRelayTimeoutSeconds
+        }
+        return baseTimeout + hardLimitSlackSeconds
+    }
+}
+
+// MARK: - Active Per-Lane Process Handle & Thread-Safe Registry (`03-relayide.md` §7, §8, R42)
 
 /// Holds a live lane's `POSIXPseudoTerminalSession` and process group leader `pid` (`POSIX_SPAWN_SETSID` sets `pgid == pid`).
-/// Stage 05 uses `RelayActiveLaneRegistry` to iterate active lanes during `SIGINT`/`SIGTERM` cancellation and per-lane hard timeouts.
+/// Used by `RelayActiveLaneRegistry` and `RelayDAGRunScheduler` during `SIGINT`/`SIGTERM` cancellation, hard limits, and `125` aborts.
 public struct RelayActiveLaneProcess: @unchecked Sendable {
     public let runID: String
     public let laneID: String
@@ -278,13 +325,22 @@ public final class RelayActiveLaneRegistry: @unchecked Sendable {
     private var cancelledLaneIDs: Set<String> = []
     private var killedByHardLimitLaneIDs: Set<String> = []
     private var runCancellingFlag: Bool = false
+    private var cancellationSignalValue: Int32?
+    private var cancellationHandler: (@Sendable (Int32) -> Void)?
 
     public init() {}
 
-    public func register(_ process: RelayActiveLaneProcess) {
+    /// Registers an active lane process and atomically returns `true` if run cancellation or fatal abort is already in progress.
+    @discardableResult
+    public func register(_ process: RelayActiveLaneProcess) -> Bool {
         lock.lock()
         activeByLaneID[process.laneID] = process
+        let alreadyCancelling = runCancellingFlag
+        if cancellationSignalValue != nil && !killedByHardLimitLaneIDs.contains(process.laneID) {
+            cancelledLaneIDs.insert(process.laneID)
+        }
         lock.unlock()
+        return alreadyCancelling
     }
 
     @discardableResult
@@ -310,6 +366,12 @@ public final class RelayActiveLaneRegistry: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return runCancellingFlag
+    }
+
+    public var cancellationSignal: Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancellationSignalValue
     }
 
     public func markRunCancelling() {
@@ -341,6 +403,34 @@ public final class RelayActiveLaneRegistry: @unchecked Sendable {
         defer { lock.unlock() }
         return killedByHardLimitLaneIDs.contains(laneID)
     }
+
+    public func setCancellationHandler(_ handler: (@Sendable (Int32) -> Void)?) {
+        var existingSignal: Int32?
+        lock.lock()
+        cancellationHandler = handler
+        if handler != nil {
+            existingSignal = cancellationSignalValue
+        }
+        lock.unlock()
+        if let sig = existingSignal {
+            handler?(sig)
+        }
+    }
+
+    public func requestCancellation(signal: Int32) {
+        var handlerToCall: (@Sendable (Int32) -> Void)?
+        lock.lock()
+        if cancellationSignalValue == nil {
+            cancellationSignalValue = signal
+            runCancellingFlag = true
+            for laneID in activeByLaneID.keys where !killedByHardLimitLaneIDs.contains(laneID) {
+                cancelledLaneIDs.insert(laneID)
+            }
+            handlerToCall = cancellationHandler
+        }
+        lock.unlock()
+        handlerToCall?(signal)
+    }
 }
 
 // MARK: - Event-Driven Single-Predecessor DAG Scheduler (`03-relayide.md` §4–§7, §10–§11, §13; R36, R38, R46, R47, R49)
@@ -367,12 +457,56 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
     public let language: RelayLanguage
     public let environment: [String: String]
     public let activeLaneRegistry: RelayActiveLaneRegistry
+    public let cancellationPolicy: RelayCancellationPolicy
     public let emitStderrLine: @Sendable (String) -> Void
+
+    private enum EscalationContext: Sendable {
+        case signalCancellation
+        case hardLimit
+        case fatalInternalError
+    }
+
+    private struct SchedulerCancellationSkip: Error {}
+
+    private final class LaneEscalationHandle: @unchecked Sendable {
+        private let lock = NSLock()
+        private var completed = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func finish() {
+            lock.lock()
+            guard !completed else {
+                lock.unlock()
+                return
+            }
+            completed = true
+            let pending = waiters
+            waiters.removeAll()
+            lock.unlock()
+            for waiter in pending {
+                waiter.resume()
+            }
+        }
+
+        func wait() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if completed {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    waiters.append(continuation)
+                    lock.unlock()
+                }
+            }
+        }
+    }
 
     /// Enforces strictly at most one `git worktree add -b` running at a time (`03-relayide.md` §4).
     private let worktreeSerialQueue = DispatchQueue(label: "io.github.zxu756.RelayIDE.run.worktree-serial")
     private let stateLock = NSLock()
     private var laneRecordsByID: [String: RelayRunLaneRecord] = [:]
+    private var escalationHandlesByLaneID: [String: LaneEscalationHandle] = [:]
     private var firstFatalError: RelayIDEError?
     private let childrenByPredecessor: [String: [RelayValidatedLaneSpec]]
     private let rootLanes: [RelayValidatedLaneSpec]
@@ -388,6 +522,7 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         language: RelayLanguage,
         environment: [String: String],
         activeLaneRegistry: RelayActiveLaneRegistry = RelayActiveLaneRegistry(),
+        cancellationPolicy: RelayCancellationPolicy = .default,
         emitStderrLine: @escaping @Sendable (String) -> Void
     ) {
         self.runID = runID
@@ -400,6 +535,7 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         self.language = language
         self.environment = environment
         self.activeLaneRegistry = activeLaneRegistry
+        self.cancellationPolicy = cancellationPolicy
         self.emitStderrLine = emitStderrLine
 
         var records: [String: RelayRunLaneRecord] = [:]
@@ -430,6 +566,13 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         let lanesDirURL = runDirectoryURL.appendingPathComponent("lanes", isDirectory: true)
         try FileManager.default.createDirectory(at: lanesDirURL, withIntermediateDirectories: true)
 
+        activeLaneRegistry.setCancellationHandler { [weak self] sig in
+            self?.handleRunCancellationSignal(sig)
+        }
+        defer {
+            activeLaneRegistry.setCancellationHandler(nil)
+        }
+
         await withTaskGroup(of: Void.self) { group in
             for rootSpec in rootLanes {
                 let baseOID = validatedPlan.baseCommitOID
@@ -440,9 +583,57 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
             await group.waitForAll()
         }
 
+        await waitForAllOngoingEscalations()
+
         if let fatal = currentFatalError() {
             reconcileAbortedRunOnFatalError(fatal)
             throw fatal
+        }
+
+        if let cancelSig = activeLaneRegistry.cancellationSignal {
+            let isZh = language.isChinese
+            let sigName = Self.signalDisplayName(cancelSig)
+            let skipReason = isZh ? "已跳过（运行被取消）" : "skipped (run cancelled)"
+            let runCancelReason = isZh
+                ? "已取消（收到 \(sigName)）"
+                : "cancelled (received \(sigName))"
+            let now = Date()
+
+            for record in snapshotOrderedLaneRecords() where !record.status.isTerminal {
+                var skipped = record
+                skipped.status = .skipped
+                skipped.exitCode = nil
+                skipped.signal = nil
+                skipped.reason = skipReason
+                skipped.startedAt = nil
+                skipped.finishedAt = now
+                skipped.pid = nil
+                skipped.costUSD = nil
+                skipped.tokens = nil
+                skipped.costSource = nil
+                skipped.branch = nil
+                skipped.commitOID = nil
+                skipped.worktreePath = nil
+                skipped.uncommittedFiles = nil
+                try persistLaneRecord(skipped)
+
+                let skipLine = isZh
+                    ? "[relay] 通道 \(skipped.laneID) (\(skipped.agent.rawValue)) 已跳过 · \(skipReason)"
+                    : "[relay] lane \(skipped.laneID) (\(skipped.agent.rawValue)) skipped · \(skipReason)"
+                emitStderrLine(skipLine)
+            }
+
+            try database.updateRunStatus(
+                runID: runID,
+                status: .cancelled,
+                reason: runCancelReason,
+                finishedAt: Date()
+            )
+            guard let persisted = try database.fetchRun(runID: runID, reconcileWithLock: false) else {
+                throw RelayIDEError.relayEnvironmentFailure("Persisted run '\(runID)' missing after cancellation")
+            }
+            let exitCode: Int32 = (cancelSig == SIGTERM) ? 143 : 130
+            return RelayDAGRunSchedulerResult(runRecord: persisted, cliExitCode: exitCode)
         }
 
         let orderedLanes = snapshotOrderedLaneRecords()
@@ -500,6 +691,9 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         guard !directChildren.isEmpty else { return }
 
         if outcome.record.status == .succeeded || outcome.record.status == .succeededNoChanges {
+            guard !activeLaneRegistry.isRunCancelling, currentFatalError() == nil else {
+                return
+            }
             let nextBaseOID = outcome.headCommitOID
             await withTaskGroup(of: Void.self) { childGroup in
                 for childSpec in directChildren {
@@ -509,7 +703,7 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
                 }
                 await childGroup.waitForAll()
             }
-        } else {
+        } else if activeLaneRegistry.cancellationSignal == nil && currentFatalError() == nil {
             markSubtreeSkipped(
                 children: directChildren,
                 failedPredecessorID: spec.id,
@@ -531,8 +725,11 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         try await withCheckedThrowingContinuation { continuation in
             worktreeSerialQueue.async {
                 do {
-                    guard self.currentFatalError() == nil, !self.activeLaneRegistry.isRunCancelling else {
-                        throw RelayIDEError.relayRunInterrupted(runID: self.runID, reason: "cancelled before worktree creation")
+                    if let fatal = self.currentFatalError() {
+                        throw fatal
+                    }
+                    if self.activeLaneRegistry.isRunCancelling {
+                        throw SchedulerCancellationSkip()
                     }
                     let wt = try self.gitEngine.createLaneWorktree(
                         repositoryPath: self.validatedPlan.resolvedRepoURL.path,
@@ -573,6 +770,38 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
             let logURL = worktreeURL.appendingPathComponent(".relay/LOG.md")
             let initialLogOffset = RelayLogSpendParser.currentFileByteLength(at: logURL)
 
+            // Guard narrow window where cancellation or fatal error arrived right after worktree creation before spawn
+            if currentFatalError() != nil {
+                var abortedRecord = snapshotLaneRecord(for: spec.id)
+                abortedRecord.status = .running
+                abortedRecord.startedAt = Date()
+                abortedRecord.branch = managedWT.branchName
+                abortedRecord.worktreePath = worktreeURL.path
+                try? persistLaneRecord(abortedRecord)
+                return nil
+            }
+            if let cancelSig = activeLaneRegistry.cancellationSignal {
+                let now = Date()
+                let isZh = language.isChinese
+                let sigName = Self.signalDisplayName(cancelSig)
+                var preSpawnCancelled = snapshotLaneRecord(for: spec.id)
+                preSpawnCancelled.status = .cancelled
+                preSpawnCancelled.reason = isZh ? "已取消（收到 \(sigName)）" : "cancelled (received \(sigName))"
+                preSpawnCancelled.startedAt = now
+                preSpawnCancelled.finishedAt = now
+                preSpawnCancelled.costSource = "no_record"
+                preSpawnCancelled.branch = managedWT.branchName
+                preSpawnCancelled.worktreePath = worktreeURL.path
+                preSpawnCancelled.commitOID = nil
+                preSpawnCancelled.uncommittedFiles = (try? gitEngine.listUncommittedFilesExcludingRelay(
+                    in: worktreeURL.path,
+                    environment: environment
+                )) ?? []
+                try persistLaneRecord(preSpawnCancelled)
+                emitStderrLine(formatFinishLine(record: preSpawnCancelled, startedAt: now, finishedAt: now))
+                return SingleLaneCompletion(record: preSpawnCancelled, headCommitOID: startCommitOID)
+            }
+
             // 2. Spawn `<relay.sh> <agent> <worktree-abs-path> <prompt-abs-path>` inside a real PTY
             let session = POSIXPseudoTerminalSession(laneID: spec.id)
             try session.spawn(
@@ -600,7 +829,7 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
                 ptyTranscriptURL: ptyURL,
                 startedAt: startedAt
             )
-            activeLaneRegistry.register(activeProc)
+            let alreadyCancelling = activeLaneRegistry.register(activeProc)
             defer { activeLaneRegistry.unregister(laneID: spec.id) }
 
             var runningRecord = snapshotLaneRecord(for: spec.id)
@@ -612,8 +841,43 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
             try persistLaneRecord(runningRecord)
             emitStderrLine(formatStartLine(spec: spec, pid: childPID, branchName: managedWT.branchName))
 
-            // 3. Wait asynchronously for PTY exit & full transcript flush
+            if alreadyCancelling {
+                let ctx: EscalationContext = (activeLaneRegistry.cancellationSignal != nil)
+                    ? .signalCancellation
+                    : .fatalInternalError
+                startEscalationOnce(for: activeProc, context: ctx)
+            }
+
+            // Arm per-lane hard time limit (`RELAY_TIMEOUT + 60s` by default, or injected test override)
+            let hardLimitSeconds = cancellationPolicy.effectiveHardLimitSeconds(environment: environment)
+            let timerQueue = DispatchQueue(label: "io.github.zxu756.RelayIDE.run.hardlimit.\(spec.id)")
+            let hardLimitTimer = DispatchSource.makeTimerSource(queue: timerQueue)
+            hardLimitTimer.schedule(deadline: .now() + hardLimitSeconds)
+            hardLimitTimer.setEventHandler { [weak self] in
+                guard let self else { return }
+                guard self.currentFatalError() == nil,
+                      !self.activeLaneRegistry.isRunCancelling,
+                      session.metrics().isRunning else {
+                    return
+                }
+                self.activeLaneRegistry.markLaneKilledByHardLimit(spec.id)
+                let isZh = self.language.isChinese
+                let limitStr = String(format: "%.2fs", hardLimitSeconds)
+                let note = isZh
+                    ? "[relay] 通道 \(spec.id) (\(spec.agent.rawValue)) 超过硬上限（\(limitStr)），正在结束进程..."
+                    : "[relay] lane \(spec.id) (\(spec.agent.rawValue)) exceeded hard time limit (\(limitStr)); terminating..."
+                self.emitStderrLine(note)
+                self.startEscalationOnce(for: activeProc, context: .hardLimit)
+            }
+            hardLimitTimer.resume()
+            defer {
+                hardLimitTimer.setEventHandler {}
+                hardLimitTimer.cancel()
+            }
+
+            // 3. Wait asynchronously for PTY exit, full transcript flush, and any escalation descendant drain
             let exitReason = await session.awaitExit()
+            await awaitEscalationIfAny(forLaneID: spec.id)
             let finishedAt = Date()
 
             // If a sibling lane triggered a fatal internal RelayIDE error (125), unwind immediately without committing
@@ -628,27 +892,49 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
                 fromLogFileAt: logURL,
                 initialByteOffset: initialLogOffset
             )
-            let classified = RelayLaneOutcomeClassifier.classify(
+            let baseClassified = RelayLaneOutcomeClassifier.classify(
                 termination: exitReason,
                 ptyTranscript: ptyText,
                 didAppendLogStep: spend.didAppendStepEntry,
                 language: language
             )
 
-            var finalStatus = classified.status
+            let effectiveOutcome: RelayClassifiedLaneOutcome
+            if activeLaneRegistry.isLaneKilledByHardLimit(spec.id) {
+                let isZh = language.isChinese
+                effectiveOutcome = RelayClassifiedLaneOutcome(
+                    status: .killed,
+                    exitCode: exitReason.exitCode,
+                    signal: exitReason.terminationSignal,
+                    reason: isZh ? "被强制结束（超过硬上限）" : "killed (exceeded hard time limit)"
+                )
+            } else if activeLaneRegistry.isLaneCancelled(spec.id) || activeLaneRegistry.cancellationSignal != nil {
+                let isZh = language.isChinese
+                let sigName = Self.signalDisplayName(activeLaneRegistry.cancellationSignal ?? SIGINT)
+                effectiveOutcome = RelayClassifiedLaneOutcome(
+                    status: .cancelled,
+                    exitCode: exitReason.exitCode,
+                    signal: exitReason.terminationSignal,
+                    reason: isZh ? "已取消（收到 \(sigName)）" : "cancelled (received \(sigName))"
+                )
+            } else {
+                effectiveOutcome = baseClassified
+            }
+
+            var finalStatus = effectiveOutcome.status
             var commitOID: String? = nil
             var uncommittedFiles: [String]? = nil
             var headCommitForSuccessors = startCommitOID
 
-            // 5. Commit only on `.succeeded` and `.partial` (`--no-verify`, `:(exclude).relay`); otherwise record dirty files
-            if classified.status == .succeeded || classified.status == .partial {
+            // 5. Commit ONLY on `.succeeded` and `.partial` (`--no-verify`, `:(exclude).relay`); never commit cancelled/killed/failed
+            if effectiveOutcome.status == .succeeded || effectiveOutcome.status == .partial {
                 let commitResult = try gitEngine.commitLaneChangesIfNeeded(
                     worktreePath: worktreeURL.path,
                     startCommitOID: startCommitOID,
                     runID: runID,
                     laneID: spec.id,
                     agent: spec.agent,
-                    status: classified.status,
+                    status: effectiveOutcome.status,
                     environment: environment
                 )
                 switch commitResult {
@@ -661,7 +947,7 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
                 case .noChanges(let headOID):
                     commitOID = nil
                     headCommitForSuccessors = headOID
-                    if classified.status == .succeeded {
+                    if effectiveOutcome.status == .succeeded {
                         finalStatus = .succeededNoChanges
                     }
                 }
@@ -674,9 +960,9 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
 
             var completedRecord = runningRecord
             completedRecord.status = finalStatus
-            completedRecord.exitCode = classified.exitCode
-            completedRecord.signal = classified.signal
-            completedRecord.reason = classified.reason
+            completedRecord.exitCode = effectiveOutcome.exitCode
+            completedRecord.signal = effectiveOutcome.signal
+            completedRecord.reason = effectiveOutcome.reason
             completedRecord.finishedAt = finishedAt
             completedRecord.costUSD = spend.costUSD
             completedRecord.tokens = spend.tokens
@@ -687,6 +973,8 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
             try persistLaneRecord(completedRecord)
             emitStderrLine(formatFinishLine(record: completedRecord, startedAt: startedAt, finishedAt: finishedAt))
             return SingleLaneCompletion(record: completedRecord, headCommitOID: headCommitForSuccessors)
+        } catch is SchedulerCancellationSkip {
+            return nil
         } catch let relayErr as RelayIDEError {
             recordFatalInternalError(relayErr)
             return nil
@@ -749,7 +1037,101 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         }
     }
 
-    // MARK: - Internal Fatal Error & State Helpers
+    // MARK: - Escalating Cancellation (`SIGINT -> SIGTERM -> descendant-PGID SIGKILL`, R42) & Fatal Error Helpers
+
+    private static func signalDisplayName(_ sig: Int32) -> String {
+        switch sig {
+        case SIGINT:
+            return "SIGINT"
+        case SIGTERM:
+            return "SIGTERM"
+        default:
+            return "SIG(\(sig))"
+        }
+    }
+
+    private func handleRunCancellationSignal(_ sig: Int32) {
+        guard currentFatalError() == nil else { return }
+        let isZh = language.isChinese
+        let sigName = Self.signalDisplayName(sig)
+        let banner = isZh
+            ? "[relay] 收到 \(sigName)，不再启动新通道，正在取消运行中的通道..."
+            : "[relay] received \(sigName); stopping new lanes and cancelling running lanes..."
+        emitStderrLine(banner)
+        for active in activeLaneRegistry.snapshotActiveProcesses() {
+            startEscalationOnce(for: active, context: .signalCancellation)
+        }
+    }
+
+    private func startEscalationOnce(for activeProc: RelayActiveLaneProcess, context: EscalationContext) {
+        let handle = LaneEscalationHandle()
+        stateLock.lock()
+        if escalationHandlesByLaneID[activeProc.laneID] != nil {
+            stateLock.unlock()
+            return
+        }
+        escalationHandlesByLaneID[activeProc.laneID] = handle
+        stateLock.unlock()
+
+        let sigintGrace = cancellationPolicy.sigintGraceSeconds
+        let sigtermGrace = cancellationPolicy.sigtermGraceSeconds
+        let isZh = language.isChinese
+        let emit = emitStderrLine
+        let laneID = activeProc.laneID
+        let agentRaw = activeProc.agent.rawValue
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = activeProc.session.terminateWithEscalation(
+                sigintGraceSeconds: sigintGrace,
+                sigtermGraceSeconds: sigtermGrace,
+                onStep: { step in
+                    switch step {
+                    case .sentSIGINT(let pid):
+                        let waitStr = String(format: "%.2fs", sigintGrace)
+                        let msg = isZh
+                            ? "[relay] 通道 \(laneID) (\(agentRaw)) · 向进程组 -\(pid) 发送 SIGINT（等待最多 \(waitStr)）"
+                            : "[relay] lane \(laneID) (\(agentRaw)) · sent SIGINT to process group -\(pid) (waiting up to \(waitStr))"
+                        emit(msg)
+                    case .sentSIGTERM(let pid):
+                        let waitStr = String(format: "%.2fs", sigtermGrace)
+                        let msg = isZh
+                            ? "[relay] 通道 \(laneID) (\(agentRaw)) · 仍未退出，向进程组 -\(pid) 发送 SIGTERM（等待最多 \(waitStr)）"
+                            : "[relay] lane \(laneID) (\(agentRaw)) · still running; sent SIGTERM to process group -\(pid) (waiting up to \(waitStr))"
+                        emit(msg)
+                    case .sentSIGKILL(let pid, let descendants, let pgids):
+                        let msg = isZh
+                            ? "[relay] 通道 \(laneID) (\(agentRaw)) · 仍未退出，向进程组 \(pgids) 与后代 \(descendants) 发送 SIGKILL（主进程 \(pid)）"
+                            : "[relay] lane \(laneID) (\(agentRaw)) · still running; sent SIGKILL to process groups \(pgids) and descendants \(descendants) (leader \(pid))"
+                        emit(msg)
+                    }
+                    _ = context
+                }
+            )
+            handle.finish()
+        }
+    }
+
+    private func awaitEscalationIfAny(forLaneID laneID: String) async {
+        let handle: LaneEscalationHandle? = {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return escalationHandlesByLaneID[laneID]
+        }()
+        if let handle {
+            await handle.wait()
+        }
+    }
+
+    private func waitForAllOngoingEscalations() async {
+        let handles: [LaneEscalationHandle] = {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return Array(escalationHandlesByLaneID.values)
+        }()
+        for handle in handles {
+            await handle.wait()
+        }
+    }
 
     private func snapshotLaneRecord(for laneID: String) -> RelayRunLaneRecord {
         stateLock.lock()
@@ -789,7 +1171,7 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         guard shouldAbortSiblings else { return }
         activeLaneRegistry.markRunCancelling()
         for active in activeLaneRegistry.snapshotActiveProcesses() {
-            active.session.terminate(signal: SIGINT)
+            startEscalationOnce(for: active, context: .fatalInternalError)
         }
     }
 

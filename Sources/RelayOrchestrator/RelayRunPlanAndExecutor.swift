@@ -414,13 +414,16 @@ public struct RelayRunExecutionOutcome: Sendable, Equatable {
 public struct RelayRunExecutor: Sendable {
     public let runIDProvider: (@Sendable () -> String)?
     public let activeLaneRegistry: RelayActiveLaneRegistry?
+    public let cancellationPolicy: RelayCancellationPolicy
 
     public init(
         runIDProvider: (@Sendable () -> String)? = nil,
-        activeLaneRegistry: RelayActiveLaneRegistry? = nil
+        activeLaneRegistry: RelayActiveLaneRegistry? = nil,
+        cancellationPolicy: RelayCancellationPolicy = .default
     ) {
         self.runIDProvider = runIDProvider
         self.activeLaneRegistry = activeLaneRegistry
+        self.cancellationPolicy = cancellationPolicy
     }
 
     /// Resolves `relay.sh` in order: `--relay-sh`, `RELAYIDE_RELAY_SH`, `$HOME/.agents/skills/agent-relay/scripts/relay.sh`.
@@ -608,13 +611,21 @@ public struct RelayRunExecutor: Sendable {
         let collector = StderrCollector(liveHandler: onStderrLine)
         do {
             let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: projectBundleURL)
-            let runID = try generateUniqueRunID(projectBundleURL: projectBundleURL, database: db)
+            let runID = try generateUniqueRunID(
+                projectBundleURL: projectBundleURL,
+                database: db,
+                repositoryURL: validatedPlan.resolvedRepoURL,
+                environment: environment
+            )
             let runLock = try RelayProjectRunLock.acquire(
                 bundleDirectoryURL: projectBundleURL,
                 runID: runID,
                 pid: getpid()
             )
             defer { runLock.release() }
+
+            // Reconcile any prior crashed (`kill -9`) run rows permanently in SQLite now that we hold `run.lock`
+            try? db.persistOrphanedRunsAsInterrupted(activeRunID: runID)
 
             let runDirectoryURL = projectBundleURL
                 .appendingPathComponent("runs", isDirectory: true)
@@ -719,6 +730,7 @@ public struct RelayRunExecutor: Sendable {
             language: language,
             environment: environment,
             activeLaneRegistry: activeLaneRegistry ?? RelayActiveLaneRegistry(),
+            cancellationPolicy: cancellationPolicy,
             emitStderrLine: emitStderrLine
         )
         return try await scheduler.run()
@@ -726,17 +738,31 @@ public struct RelayRunExecutor: Sendable {
 
     private func generateUniqueRunID(
         projectBundleURL: URL,
-        database: RelayProjectDatabase
+        database: RelayProjectDatabase,
+        repositoryURL: URL,
+        environment: [String: String]
     ) throws -> String {
         if let custom = runIDProvider {
             return custom()
         }
         let runsRootURL = projectBundleURL.appendingPathComponent("runs", isDirectory: true)
+        let git = GitWorktreePlumbingEngine()
         for _ in 0..<32 {
             let candidate = RelayRunIDGenerator.generate()
             let candidateDir = runsRootURL.appendingPathComponent(candidate, isDirectory: true)
-            if !FileManager.default.fileExists(atPath: candidateDir.path),
-               try database.fetchRun(runID: candidate, reconcileWithLock: false) == nil {
+            if FileManager.default.fileExists(atPath: candidateDir.path) {
+                continue
+            }
+            if try database.fetchRun(runID: candidate, reconcileWithLock: false) != nil {
+                continue
+            }
+            let refProbe = try? git.runGitCommand(
+                ["for-each-ref", "--count=1", "--format=%(refname)", "refs/heads/relay/\(candidate)/"],
+                cwd: repositoryURL.path,
+                environment: environment
+            )
+            let existingRef = refProbe?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if existingRef.isEmpty {
                 return candidate
             }
         }

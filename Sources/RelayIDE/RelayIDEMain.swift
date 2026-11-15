@@ -83,7 +83,17 @@ enum RelayIDEBootstrap {
                 FileHandle.standardError.write(Data((line + "\n").utf8))
                 stderrLock.unlock()
             }
-            let runner = RelayCLIRunner()
+            let runner: RelayCLIRunner
+            let signalForwarder: RelayCLISignalForwarder?
+            if subcommand == "run" {
+                let ctx = RelayCLIRunner.makeSignalForwardedRunContext()
+                runner = ctx.runner
+                signalForwarder = ctx.forwarder
+            } else {
+                runner = RelayCLIRunner()
+                signalForwarder = nil
+            }
+            defer { signalForwarder?.stop() }
             let result = await runner.executeCommand(
                 arguments: filteredArgs,
                 onLiveStderrLine: liveStderrWriter

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import RelayModels
 import RelayOrchestrator
@@ -99,6 +100,55 @@ public enum RelayCLILaunchDisposition: Sendable, Equatable {
     case desktopWorkbench
 }
 
+/// Installs POSIX `SIGINT` and `SIGTERM` `DispatchSourceSignal` listeners for headless `RelayIDE run`
+/// and forwards the first received signal to `activeLaneRegistry.requestCancellation(signal:)` (`03-relayide.md` §8, R42).
+/// `POSIXPseudoTerminalSession.spawn` passes `POSIX_SPAWN_SETSIGDEF` with `sigfillset`, so `SIG_IGN` in `RelayIDE`
+/// never leaks into spawned `relay.sh` children.
+public final class RelayCLISignalForwarder: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "io.github.zxu756.RelayIDE.cli.signal-forwarder")
+    private var sources: [DispatchSourceSignal] = []
+    private let lock = NSLock()
+    private var stopped = false
+
+    public init(registry: RelayActiveLaneRegistry) {
+        Darwin.signal(SIGINT, SIG_IGN)
+        Darwin.signal(SIGTERM, SIG_IGN)
+
+        let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: queue)
+        intSource.setEventHandler {
+            registry.requestCancellation(signal: SIGINT)
+        }
+        intSource.resume()
+
+        let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: queue)
+        termSource.setEventHandler {
+            registry.requestCancellation(signal: SIGTERM)
+        }
+        termSource.resume()
+
+        self.sources = [intSource, termSource]
+    }
+
+    public func stop() {
+        lock.lock()
+        guard !stopped else {
+            lock.unlock()
+            return
+        }
+        stopped = true
+        let activeSources = sources
+        sources.removeAll()
+        lock.unlock()
+        for src in activeSources {
+            src.cancel()
+        }
+    }
+
+    deinit {
+        stop()
+    }
+}
+
 public struct RelayCLIRunner: Sendable {
     public static let knownCLISubcommands: Set<String> = [
         "init",
@@ -119,13 +169,28 @@ public struct RelayCLIRunner: Sendable {
 
     public let runIDProvider: (@Sendable () -> String)?
     public let activeLaneRegistry: RelayActiveLaneRegistry?
+    public let cancellationPolicy: RelayCancellationPolicy
 
     public init(
         runIDProvider: (@Sendable () -> String)? = nil,
-        activeLaneRegistry: RelayActiveLaneRegistry? = nil
+        activeLaneRegistry: RelayActiveLaneRegistry? = nil,
+        cancellationPolicy: RelayCancellationPolicy = .default
     ) {
         self.runIDProvider = runIDProvider
         self.activeLaneRegistry = activeLaneRegistry
+        self.cancellationPolicy = cancellationPolicy
+    }
+
+    public static func makeSignalForwardedRunContext(
+        cancellationPolicy: RelayCancellationPolicy = .default
+    ) -> (runner: RelayCLIRunner, forwarder: RelayCLISignalForwarder) {
+        let registry = RelayActiveLaneRegistry()
+        let forwarder = RelayCLISignalForwarder(registry: registry)
+        let runner = RelayCLIRunner(
+            activeLaneRegistry: registry,
+            cancellationPolicy: cancellationPolicy
+        )
+        return (runner, forwarder)
     }
 
     /// Classifies `CommandLine.arguments.dropFirst()` without touching AppKit/SwiftUI (`03-relayide.md` §1, R39).
@@ -260,7 +325,8 @@ public struct RelayCLIRunner: Sendable {
                 let parsedRun = try parseRunCLIArguments(rest, language: lang)
                 let outcome = await RelayRunExecutor(
                     runIDProvider: runIDProvider,
-                    activeLaneRegistry: activeLaneRegistry
+                    activeLaneRegistry: activeLaneRegistry,
+                    cancellationPolicy: cancellationPolicy
                 ).execute(
                     planPath: parsedRun.planPath,
                     projectBundlePath: parsedRun.projectPath,
@@ -269,7 +335,11 @@ public struct RelayCLIRunner: Sendable {
                     environment: environment,
                     onStderrLine: onLiveStderrLine
                 )
-                if (outcome.exitCode == 0 || outcome.exitCode == 1), let record = outcome.runRecord {
+                let emitsRunJSON = outcome.exitCode == 0
+                    || outcome.exitCode == 1
+                    || outcome.exitCode == 130
+                    || outcome.exitCode == 143
+                if emitsRunJSON, let record = outcome.runRecord {
                     let json = try RelayRunJSONCodec.encode(record)
                     let stderrText = outcome.stderrNotes.joined(separator: "\n")
                     return RelayCLIExecutionResult(
