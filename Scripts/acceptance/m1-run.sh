@@ -1,0 +1,857 @@
+#!/usr/bin/env bash
+# RelayIDE M1 acceptance suite: real headless execution through agent-relay (relay.sh)
+# with deterministic stub-agent.sh test doubles and isolated temporary git repositories.
+#
+# Covers M1 acceptance table rows 1..25, 29, and 30 (rows 26, 27, 28 live outside this script).
+# Never opens the desktop window and never invokes any real coding agent CLI.
+#
+# Usage: Scripts/acceptance/m1-run.sh [--quick] [--record]
+#   --quick    run a 1-lane subset of rows 2..4 and exit 0 on pass
+#   --record   write the full suite report to reports/m1-run.txt (leaves working tree untouched otherwise)
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+cd "${ROOT_DIR}"
+
+QUICK=0
+RECORD=0
+for arg in "$@"; do
+    case "${arg}" in
+        --quick) QUICK=1 ;;
+        --record) RECORD=1 ;;
+        *)
+            echo "error: unknown argument '${arg}' (usage: m1-run.sh [--quick] [--record])" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ "${QUICK}" -eq 1 && "${RECORD}" -eq 1 ]]; then
+    echo "error: --quick and --record cannot be used together" >&2
+    exit 2
+fi
+
+# Resolve real home and relay.sh BEFORE replacing HOME or RELAY_CLI_HOME.
+REAL_HOME="${HOME}"
+if [[ -n "${RELAYIDE_RELAY_SH:-}" ]]; then
+    CANDIDATE_RELAY_SH="${RELAYIDE_RELAY_SH}"
+else
+    CANDIDATE_RELAY_SH="${REAL_HOME}/.agents/skills/agent-relay/scripts/relay.sh"
+fi
+
+if [[ ! -f "${CANDIDATE_RELAY_SH}" || ! -x "${CANDIDATE_RELAY_SH}" ]]; then
+    echo "没跑：找不到 relay.sh"
+    exit 2
+fi
+
+REAL_RELAY_DIR="$(cd "$(dirname "${CANDIDATE_RELAY_SH}")" && pwd -P)"
+REAL_RELAY_SH="${REAL_RELAY_DIR}/$(basename "${CANDIDATE_RELAY_SH}")"
+REAL_RELAY_UTIL="${REAL_RELAY_DIR}/relay_util.py"
+if [[ ! -f "${REAL_RELAY_UTIL}" || ! -r "${REAL_RELAY_UTIL}" ]]; then
+    echo "没跑：找不到 relay.sh"
+    exit 2
+fi
+
+SHA256_RELAY_SH_BEFORE="$(shasum -a 256 "${REAL_RELAY_SH}" | awk '{print $1}')"
+SHA256_RELAY_UTIL_BEFORE="$(shasum -a 256 "${REAL_RELAY_UTIL}" | awk '{print $1}')"
+
+GIT_STATUS_BEFORE="$(git status --porcelain)"
+if [[ -z "$(git status --porcelain -- . ':(exclude)reports')" ]]; then
+    TREE_STATE="working tree clean outside reports/"
+else
+    TREE_STATE="working tree has uncommitted changes outside reports/"
+fi
+
+PREFS_DIR="${REAL_HOME}/Library/Preferences"
+PREFS_RELAY_BEFORE="$(ls -1 "${PREFS_DIR}" 2>/dev/null | grep -i 'relayide' | sort || true)"
+
+SWIFT_JOBS_ARGS=()
+if [[ -n "${RELAY_SWIFT_JOBS:-}" ]]; then
+    SWIFT_JOBS_ARGS=(-j "${RELAY_SWIFT_JOBS}")
+fi
+
+RAW_WORK_TMP="$(mktemp -d "${TMPDIR:-/tmp}/relayide-m1-acc.XXXXXX")"
+WORK_TMP="$(cd "${RAW_WORK_TMP}" && pwd -P)"
+
+# Strictly match processes whose command line contains the target path (`ps -axo pid=,command=` + `grep -F`).
+list_procs_for_dir() {
+    local needle="$1"
+    [[ -n "${needle}" ]] || return 0
+    ps -axo pid=,command= | grep -F -- "${needle}" | grep -v -F -- "grep -F -- ${needle}" | awk -v self="$$" '$1 != self { print }' || true
+}
+
+kill_procs_for_dir() {
+    local needle="$1"
+    [[ -n "${needle}" ]] || return 0
+    local lines pids
+    lines="$(list_procs_for_dir "${needle}")"
+    if [[ -n "${lines}" ]]; then
+        pids="$(printf '%s\n' "${lines}" | awk '{print $1}')"
+        if [[ -n "${pids}" ]]; then
+            # shellcheck disable=SC2086
+            kill -TERM ${pids} 2>/dev/null || true
+            /usr/bin/perl -e 'select(undef, undef, undef, 0.15)' </dev/null
+            lines="$(list_procs_for_dir "${needle}")"
+            pids="$(printf '%s\n' "${lines}" | awk '{print $1}')"
+            if [[ -n "${pids}" ]]; then
+                # shellcheck disable=SC2086
+                kill -KILL ${pids} 2>/dev/null || true
+            fi
+        fi
+    fi
+}
+
+cleanup_work_tmp() {
+    if [[ -n "${WORK_TMP:-}" ]]; then
+        kill_procs_for_dir "${WORK_TMP}"
+        rm -rf "${WORK_TMP}" 2>/dev/null || true
+    fi
+}
+
+on_interrupt_signal() {
+    cleanup_work_tmp
+    exit 130
+}
+
+trap 'cleanup_work_tmp' EXIT
+trap 'on_interrupt_signal' INT TERM HUP
+
+poll_until_no_procs() {
+    local needle="$1"
+    local max_sec="${2:-20}"
+    local deadline_ticks=$(( max_sec * 20 ))
+    local tick=0
+    while (( tick <= deadline_ticks )); do
+        if [[ -z "$(list_procs_for_dir "${needle}")" ]]; then
+            return 0
+        fi
+        /usr/bin/perl -e 'select(undef, undef, undef, 0.05)' </dev/null
+        tick=$(( tick + 1 ))
+    done
+    echo "leftover processes matching '${needle}' after ${max_sec}s:" >&2
+    list_procs_for_dir "${needle}" >&2 || true
+    return 1
+}
+
+wait_for_trace_start() {
+    local trace_file="$1"
+    local watched_pid="${2:-}"
+    local max_sec="${3:-60}"
+    local deadline_ticks=$(( max_sec * 25 ))
+    local tick=0
+    while (( tick <= deadline_ticks )); do
+        if [[ -f "${trace_file}" ]] && grep -q '^start ' "${trace_file}" 2>/dev/null; then
+            return 0
+        fi
+        if [[ -n "${watched_pid}" ]] && ! kill -0 "${watched_pid}" 2>/dev/null; then
+            if [[ -f "${trace_file}" ]] && grep -q '^start ' "${trace_file}" 2>/dev/null; then
+                return 0
+            fi
+            echo "watched PID ${watched_pid} exited before trace start appeared at ${trace_file}" >&2
+            return 1
+        fi
+        /usr/bin/perl -e 'select(undef, undef, undef, 0.04)' </dev/null
+        tick=$(( tick + 1 ))
+    done
+    echo "timed out after ${max_sec}s waiting for '^start ' in ${trace_file}" >&2
+    return 1
+}
+
+WATCHDOG_PID=""
+start_pid_watchdog() {
+    local target_pid="$1"
+    local timeout_sec="${2:-120}"
+    ( exec /usr/bin/perl -e '
+        my ($pid, $sec) = @ARGV;
+        select(undef, undef, undef, $sec + 0);
+        if (kill(0, $pid)) {
+            print STDERR "\n[m1-run watchdog] PID $pid exceeded ${sec}s timeout; killing\n";
+            kill("TERM", $pid);
+            select(undef, undef, undef, 2.0);
+            kill("KILL", $pid);
+        }
+    ' "${target_pid}" "${timeout_sec}" </dev/null ) &
+    WATCHDOG_PID=$!
+}
+
+stop_pid_watchdog() {
+    local wpid="${1:-}"
+    if [[ -n "${wpid}" ]]; then
+        kill -KILL "${wpid}" 2>/dev/null || true
+        wait "${wpid}" 2>/dev/null || true
+    fi
+}
+
+# Set up isolated CLI home, stub copy, and 4 decoy CLIs inside WORK_TMP.
+RELAY_CLI="${ROOT_DIR}/Scripts/acceptance/relay-cli.sh"
+export RELAY_CLI_HOME="${WORK_TMP}/cli-home"
+mkdir -p "${RELAY_CLI_HOME}" "${WORK_TMP}/empty-git-home"
+
+STUB_DIR="${WORK_TMP}/stub-bin"
+DECOY_DIR="${WORK_TMP}/decoys"
+DECOY_MARKER="${WORK_TMP}/decoy-cli-invoked.marker"
+mkdir -p "${STUB_DIR}" "${DECOY_DIR}"
+
+cp "${ROOT_DIR}/Tests/Support/stub-agent.sh" "${STUB_DIR}/stub-agent.sh"
+chmod +x "${STUB_DIR}/stub-agent.sh"
+STUB_BIN="${STUB_DIR}/stub-agent.sh"
+
+for agent_name in claude codex agy vibe; do
+    cat > "${DECOY_DIR}/${agent_name}" <<EOF
+#!/usr/bin/env bash
+printf 'decoy %s invoked: pid=%s args=%s\n' "${agent_name}" "\$\$" "\$*" >> "${DECOY_MARKER}"
+exit 99
+EOF
+    chmod +x "${DECOY_DIR}/${agent_name}"
+done
+
+export RELAY_CLAUDE_BIN="${STUB_BIN}"
+export RELAY_CODEX_BIN="${STUB_BIN}"
+export RELAY_AGY_BIN="${STUB_BIN}"
+export RELAY_VIBE_BIN="${STUB_BIN}"
+
+SAFE_PATH="${DECOY_DIR}:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="${SAFE_PATH}"
+export RELAY_CLI_CHILD_PATH="${SAFE_PATH}"
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+
+if [[ -n "${RELAY_CLI_BIN:-}" ]]; then
+    export RELAY_CLI_BIN
+fi
+
+assert_stub_and_decoys_armed() {
+    [[ -n "${WORK_TMP:-}" && -d "${WORK_TMP}" ]] || { echo "FATAL: WORK_TMP missing" >&2; exit 125; }
+    [[ -n "${STUB_BIN:-}" && -x "${STUB_BIN}" && "${STUB_BIN}" == "${WORK_TMP}/"* ]] || {
+        echo "FATAL: STUB_BIN invalid" >&2
+        exit 125
+    }
+    local v val
+    for v in RELAY_CLAUDE_BIN RELAY_CODEX_BIN RELAY_AGY_BIN RELAY_VIBE_BIN; do
+        val="${!v:-}"
+        [[ "${val}" == "${STUB_BIN}" && -x "${val}" ]] || {
+            echo "FATAL: ${v} does not point to stub inside WORK_TMP" >&2
+            exit 125
+        }
+    done
+    [[ "${PATH}" == "${DECOY_DIR}:"* && "${RELAY_CLI_CHILD_PATH:-}" == "${DECOY_DIR}:"* ]] || {
+        echo "FATAL: DECOY_DIR is not first in PATH / RELAY_CLI_CHILD_PATH" >&2
+        exit 125
+    }
+    local t
+    for t in claude codex agy vibe; do
+        [[ -x "${DECOY_DIR}/${t}" ]] || { echo "FATAL: decoy ${t} missing" >&2; exit 125; }
+    done
+    [[ -n "${RELAY_CLI_HOME:-}" && "${RELAY_CLI_HOME}" == "${WORK_TMP}/"* ]] || {
+        echo "FATAL: RELAY_CLI_HOME outside WORK_TMP" >&2
+        exit 125
+    }
+}
+
+# Synchronous product call through relay-cli.sh with a 120s process-group watchdog.
+# Usage: invoke_product <stdout_path> <stderr_path> [KEY=VAL ...] -- <relay-cli args...>
+invoke_product() {
+    assert_stub_and_decoys_armed
+    local out_file="$1"
+    local err_file="$2"
+    shift 2
+    local env_overrides=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "--" ]]; then
+            shift
+            break
+        fi
+        env_overrides+=("$1")
+        shift
+    done
+    /usr/bin/python3 - "${out_file}" "${err_file}" "${RELAY_CLI}" "${#env_overrides[@]}" \
+        ${env_overrides[@]+"${env_overrides[@]}"} "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+out_path = sys.argv[1]
+err_path = sys.argv[2]
+relay_cli = sys.argv[3]
+num_env = int(sys.argv[4])
+env_items = sys.argv[5 : 5 + num_env]
+cli_args = sys.argv[5 + num_env :]
+
+env = dict(os.environ)
+for k in ("RELAY_WORKER", "AGY_CODER_WORKER", "CLAUDECODE", "RELAY_BUDGET_USD"):
+    env.pop(k, None)
+
+for item in env_items:
+    k, sep, v = item.partition("=")
+    if sep:
+        env[k] = v
+
+with open(out_path, "wb") as out_fh, open(err_path, "wb") as err_fh:
+    proc = subprocess.Popen(
+        [relay_cli] + cli_args,
+        stdin=subprocess.DEVNULL,
+        stdout=out_fh,
+        stderr=err_fh,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        rc = proc.wait(timeout=120.0)
+        sys.exit(rc)
+    except subprocess.TimeoutExpired:
+        err_fh.write(b"\n[m1-run watchdog] Product command exceeded 120s timeout; killing process group\n")
+        err_fh.flush()
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        sys.exit(124)
+PY
+}
+
+# Confirms via `ps` (and `<project>/run.lock` when present) that `pid` is the tested product binary itself.
+verify_pid_is_tested_binary() {
+    local pid="$1"
+    local proj_dir="${2:-}"
+    kill -0 "${pid}" 2>/dev/null || {
+        echo "PID ${pid} is not alive" >&2
+        return 1
+    }
+    local cmd_line
+    cmd_line="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
+    if [[ -z "${cmd_line}" ]]; then
+        echo "ps returned empty command for PID ${pid}" >&2
+        return 1
+    fi
+    if [[ "${cmd_line}" == *"relay-cli.sh"* || "${cmd_line}" == *"perl -e"* ]]; then
+        echo "PID ${pid} is still a wrapper (${cmd_line}), not the tested binary" >&2
+        return 1
+    fi
+    if [[ -n "${RELAY_CLI_BIN:-}" ]]; then
+        [[ "${cmd_line}" == *"${RELAY_CLI_BIN}"* ]] || {
+            echo "PID ${pid} command '${cmd_line}' does not match RELAY_CLI_BIN '${RELAY_CLI_BIN}'" >&2
+            return 1
+        }
+    else
+        [[ "${cmd_line}" == *"/RelayIDE "* ]] || {
+            echo "PID ${pid} command '${cmd_line}' is not the RelayIDE binary" >&2
+            return 1
+        }
+    fi
+    if [[ -n "${proj_dir}" && -s "${proj_dir}/run.lock" ]]; then
+        /usr/bin/python3 - "${proj_dir}/run.lock" "${pid}" <<'PY'
+import json, sys
+info = json.load(open(sys.argv[1], encoding="utf-8"))
+assert int(info["pid"]) == int(sys.argv[2]), (info, sys.argv[2])
+PY
+    fi
+}
+
+read_lock_run_id() {
+    local proj_dir="$1"
+    /usr/bin/python3 - "${proj_dir}/run.lock" <<'PY'
+import json, sys, time
+path = sys.argv[1]
+for _ in range(100):
+    try:
+        raw = open(path, encoding="utf-8").read().strip()
+        if raw:
+            d = json.loads(raw)
+            if d.get("runID"):
+                print(d["runID"])
+                sys.exit(0)
+    except Exception:
+        pass
+    time.sleep(0.02)
+sys.exit(1)
+PY
+}
+
+FAKE_AUTHOR_NAME="Relay Acceptance Bot"
+FAKE_AUTHOR_EMAIL="acceptance-bot@relayide.invalid"
+FAKE_AUTHOR_FULL="${FAKE_AUTHOR_NAME} <${FAKE_AUTHOR_EMAIL}>"
+
+init_temp_git_repo() {
+    local repo_dir="$1"
+    local configure_identity="${2:-1}"
+    mkdir -p "${repo_dir}"
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" init -q -b main
+    if [[ "${configure_identity}" -eq 1 ]]; then
+        HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" config user.name "${FAKE_AUTHOR_NAME}"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" config user.email "${FAKE_AUTHOR_EMAIL}"
+        printf 'baseline\n' > "${repo_dir}/README.txt"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" add README.txt
+        HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" -c commit.gpgsign=false commit -q -m "Initial baseline"
+    else
+        printf 'baseline\n' > "${repo_dir}/README.txt"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" add README.txt
+        HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" \
+            -c user.name="Bootstrap Seed" -c user.email="seed@relayide.invalid" -c commit.gpgsign=false \
+            commit -q -m "Initial baseline"
+    fi
+}
+
+init_temp_project() {
+    local proj_dir="$1"
+    local out_f="${WORK_TMP}/init-proj.out"
+    local err_f="${WORK_TMP}/init-proj.err"
+    invoke_product "${out_f}" "${err_f}" -- init --project "${proj_dir}" --lang zh
+}
+
+FAIL_COUNT=0
+FAIL_LOG="${WORK_TMP}/failed-rows.log"
+: > "${FAIL_LOG}"
+
+record_pass() {
+    local row="$1"
+    local msg="$2"
+    echo "[PASS] Row ${row}: ${msg}"
+}
+
+record_fail() {
+    local row="$1"
+    local msg="$2"
+    echo "[FAIL] Row ${row}: ${msg}"
+    printf 'Row %s: %s\n' "${row}" "${msg}" >> "${FAIL_LOG}"
+    FAIL_COUNT=$(( FAIL_COUNT + 1 ))
+}
+
+run_row() {
+    local row="$1"
+    local desc="$2"
+    local fn="$3"
+    echo ""
+    echo "--- Row ${row}: ${desc} ---"
+    set +e
+    ( set -euo pipefail; "${fn}" )
+    local rc=$?
+    set -e
+    if [[ "${rc}" -eq 0 ]]; then
+        record_pass "${row}" "${desc}"
+    else
+        record_fail "${row}" "${desc} (exit=${rc})"
+    fi
+}
+
+run_quick_mode() {
+    echo "================================================================"
+    echo "RelayIDE M1 Acceptance Quick Check (--quick, 1 lane subset of rows 2..4)"
+    echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "Commit:    $(git rev-parse --short HEAD) (branch: $(git rev-parse --abbrev-ref HEAD); ${TREE_STATE})"
+    echo "relay.sh sha256 (start):      ${SHA256_RELAY_SH_BEFORE}"
+    echo "relay_util.py sha256 (start): ${SHA256_RELAY_UTIL_BEFORE}"
+    echo "================================================================"
+
+    if [[ -z "${RELAY_CLI_BIN:-}" ]]; then
+        swift build ${SWIFT_JOBS_ARGS[@]+"${SWIFT_JOBS_ARGS[@]}"} >/dev/null
+    else
+        [[ -x "${RELAY_CLI_BIN}" ]] || { echo "error: RELAY_CLI_BIN is not executable" >&2; return 1; }
+    fi
+
+    local qdir="${WORK_TMP}/quick"
+    local qrepo="${qdir}/repo"
+    local qproj="${qdir}/Quick.relayproj"
+    local qtraces="${qdir}/traces"
+    mkdir -p "${qdir}/prompts" "${qtraces}"
+
+    init_temp_git_repo "${qrepo}" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" rev-parse main)"
+    init_temp_project "${qproj}"
+
+    cat > "${qdir}/prompts/q.md" <<'EOF'
+STUB WRITE src/quick.txt quick-single-lane
+STUB COST 0.0123
+STUB MESSAGE Quick lane completed cleanly
+EOF
+
+    cat > "${qdir}/plan.json" <<EOF
+{
+  "repo": "${qrepo}",
+  "base": "main",
+  "lanes": [
+    {"id": "q", "agent": "claude", "prompt": "prompts/q.md", "after": []}
+  ]
+}
+EOF
+
+    set +e
+    invoke_product "${qdir}/run.stdout" "${qdir}/run.stderr" "STUB_TRACE_DIR=${qtraces}" -- \
+        run "${qdir}/plan.json" --project "${qproj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    local run_rc=$?
+    set -e
+
+    # Row 2 subset (single lane): exit 0, status succeeded, trace recorded
+    if [[ "${run_rc}" -eq 0 ]] && /usr/bin/python3 - "${qdir}/run.stdout" "${qtraces}/q.trace" <<'PY'
+import json, sys
+run_json = json.load(open(sys.argv[1], encoding="utf-8"))
+assert run_json["status"] == "succeeded", run_json
+assert len(run_json["lanes"]) == 1, run_json["lanes"]
+lane = run_json["lanes"][0]
+assert lane["laneID"] == "q" and lane["status"] == "succeeded" and lane["exitCode"] == 0, lane
+lines = [l.split() for l in open(sys.argv[2], encoding="utf-8").read().splitlines() if l.strip()]
+starts = [float(x[1]) for x in lines if x[0] == "start"]
+ends = [float(x[1]) for x in lines if x[0] == "end"]
+assert len(starts) == 1 and len(ends) == 1 and starts[0] <= ends[0], lines
+PY
+    then
+        record_pass "2" "(--quick, 1 lane) run exited 0, lane q succeeded (exit 0), trace start/end recorded"
+    else
+        cat "${qdir}/run.stderr" >&2 || true
+        record_fail "2" "(--quick, 1 lane) run exited ${run_rc} or JSON/trace assertion failed"
+    fi
+
+    local run_id=""
+    run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${qdir}/run.stdout" 2>/dev/null || true)"
+
+    # Row 3 subset (single lane): main repo clean, main OID unchanged, only relay/<runID>/q added
+    local status_porcelain head_after branches_sorted expected_branches
+    status_porcelain="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" status --porcelain)"
+    head_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" rev-parse main)"
+    branches_sorted="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" for-each-ref --format='%(refname:short)' refs/heads/ | sort | paste -sd ',' -)"
+    expected_branches="$(printf 'main\nrelay/%s/q\n' "${run_id}" | sort | paste -sd ',' -)"
+    if [[ -n "${run_id}" && -z "${status_porcelain}" && "${head_after}" == "${base_oid}" && "${branches_sorted}" == "${expected_branches}" ]]; then
+        record_pass "3" "(--quick, 1 lane) main working tree clean, main OID unchanged, only branch relay/${run_id}/q added"
+    else
+        record_fail "3" "(--quick, 1 lane) status='${status_porcelain}', head=${head_after} vs ${base_oid}, branches='${branches_sorted}'"
+    fi
+
+    # Row 4 subset (single lane): +1 commit over base, diff is src/quick.txt, no .relay/, fake author
+    local qbranch="relay/${run_id}/q"
+    local ahead_cnt diff_files relay_tracked author_str
+    ahead_cnt="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" rev-list --count "${base_oid}..${qbranch}" 2>/dev/null || echo bad)"
+    diff_files="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" diff --name-only "${base_oid}..${qbranch}" 2>/dev/null || echo bad)"
+    relay_tracked="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" ls-tree -r --name-only "${qbranch}" 2>/dev/null | grep -E '^\.relay($|/)' || true)"
+    author_str="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" log -1 --format='%an <%ae>' "${qbranch}" 2>/dev/null || echo bad)"
+    if [[ "${ahead_cnt}" == "1" && "${diff_files}" == "src/quick.txt" && -z "${relay_tracked}" && "${author_str}" == "${FAKE_AUTHOR_FULL}" ]]; then
+        record_pass "4" "(--quick, 1 lane) branch +1 commit over base, diff is src/quick.txt, no .relay/ tracked, author matches repo config"
+    else
+        record_fail "4" "(--quick, 1 lane) ahead=${ahead_cnt}, diff='${diff_files}', relay_tracked='${relay_tracked}', author='${author_str}'"
+    fi
+
+    if [[ -e "${DECOY_MARKER}" ]]; then
+        record_fail "quick-decoy" "decoy CLI was invoked during --quick"
+    fi
+
+    local leftover_quick fail_log_nonempty=0
+    [[ -s "${FAIL_LOG}" ]] && fail_log_nonempty=1
+    leftover_quick="$(list_procs_for_dir "${WORK_TMP}")"
+    rm -rf "${WORK_TMP}"
+
+    local sha_sh_after sha_util_after prefs_after
+    sha_sh_after="$(shasum -a 256 "${REAL_RELAY_SH}" | awk '{print $1}')"
+    sha_util_after="$(shasum -a 256 "${REAL_RELAY_UTIL}" | awk '{print $1}')"
+    prefs_after="$(ls -1 "${PREFS_DIR}" 2>/dev/null | grep -i 'relayide' | sort || true)"
+
+    echo "relay.sh sha256 (end):        ${sha_sh_after}"
+    echo "relay_util.py sha256 (end):   ${sha_util_after}"
+
+    if [[ -n "${leftover_quick}" || -e "${WORK_TMP}" || "${sha_sh_after}" != "${SHA256_RELAY_SH_BEFORE}" || "${sha_util_after}" != "${SHA256_RELAY_UTIL_BEFORE}" || "${prefs_after}" != "${PREFS_RELAY_BEFORE}" ]]; then
+        echo "[FAIL] Row quick-hygiene: post-run cleanup, preferences, or relay.sh sha256 check failed"
+        FAIL_COUNT=$(( FAIL_COUNT + 1 ))
+    fi
+
+    [[ "${fail_log_nonempty}" -eq 0 && "${FAIL_COUNT}" -eq 0 ]]
+}
+
+# ------------------------------------------------------------------
+# Scenario 1: Rows 1, 2, 3, 4 (leaves artifacts in ${WORK_TMP}/s1 for Rows 22 & 23)
+# ------------------------------------------------------------------
+run_scenario_01_rows_1_to_4() {
+    local s1="${WORK_TMP}/s1"
+    local repo="${s1}/repo"
+    local proj="${s1}/Proj.relayproj"
+    local traces="${s1}/traces"
+    local barrier="${s1}/release.barrier"
+    mkdir -p "${s1}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+    printf '%s\n' "${base_oid}" > "${s1}/base_oid.txt"
+    init_temp_project "${proj}"
+
+    cat > "${s1}/prompts/a.md" <<EOF
+STUB WRITE src/from_a.txt alpha-payload
+STUB COST 0.0123
+STUB MESSAGE Final message from lane a
+STUB WAIT ${barrier} 90
+EOF
+    cat > "${s1}/prompts/b.md" <<EOF
+STUB WRITE src/from_b.txt beta-payload
+STUB COST 0.0234
+STUB MESSAGE Final message from lane b
+STUB WAIT ${barrier} 90
+EOF
+    cat > "${s1}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ]
+}
+EOF
+
+    echo ""
+    echo "--- Row 1: Two independent lanes a & b blocked on barrier: worktree list + live status --run ---"
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${traces}" \
+        "${RELAY_CLI}" run "${s1}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${s1}/run.stdout" 2>"${s1}/run.stderr" ) &
+    local bg_pid=$!
+    start_pid_watchdog "${bg_pid}" 120
+
+    local row1_ok=1
+    if ! wait_for_trace_start "${traces}/a.trace" "${bg_pid}" 60 || ! wait_for_trace_start "${traces}/b.trace" "${bg_pid}" 60; then
+        row1_ok=0
+    fi
+
+    local run_id=""
+    if [[ "${row1_ok}" -eq 1 ]]; then
+        if ! verify_pid_is_tested_binary "${bg_pid}" "${proj}"; then
+            row1_ok=0
+        fi
+        run_id="$(read_lock_run_id "${proj}" || true)"
+        if [[ -z "${run_id}" ]]; then
+            row1_ok=0
+        else
+            printf '%s\n' "${run_id}" > "${s1}/run_id.txt"
+        fi
+    fi
+
+    if [[ "${row1_ok}" -eq 1 ]]; then
+        HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" worktree list --porcelain > "${s1}/wt-live.txt"
+        set +e
+        invoke_product "${s1}/status-live.stdout" "${s1}/status-live.stderr" -- \
+            status --project "${proj}" --run "${run_id}" --lang zh
+        local st_rc=$?
+        set -e
+        if [[ "${st_rc}" -ne 0 ]] || grep -qi 'SQLITE_BUSY' "${s1}/status-live.stderr"; then
+            row1_ok=0
+        elif ! /usr/bin/python3 - "${s1}/wt-live.txt" "${s1}/status-live.stdout" "${repo}" "${proj}" "${run_id}" <<'PY'
+import json, os, sys
+
+wt_text = open(sys.argv[1], encoding="utf-8").read()
+st = json.load(open(sys.argv[2], encoding="utf-8"))
+repo_dir = os.path.realpath(sys.argv[3])
+proj_dir = os.path.realpath(sys.argv[4])
+run_id = sys.argv[5]
+
+wt_paths = [os.path.realpath(line[len("worktree "):].strip()) for line in wt_text.splitlines() if line.startswith("worktree ")]
+assert len(wt_paths) == 3, f"expected main + 2 worktrees, got {wt_paths}"
+assert wt_paths[0] == repo_dir, wt_paths
+lane_wts = wt_paths[1:]
+assert len(set(lane_wts)) == 2, lane_wts
+expected_root = os.path.join(proj_dir, "runs", run_id, "worktrees") + os.sep
+for p in lane_wts:
+    assert p.startswith(expected_root), (p, expected_root)
+
+assert st["status"] == "running", st
+lanes = {l["laneID"]: l for l in st["lanes"]}
+assert set(lanes) == {"a", "b"}, lanes
+for lid in ("a", "b"):
+    l = lanes[lid]
+    assert l["status"] == "running", l
+    pid = l["pid"]
+    assert isinstance(pid, int) and pid > 0, l
+    os.kill(pid, 0)
+PY
+        then
+            row1_ok=0
+        fi
+    fi
+
+    if [[ "${row1_ok}" -eq 1 ]]; then
+        record_pass "1" "main + 2 distinct worktrees under <project>/runs/${run_id}/worktrees/; live status --run returned running with alive PIDs"
+    else
+        record_fail "1" "live worktree or status --run check failed while blocked on barrier"
+    fi
+
+    # Release barrier for Row 2
+    echo ""
+    echo "--- Row 2: Release barrier -> run exits 0, both succeeded (exit 0), trace intervals overlap ---"
+    : > "${barrier}"
+    set +e
+    wait "${bg_pid}"
+    local run_rc=$?
+    set -e
+    stop_pid_watchdog "${WATCHDOG_PID}"
+
+    if [[ "${run_rc}" -eq 0 ]] && /usr/bin/python3 - "${s1}/run.stdout" "${traces}/a.trace" "${traces}/b.trace" <<'PY'
+import json, sys
+
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["status"] == "succeeded", d
+lanes = {l["laneID"]: l for l in d["lanes"]}
+for lid in ("a", "b"):
+    assert lanes[lid]["status"] == "succeeded" and lanes[lid]["exitCode"] == 0 and lanes[lid]["signal"] is None, lanes[lid]
+
+def span(path):
+    rows = [r.split() for r in open(path, encoding="utf-8").read().splitlines() if r.strip()]
+    s = [float(r[1]) for r in rows if r[0] == "start"][0]
+    e = [float(r[1]) for r in rows if r[0] == "end"][-1]
+    return s, e
+
+sa, ea = span(sys.argv[2])
+sb, eb = span(sys.argv[3])
+assert sa < eb and sb < ea, f"non-overlapping intervals: a=({sa}, {ea}), b=({sb}, {eb})"
+PY
+    then
+        record_pass "2" "run exited 0, lanes a & b succeeded (exit 0), and trace intervals overlapped"
+    else
+        cat "${s1}/run.stderr" >&2 || true
+        record_fail "2" "after barrier release, run exited ${run_rc} or trace overlap failed"
+    fi
+
+    if [[ -z "${run_id}" && -s "${s1}/run.stdout" ]]; then
+        run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${s1}/run.stdout" 2>/dev/null || true)"
+        [[ -n "${run_id}" ]] && printf '%s\n' "${run_id}" > "${s1}/run_id.txt"
+    fi
+
+    echo ""
+    echo "--- Row 3: Main repository clean, main OID unchanged, only relay/<runID>/a and relay/<runID>/b added ---"
+    local st_porcelain main_after actual_branches expected_branches
+    st_porcelain="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" status --porcelain)"
+    main_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+    actual_branches="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" for-each-ref --format='%(refname:short)' refs/heads/ | sort | paste -sd ',' -)"
+    expected_branches="$(printf 'main\nrelay/%s/a\nrelay/%s/b\n' "${run_id}" "${run_id}" | sort | paste -sd ',' -)"
+    if [[ -n "${run_id}" && -z "${st_porcelain}" && "${main_after}" == "${base_oid}" && "${actual_branches}" == "${expected_branches}" ]]; then
+        record_pass "3" "main git status empty, main OID unchanged, only branches relay/${run_id}/a and relay/${run_id}/b added"
+    else
+        record_fail "3" "status='${st_porcelain}', main=${main_after} vs ${base_oid}, branches='${actual_branches}'"
+    fi
+
+    echo ""
+    echo "--- Row 4: Each lane branch +1 commit over base, exact file diff, no .relay/, configured author + dependent chain ---"
+    local row4_ok=1
+    for pair in "a:src/from_a.txt" "b:src/from_b.txt"; do
+        local lid="${pair%%:*}"
+        local exp_file="${pair#*:}"
+        local br="relay/${run_id}/${lid}"
+        local cnt diff_out relay_files author_out
+        cnt="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-list --count "${base_oid}..${br}" 2>/dev/null || echo bad)"
+        diff_out="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" diff --name-only "${base_oid}..${br}" 2>/dev/null || echo bad)"
+        relay_files="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" ls-tree -r --name-only "${br}" 2>/dev/null | grep -E '^\.relay($|/)' || true)"
+        author_out="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" log -1 --format='%an <%ae>' "${br}" 2>/dev/null || echo bad)"
+        if [[ "${cnt}" != "1" || "${diff_out}" != "${exp_file}" || -n "${relay_files}" || "${author_out}" != "${FAKE_AUTHOR_FULL}" ]]; then
+            echo "lane ${lid} mismatch: cnt=${cnt}, diff='${diff_out}', relay='${relay_files}', author='${author_out}'" >&2
+            row4_ok=0
+        fi
+    done
+
+    # Also verify dependent lane (`c` after `a`) starts from `a`'s committed branch head.
+    local dep_dir="${WORK_TMP}/s1-dep"
+    mkdir -p "${dep_dir}/prompts" "${dep_dir}/traces"
+    init_temp_git_repo "${dep_dir}/repo" 1
+    local dep_base
+    dep_base="$(HOME="${WORK_TMP}/empty-git-home" git -C "${dep_dir}/repo" rev-parse main)"
+    init_temp_project "${dep_dir}/Dep.relayproj"
+    printf 'STUB WRITE src/a.txt from-a\n' > "${dep_dir}/prompts/a.md"
+    printf 'STUB WRITE src/c.txt from-c\n' > "${dep_dir}/prompts/c.md"
+    cat > "${dep_dir}/plan.json" <<EOF
+{
+  "repo": "${dep_dir}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "c", "agent": "agy",    "prompt": "prompts/c.md", "after": ["a"]}
+  ]
+}
+EOF
+    set +e
+    invoke_product "${dep_dir}/run.stdout" "${dep_dir}/run.stderr" "STUB_TRACE_DIR=${dep_dir}/traces" -- \
+        run "${dep_dir}/plan.json" --project "${dep_dir}/Dep.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    local dep_rc=$?
+    set -e
+    if [[ "${dep_rc}" -ne 0 ]]; then
+        row4_ok=0
+    else
+        local dep_run_id a_head c_parent c_diff
+        dep_run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${dep_dir}/run.stdout")"
+        a_head="$(HOME="${WORK_TMP}/empty-git-home" git -C "${dep_dir}/repo" rev-parse "relay/${dep_run_id}/a")"
+        c_parent="$(HOME="${WORK_TMP}/empty-git-home" git -C "${dep_dir}/repo" rev-parse "relay/${dep_run_id}/c^")"
+        c_diff="$(HOME="${WORK_TMP}/empty-git-home" git -C "${dep_dir}/repo" diff --name-only "${a_head}..relay/${dep_run_id}/c")"
+        if [[ "${a_head}" == "${dep_base}" || "${c_parent}" != "${a_head}" || "${c_diff}" != "src/c.txt" ]]; then
+            echo "dependent chain mismatch: a_head=${a_head}, c_parent=${c_parent}, c_diff='${c_diff}'" >&2
+            row4_ok=0
+        fi
+    fi
+
+    if [[ "${row4_ok}" -eq 1 ]]; then
+        record_pass "4" "each lane branch has +1 commit with exact file, zero .relay/ paths, repo-configured author, and dependent lane starts from predecessor head"
+    else
+        record_fail "4" "branch commit count, file diff, .relay exclusion, author, or dependent start check failed"
+    fi
+}
+
+run_full_suite() {
+    echo "================================================================"
+    echo "RelayIDE M1 Acceptance Suite"
+    echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "Commit:    $(git rev-parse --short HEAD) (branch: $(git rev-parse --abbrev-ref HEAD); ${TREE_STATE})"
+    echo "relay.sh sha256 (start):      ${SHA256_RELAY_SH_BEFORE}"
+    echo "relay_util.py sha256 (start): ${SHA256_RELAY_UTIL_BEFORE}"
+    echo "================================================================"
+
+    if [[ -z "${RELAY_CLI_BIN:-}" ]]; then
+        swift build ${SWIFT_JOBS_ARGS[@]+"${SWIFT_JOBS_ARGS[@]}"} >/dev/null
+    else
+        [[ -x "${RELAY_CLI_BIN}" ]] || { echo "error: RELAY_CLI_BIN is not executable" >&2; return 1; }
+    fi
+
+    run_scenario_01_rows_1_to_4
+
+    local sha_sh_after sha_util_after
+    sha_sh_after="$(shasum -a 256 "${REAL_RELAY_SH}" | awk '{print $1}')"
+    sha_util_after="$(shasum -a 256 "${REAL_RELAY_UTIL}" | awk '{print $1}')"
+    echo ""
+    echo "relay.sh sha256 (end):        ${sha_sh_after}"
+    echo "relay_util.py sha256 (end):   ${sha_util_after}"
+    if [[ "${sha_sh_after}" != "${SHA256_RELAY_SH_BEFORE}" || "${sha_util_after}" != "${SHA256_RELAY_UTIL_BEFORE}" ]]; then
+        record_fail "sha256" "relay.sh or relay_util.py sha256 changed during run"
+    fi
+
+    local fail_log_nonempty=0
+    [[ -s "${FAIL_LOG}" ]] && fail_log_nonempty=1
+
+    [[ "${fail_log_nonempty}" -eq 0 && "${FAIL_COUNT}" -eq 0 ]]
+}
+
+sanitize_stream() {
+    /usr/bin/python3 -c '
+import sys
+repo_dir, home_dir = sys.argv[1], sys.argv[2]
+for line in sys.stdin:
+    if repo_dir:
+        line = line.replace(repo_dir, "<repo>")
+    if home_dir and home_dir != "/":
+        line = line.replace(home_dir, "<home>")
+    sys.stdout.write(line)
+    sys.stdout.flush()
+' "${ROOT_DIR}" "${REAL_HOME}"
+}
+
+if [[ "${QUICK}" -eq 1 ]]; then
+    run_quick_mode 2>&1 | sanitize_stream
+else
+    if [[ "${RECORD}" -eq 1 ]]; then
+        mkdir -p "${ROOT_DIR}/reports"
+        REPORT_REL="reports/m1-run.txt"
+        run_full_suite 2>&1 | sanitize_stream | tee "${ROOT_DIR}/${REPORT_REL}"
+        echo "Report written to <repo>/${REPORT_REL}"
+    else
+        run_full_suite 2>&1 | sanitize_stream
+    fi
+fi
