@@ -796,6 +796,374 @@ EOF
     fi
 }
 
+# ------------------------------------------------------------------
+# Rows 5..11: Spend/tokens, 4 vendors, failure/skip, partial, 125/2 mapping, timeout, secret refusal
+# ------------------------------------------------------------------
+row_05_spend_and_tokens() {
+    local d="${WORK_TMP}/r05"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    cat > "${d}/prompts/c1.md" <<'EOF'
+STUB WRITE src/c1.txt claude-spend
+STUB COST 0.0123
+EOF
+    cat > "${d}/prompts/a1.md" <<'EOF'
+STUB WRITE src/a1.txt agy-tokens
+STUB TOKENS 3456
+EOF
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "c1", "agent": "claude", "prompt": "prompts/c1.md", "after": []},
+    {"id": "a1", "agent": "agy",    "prompt": "prompts/a1.md", "after": []}
+  ]
+}
+EOF
+
+    invoke_product "${d}/run.stdout" "${d}/run.stderr" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    /usr/bin/python3 - "${d}/run.stdout" "${d}/run.stderr" "${REAL_RELAY_UTIL}" <<'PY'
+import json, os, subprocess, sys
+
+run_data = json.load(open(sys.argv[1], encoding="utf-8"))
+stderr_text = open(sys.argv[2], encoding="utf-8").read()
+relay_util = sys.argv[3]
+
+assert run_data["status"] == "succeeded", run_data
+lanes = {l["laneID"]: l for l in run_data["lanes"]}
+
+c1 = lanes["c1"]
+assert c1["status"] == "succeeded", c1
+assert c1["costUSD"] is not None and abs(float(c1["costUSD"]) - 0.0123) < 1e-9, c1
+assert c1["costSource"] == "usd", c1
+c1_log = os.path.join(c1["worktreePath"], ".relay", "LOG.md")
+spent_raw = subprocess.check_output(["/usr/bin/python3", "-I", relay_util, "spent", c1_log], text=True).strip()
+assert abs(float(spent_raw) - float(c1["costUSD"])) < 1e-9, (spent_raw, c1["costUSD"])
+
+a1 = lanes["a1"]
+assert a1["status"] == "succeeded", a1
+assert a1["costUSD"] is None, f"expected costUSD=None (not 0), got {a1['costUSD']!r}"
+assert a1["tokens"] == 3456, a1
+assert a1["costSource"] == "unpriced", a1
+assert "未计价" in stderr_text, stderr_text
+PY
+}
+
+row_06_four_vendors() {
+    local d="${WORK_TMP}/r06"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    printf 'STUB WRITE src/claude.txt ok-claude\nSTUB COST 0.0111\n' > "${d}/prompts/claude.md"
+    printf 'STUB WRITE src/codex.txt ok-codex\nSTUB TOKENS 2222\n' > "${d}/prompts/codex.md"
+    printf 'STUB WRITE src/agy.txt ok-agy\nSTUB TOKENS 3333\n' > "${d}/prompts/agy.md"
+    printf 'STUB WRITE src/vibe.txt ok-vibe\nSTUB COST 0.0444\n' > "${d}/prompts/vibe.md"
+
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "l-claude", "agent": "claude", "prompt": "prompts/claude.md", "after": []},
+    {"id": "l-codex",  "agent": "codex",  "prompt": "prompts/codex.md",  "after": []},
+    {"id": "l-agy",    "agent": "agy",    "prompt": "prompts/agy.md",    "after": []},
+    {"id": "l-vibe",   "agent": "vibe",   "prompt": "prompts/vibe.md",   "after": []}
+  ]
+}
+EOF
+
+    invoke_product "${d}/run.stdout" "${d}/run.stderr" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["status"] == "succeeded", d
+lanes = {l["laneID"]: l for l in d["lanes"]}
+assert set(lanes) == {"l-claude", "l-codex", "l-agy", "l-vibe"}, lanes
+for lid, l in lanes.items():
+    assert l["status"] == "succeeded" and l["exitCode"] == 0 and l["commitOID"], (lid, l)
+PY
+}
+
+row_07_failed_skips_dependent() {
+    local d="${WORK_TMP}/r07"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+    init_temp_project "${d}/Proj.relayproj"
+
+    cat > "${d}/prompts/a.md" <<'EOF'
+STUB WRITE dirty_a.txt uncommitted-from-a
+STUB EXIT 3
+EOF
+    printf 'STUB WRITE src/b.txt should-not-run\n' > "${d}/prompts/b.md"
+    printf 'STUB WRITE src/c.txt independent-ok\n' > "${d}/prompts/c.md"
+
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": ["a"]},
+    {"id": "c", "agent": "vibe",   "prompt": "prompts/c.md", "after": []}
+  ]
+}
+EOF
+
+    set +e
+    invoke_product "${d}/run.stdout" "${d}/run.stderr" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    local rc=$?
+    set -e
+    [[ "${rc}" -eq 1 ]] || { echo "expected exit 1, got ${rc}" >&2; return 1; }
+
+    local run_id
+    run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${d}/run.stdout")"
+
+    [[ ! -e "${d}/traces/b.trace" ]] || { echo "b.trace should not exist" >&2; return 1; }
+    [[ ! -e "${d}/Proj.relayproj/runs/${run_id}/worktrees/b" ]] || { echo "b worktree should not exist" >&2; return 1; }
+    if HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" show-ref --verify --quiet "refs/heads/relay/${run_id}/b"; then
+        echo "branch relay/${run_id}/b should not exist" >&2
+        return 1
+    fi
+    local a_ahead
+    a_ahead="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-list --count "${base_oid}..relay/${run_id}/a")"
+    [[ "${a_ahead}" == "0" ]] || { echo "expected 0 commits on a, got ${a_ahead}" >&2; return 1; }
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+import json, re, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+lanes = {l["laneID"]: l for l in d["lanes"]}
+
+la = lanes["a"]
+assert la["status"] == "failed" and la["exitCode"] == 3 and la["signal"] is None, la
+assert la["commitOID"] is None, la
+assert la["uncommittedFiles"] == ["dirty_a.txt"], la
+
+lb = lanes["b"]
+assert lb["status"] == "skipped" and lb["exitCode"] is None, lb
+assert lb["worktreePath"] is None and lb["branch"] is None and lb["commitOID"] is None, lb
+reason_b = lb["reason"] or ""
+assert re.search(r"(^|[^a-z0-9])a([^a-z0-9]|$)", reason_b), f"reason for b does not name predecessor a: {reason_b!r}"
+
+lc = lanes["c"]
+assert lc["status"] == "succeeded" and lc["exitCode"] == 0 and lc["commitOID"], lc
+PY
+}
+
+row_08_partial_commits_and_skips_dependent() {
+    local d="${WORK_TMP}/r08"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+    init_temp_project "${d}/Proj.relayproj"
+
+    cat > "${d}/prompts/a.md" <<'EOF'
+STUB WRITE src/partial_a.txt half-finished
+STUB STATUS partial
+EOF
+    printf 'STUB WRITE src/b.txt should-not-run\n' > "${d}/prompts/b.md"
+
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "agy",    "prompt": "prompts/b.md", "after": ["a"]}
+  ]
+}
+EOF
+
+    set +e
+    invoke_product "${d}/run.stdout" "${d}/run.stderr" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    local rc=$?
+    set -e
+    [[ "${rc}" -eq 1 ]] || { echo "expected exit 1, got ${rc}" >&2; return 1; }
+
+    local run_id a_ahead a_diff
+    run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${d}/run.stdout")"
+    a_ahead="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-list --count "${base_oid}..relay/${run_id}/a")"
+    a_diff="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" diff --name-only "${base_oid}..relay/${run_id}/a")"
+    [[ "${a_ahead}" == "1" && "${a_diff}" == "src/partial_a.txt" ]] || {
+        echo "partial lane commit mismatch: ahead=${a_ahead}, diff='${a_diff}'" >&2
+        return 1
+    }
+    [[ ! -e "${d}/traces/b.trace" && ! -e "${d}/Proj.relayproj/runs/${run_id}/worktrees/b" ]] || return 1
+    if HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" show-ref --verify --quiet "refs/heads/relay/${run_id}/b"; then
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+lanes = {l["laneID"]: l for l in d["lanes"]}
+assert lanes["a"]["status"] == "partial" and lanes["a"]["exitCode"] == 5 and lanes["a"]["commitOID"], lanes["a"]
+assert lanes["b"]["status"] == "skipped" and lanes["b"]["worktreePath"] is None and lanes["b"]["branch"] is None, lanes["b"]
+PY
+}
+
+row_09_lane_exit_125_and_2_never_leak_to_run_exit() {
+    local d="${WORK_TMP}/r09"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    for code in 125 2; do
+        printf 'STUB WRITE dirty_%s.txt fail-%s\nSTUB EXIT %s\n' "${code}" "${code}" "${code}" > "${d}/prompts/p${code}.md"
+        cat > "${d}/plan-${code}.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "lane-${code}", "agent": "claude", "prompt": "prompts/p${code}.md", "after": []}
+  ]
+}
+EOF
+        set +e
+        invoke_product "${d}/out-${code}.json" "${d}/err-${code}.txt" "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan-${code}.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+        local rc=$?
+        set -e
+        [[ "${rc}" -eq 1 ]] || { echo "for stub exit ${code}, expected run exit 1 (not ${code}), got ${rc}" >&2; return 1; }
+
+        /usr/bin/python3 - "${d}/out-${code}.json" "${code}" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = int(sys.argv[2])
+lane = d["lanes"][0]
+assert lane["status"] == "failed" and lane["exitCode"] == expected and lane["commitOID"] is None, lane
+PY
+    done
+}
+
+row_10_timeout_124_and_no_leftover_processes() {
+    local d="${WORK_TMP}/r10"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    cat > "${d}/prompts/slow.md" <<'EOF'
+STUB WRITE dirty_timeout.txt timed-out
+STUB SLEEP 60
+EOF
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "slow", "agent": "claude", "prompt": "prompts/slow.md", "after": []}
+  ]
+}
+EOF
+
+    set +e
+    invoke_product "${d}/run.stdout" "${d}/run.stderr" "RELAY_TIMEOUT=2" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    local rc=$?
+    set -e
+    [[ "${rc}" -eq 1 ]] || { echo "expected exit 1 on timeout, got ${rc}" >&2; return 1; }
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+lane = d["lanes"][0]
+assert lane["status"] == "timeout" and lane["exitCode"] == 124 and lane["commitOID"] is None, lane
+assert lane["uncommittedFiles"] == ["dirty_timeout.txt"], lane
+PY
+
+    poll_until_no_procs "${WORK_TMP}" 30
+}
+
+row_11_secret_prompt_refused_without_leaking_value() {
+    local d="${WORK_TMP}/r11"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    # Generate credential-shaped token dynamically at runtime; store only in temp files inside WORK_TMP.
+    /usr/bin/python3 - "${d}/secret.val" "${d}/prompts/sec.md" <<'PY'
+import secrets, sys
+tok = ("s" + "k" + "-ant-api03-") + secrets.token_urlsafe(24)
+open(sys.argv[1], "w", encoding="utf-8").write(tok)
+open(sys.argv[2], "w", encoding="utf-8").write(
+    f"Please inspect credential {tok} before proceeding.\nSTUB WRITE src/sec.txt should-not-run\n"
+)
+PY
+
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "sec", "agent": "claude", "prompt": "prompts/sec.md", "after": []}
+  ]
+}
+EOF
+
+    set +e
+    invoke_product "${d}/run.stdout" "${d}/run.stderr" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    local rc=$?
+    set -e
+    [[ "${rc}" -eq 1 ]] || { echo "expected exit 1 on secret refusal, got ${rc}" >&2; return 1; }
+    [[ ! -e "${d}/traces/sec.trace" ]] || { echo "stub should not have run when relay.sh refused prompt" >&2; return 1; }
+
+    /usr/bin/python3 - "${d}/secret.val" "${d}/run.stdout" "${d}/run.stderr" "${d}/Proj.relayproj" <<'PY'
+import json, os, sys
+
+secret_str = open(sys.argv[1], encoding="utf-8").read().strip()
+assert len(secret_str) >= 35
+secret_bytes = secret_str.encode("utf-8")
+
+stdout_path, stderr_path, proj_dir = sys.argv[2], sys.argv[3], sys.argv[4]
+d = json.load(open(stdout_path, encoding="utf-8"))
+run_id = d["runID"]
+lane = d["lanes"][0]
+
+assert lane["status"] == "refused" and lane["exitCode"] == 2 and lane["commitOID"] is None, lane
+reason = lane["reason"] or ""
+assert "not sent" in reason.lower(), f"expected 'not sent' in reason, got {reason!r}"
+
+wt_path = lane["worktreePath"]
+assert wt_path and os.path.isdir(wt_path), lane
+log_md = os.path.join(wt_path, ".relay", "LOG.md")
+if os.path.exists(log_md):
+    headers = [ln for ln in open(log_md, encoding="utf-8", errors="replace").read().splitlines() if ln.startswith("## ")]
+    assert len(headers) == 0, f"expected no step in LOG.md, got {headers}"
+
+pty_path = os.path.join(proj_dir, "runs", run_id, "lanes", "sec.pty")
+sqlite_path = os.path.join(proj_dir, "workspace.sqlite")
+assert os.path.isfile(pty_path), f"missing {pty_path}"
+assert os.path.isfile(sqlite_path), f"missing {sqlite_path}"
+
+files_to_scan = [
+    stdout_path,
+    stderr_path,
+    pty_path,
+    sqlite_path,
+    sqlite_path + "-wal",
+    sqlite_path + "-shm",
+]
+for fp in files_to_scan:
+    if os.path.exists(fp):
+        raw = open(fp, "rb").read()
+        assert secret_bytes not in raw, f"secret leaked into {os.path.basename(fp)}"
+PY
+    rm -f "${d}/secret.val"
+}
+
 run_full_suite() {
     echo "================================================================"
     echo "RelayIDE M1 Acceptance Suite"
@@ -812,6 +1180,14 @@ run_full_suite() {
     fi
 
     run_scenario_01_rows_1_to_4
+
+    run_row "5"  "Claude USD spend matches relay_util.py spent; agy tokens-only has null costUSD and unpriced source" row_05_spend_and_tokens
+    run_row "6"  "claude, codex, agy, and vibe lanes each reply in vendor format and succeed" row_06_four_vendors
+    run_row "7"  "Lane a exit 3 -> failed (uncommitted tracked), dependent b skipped (no worktree/branch/trace), independent c succeeded, run exit 1" row_07_failed_skips_dependent
+    run_row "8"  "Lane a STATUS: partial -> partial (exit 5, committed), dependent b skipped, run exit 1" row_08_partial_commits_and_skips_dependent
+    run_row "9"  "Stub exit 125 and stub exit 2 -> lane failed (125 / 2), both runs exit 1 (not 125 or 2)" row_09_lane_exit_125_and_2_never_leak_to_run_exit
+    run_row "10" "Stub sleeps 60s with RELAY_TIMEOUT=2 -> lane timeout (124), run exit 1, zero processes left within 30s" row_10_timeout_124_and_no_leftover_processes
+    run_row "11" "Runtime-generated secret in prompt -> refused (exit 2, not sent), no trace/LOG.md step, value absent from stdout/stderr/DB/.pty" row_11_secret_prompt_refused_without_leaking_value
 
     local sha_sh_after sha_util_after
     sha_sh_after="$(shasum -a 256 "${REAL_RELAY_SH}" | awk '{print $1}')"
