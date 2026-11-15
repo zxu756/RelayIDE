@@ -78,6 +78,8 @@ public enum AgentVendor: String, Sendable, Codable, Hashable, CaseIterable, Iden
 
 public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
     case ptyAllocationFailed(errnoCode: Int32, message: String)
+    case ptySessionAlreadyRunning(laneID: String, pid: Int32)
+    case rawTranscriptOpenFailed(path: String, errnoCode: Int32, message: String)
     case processSpawnFailed(executable: String, reason: String)
     case gitRepositoryNotFound(String)
     case gitPlumbingFailure(command: String, exitCode: Int32, stderr: String)
@@ -105,6 +107,14 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
             return isZh
                 ? "伪终端分配失败（posix_openpt / grantpt / unlockpt，errno \(code)）：\(msg)"
                 : "Pseudo-terminal allocation failed (posix_openpt / grantpt / unlockpt, errno \(code)): \(msg)"
+        case .ptySessionAlreadyRunning(let lane, let pid):
+            return isZh
+                ? "伪终端会话 '\(lane)' 已在运行中（PID \(pid)），不能重复调用 spawn"
+                : "PTY session '\(lane)' is already running (PID \(pid)); cannot spawn again"
+        case .rawTranscriptOpenFailed(let path, let code, let msg):
+            return isZh
+                ? "打开伪终端原始记录文件 '\(path)' 失败（errno \(code)）：\(msg)"
+                : "Failed to open raw PTY transcript file '\(path)' (errno \(code)): \(msg)"
         case .processSpawnFailed(let exe, let reason):
             return isZh
                 ? "启动子进程 '\(exe)' 失败：\(reason)"

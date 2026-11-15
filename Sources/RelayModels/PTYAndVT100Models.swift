@@ -134,12 +134,42 @@ public struct TerminalViewportSnapshot: Sendable, Codable, Hashable {
     }
 }
 
+public enum PTYExitReason: Sendable, Codable, Hashable, Equatable {
+    case exited(code: Int32)
+    case signaled(signal: Int32)
+    case waitFailed(errnoCode: Int32)
+
+    public var exitCode: Int32? {
+        if case .exited(let code) = self { return code }
+        return nil
+    }
+
+    public var terminationSignal: Int32? {
+        if case .signaled(let sig) = self { return sig }
+        return nil
+    }
+
+    public func localizedDescription(in language: RelayLanguage) -> String {
+        switch self {
+        case .exited(let code):
+            return language.isChinese ? "退出码 \(code)" : "exited with code \(code)"
+        case .signaled(let sig):
+            return language.isChinese ? "被信号 \(sig) 终止" : "terminated by signal \(sig)"
+        case .waitFailed(let err):
+            return language.isChinese ? "等待子进程失败（errno \(err)）" : "waitpid failed (errno \(err))"
+        }
+    }
+}
+
 public struct PTYProcessMetrics: Sendable, Codable, Hashable {
     public let laneID: String
     public let pid: Int32
     public let masterFD: Int32
     public let isRunning: Bool
     public let exitStatus: Int32?
+    public let terminationSignal: Int32?
+    public let exitReason: PTYExitReason?
+    public let terminationDescription: String?
     public let bytesReadFromPTY: UInt64
     public let bytesWrittenToPTY: UInt64
     public let startedAt: Date
@@ -150,6 +180,9 @@ public struct PTYProcessMetrics: Sendable, Codable, Hashable {
         masterFD: Int32,
         isRunning: Bool,
         exitStatus: Int32? = nil,
+        terminationSignal: Int32? = nil,
+        exitReason: PTYExitReason? = nil,
+        terminationDescription: String? = nil,
         bytesReadFromPTY: UInt64 = 0,
         bytesWrittenToPTY: UInt64 = 0,
         startedAt: Date = Date()
@@ -159,6 +192,9 @@ public struct PTYProcessMetrics: Sendable, Codable, Hashable {
         self.masterFD = masterFD
         self.isRunning = isRunning
         self.exitStatus = exitStatus
+        self.terminationSignal = terminationSignal
+        self.exitReason = exitReason
+        self.terminationDescription = terminationDescription
         self.bytesReadFromPTY = bytesReadFromPTY
         self.bytesWrittenToPTY = bytesWrittenToPTY
         self.startedAt = startedAt

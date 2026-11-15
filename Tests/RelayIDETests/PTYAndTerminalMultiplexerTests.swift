@@ -833,4 +833,284 @@ struct PTYAndTerminalMultiplexerTests {
         }
         #expect(mentions.isEmpty, "these files still say forkpty: \(mentions)")
     }
+
+    // MARK: - M1 Stage 01: PTY Exit Status, Process-Group Termination, Re-Spawn Guard & Raw Transcript (R32-R35)
+
+    private static var fakeRelayPath: String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Support/fake-relay.sh")
+            .path
+    }
+
+    @Test("POSIXPseudoTerminalSession decodes exit codes vs termination signals without recording signal death as 0 (R32)")
+    func ptyDecodesExitStatusAndSignalDeath() async throws {
+        // 1. Normal exits: exit 7 and exit 124 are preserved verbatim.
+        for expectedCode: Int32 in [7, 124] {
+            let session = POSIXPseudoTerminalSession(laneID: "lane-exit-\(expectedCode)")
+            defer { session.terminate() }
+            try session.spawn(
+                executablePath: Self.fakeRelayPath,
+                arguments: ["--relay-message", "step finished with \(expectedCode)", "--exit", "\(expectedCode)"]
+            )
+            for _ in 0..<200 {
+                if !session.metrics().isRunning { break }
+                try await Task.sleep(nanoseconds: 15_000_000)
+            }
+            let m = session.metrics()
+            #expect(m.isRunning == false)
+            #expect(m.exitStatus == expectedCode)
+            #expect(m.terminationSignal == nil)
+            #expect(m.exitReason == .exited(code: expectedCode))
+            #expect(m.terminationDescription == nil)
+        }
+
+        // 2. Signal deaths: SIGKILL (9), SIGTERM (15), SIGINT (2) must NEVER record exitStatus == 0 (exitStatus must be nil).
+        for (sigName, sigNum) in [("KILL", SIGKILL), ("TERM", SIGTERM), ("INT", SIGINT)] {
+            let session = POSIXPseudoTerminalSession(laneID: "lane-sig-\(sigName)")
+            defer { session.terminate() }
+            try session.spawn(
+                executablePath: Self.fakeRelayPath,
+                arguments: ["--kill-self", sigName]
+            )
+            for _ in 0..<200 {
+                if !session.metrics().isRunning { break }
+                try await Task.sleep(nanoseconds: 15_000_000)
+            }
+            let m = session.metrics()
+            #expect(m.isRunning == false, "Expected session killed by SIG\(sigName) (\(sigNum)) to stop running")
+            #expect(m.exitStatus == nil, "Process killed by SIG\(sigName) (\(sigNum)) must have nil exitStatus, got \(String(describing: m.exitStatus))")
+            #expect(m.terminationSignal == sigNum)
+            #expect(m.exitReason == .signaled(signal: sigNum))
+            #expect(m.terminationDescription == "被信号 \(sigNum) 终止")
+            #expect(m.exitReason?.localizedDescription(in: .zhHans) == "被信号 \(sigNum) 终止")
+            #expect(m.exitReason?.localizedDescription(in: .en) == "terminated by signal \(sigNum)")
+        }
+    }
+
+    @Test("POSIXWaitStatus bit decoders match <sys/wait.h> and waitForChildExit retries EINTR (R32)")
+    func posixWaitStatusMacrosAndEINTRRetry() {
+        // Normal exit statuses 0..255: (code << 8)
+        for code: Int32 in [0, 1, 2, 7, 124, 125, 130, 137, 255] {
+            let raw = code << 8
+            #expect(POSIXWaitStatus.wifExited(raw) == true)
+            #expect(POSIXWaitStatus.wExitStatus(raw) == code)
+            #expect(POSIXWaitStatus.wifSignaled(raw) == false)
+            #expect(POSIXWaitStatus.wifStopped(raw) == false)
+            #expect(POSIXWaitStatus.decode(raw) == .exited(code: code))
+        }
+
+        // Signal deaths with and without WCOREFLAG (0x80)
+        for sig: Int32 in [SIGHUP, SIGINT, SIGKILL, SIGTERM, SIGALRM] {
+            for coreFlag: Int32 in [0, 0x80] {
+                let raw = sig | coreFlag
+                #expect(POSIXWaitStatus.wifExited(raw) == false)
+                #expect(POSIXWaitStatus.wifSignaled(raw) == true)
+                #expect(POSIXWaitStatus.wTermSig(raw) == sig)
+                #expect(POSIXWaitStatus.wifStopped(raw) == false)
+                #expect(POSIXWaitStatus.decode(raw) == .signaled(signal: sig))
+                #expect(POSIXWaitStatus.decode(raw).exitCode == nil)
+            }
+        }
+
+        // _WSTOPPED (0x7F) must not be misclassified as WIFSIGNALED or WIFEXITED
+        let stoppedRaw: Int32 = (SIGSTOP << 8) | 0x7F
+        #expect(POSIXWaitStatus.wifExited(stoppedRaw) == false)
+        #expect(POSIXWaitStatus.wifSignaled(stoppedRaw) == false)
+        #expect(POSIXWaitStatus.wifStopped(stoppedRaw) == true)
+
+        // waitForChildExit retries on EINTR (even when status stays 0) and ignores transient WIFSTOPPED
+        var attempts = 0
+        let outcome = POSIXPseudoTerminalSession.waitForChildExit(pid: 4242) { pid, statusPtr, _ in
+            attempts += 1
+            switch attempts {
+            case 1, 2:
+                return (-1, EINTR)
+            case 3:
+                statusPtr?.pointee = (SIGSTOP << 8) | 0x7F
+                return (pid, 0)
+            default:
+                statusPtr?.pointee = SIGKILL // raw status 9 -> WIFSIGNALED, WTERMSIG=9
+                return (pid, 0)
+            }
+        }
+        #expect(attempts == 4)
+        #expect(outcome == .signaled(signal: SIGKILL))
+        #expect(outcome.exitCode == nil)
+
+        // Non-EINTR failure (e.g. ECHILD) never masquerades as exit 0
+        let failedOutcome = POSIXPseudoTerminalSession.waitForChildExit(pid: 9999) { _, _, _ in
+            (-1, ECHILD)
+        }
+        #expect(failedOutcome == .waitFailed(errnoCode: ECHILD))
+        #expect(failedOutcome.exitCode == nil)
+    }
+
+    @Test("POSIXPseudoTerminalSession.terminate signals the process group and waits for real exit before reporting not running (R33)")
+    func ptyTerminateSignalsProcessGroupAndWaitsForRealExit() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relayide-pty-r33-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let readyFile = tmpDir.appendingPathComponent("ready")
+        let childPIDFile = tmpDir.appendingPathComponent("group-child.pid")
+
+        let session = POSIXPseudoTerminalSession(laneID: "lane-r33-term")
+        var trackedGroupChildPID: pid_t = -1
+        var trackedLeaderPID: pid_t = -1
+        defer {
+            if trackedGroupChildPID > 0 { _ = Darwin.kill(trackedGroupChildPID, SIGKILL) }
+            if trackedLeaderPID > 0 { _ = Darwin.kill(-trackedLeaderPID, SIGKILL) }
+            session.terminate(signal: SIGKILL)
+        }
+
+        try session.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: [
+                "--child-pid-file", childPIDFile.path,
+                "--slow-term", "0.18",
+                "--ready-file", readyFile.path,
+                "--sleep", "30"
+            ]
+        )
+
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: readyFile.path) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: readyFile.path))
+
+        let leaderPID = session.metrics().pid
+        trackedLeaderPID = leaderPID
+        let rawGroupPID = try String(contentsOf: childPIDFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let groupChildPID = try #require(pid_t(rawGroupPID))
+        trackedGroupChildPID = groupChildPID
+
+        #expect(Darwin.kill(leaderPID, 0) == 0)
+        #expect(Darwin.kill(groupChildPID, 0) == 0)
+        #expect(session.metrics().isRunning == true)
+
+        session.terminate(signal: SIGTERM)
+
+        let leaderAliveAfterTerminate = (Darwin.kill(leaderPID, 0) == 0)
+        let groupChildAliveAfterTerminate = (Darwin.kill(groupChildPID, 0) == 0)
+        let afterMetrics = session.metrics()
+
+        #expect(afterMetrics.isRunning == false)
+        #expect(leaderAliveAfterTerminate == false, "Leader process \(leaderPID) was still alive after terminate() returned")
+        #expect(groupChildAliveAfterTerminate == false, "Process-group child \(groupChildPID) survived terminate() because signal was not sent to -pgid")
+        #expect(afterMetrics.exitStatus == nil)
+        #expect(afterMetrics.terminationSignal == SIGTERM)
+        #expect(afterMetrics.terminationDescription == "被信号 \(SIGTERM) 终止")
+    }
+
+    @Test("POSIXPseudoTerminalSession.spawn throws when called on an already-running session instead of silently returning (R34)")
+    func ptySecondSpawnWhileRunningThrows() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relayide-pty-r34-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let readyFile = tmpDir.appendingPathComponent("ready")
+        let session = POSIXPseudoTerminalSession(laneID: "lane-r34-respawn")
+        defer { session.terminate() }
+
+        try session.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: ["--ready-file", readyFile.path, "--sleep", "10"]
+        )
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: readyFile.path) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let firstPID = session.metrics().pid
+        #expect(firstPID > 0)
+        #expect(session.metrics().isRunning == true)
+
+        #expect(throws: RelayIDEError.ptySessionAlreadyRunning(laneID: "lane-r34-respawn", pid: firstPID)) {
+            try session.spawn(
+                executablePath: Self.fakeRelayPath,
+                arguments: ["--exit", "0"]
+            )
+        }
+
+        // First child must remain running and undisturbed until terminated.
+        #expect(session.metrics().pid == firstPID)
+        #expect(session.metrics().isRunning == true)
+        #expect(Darwin.kill(firstPID, 0) == 0)
+
+        // Once terminated, spawning a fresh process on the stopped session succeeds cleanly.
+        session.terminate()
+        #expect(session.metrics().isRunning == false)
+        try session.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: ["--exit", "7"]
+        )
+        #expect(session.waitForExit(timeout: 5.0) == true)
+        #expect(session.metrics().exitStatus == 7)
+    }
+
+    @Test("POSIXPseudoTerminalSession appends every byte read from master FD verbatim to rawOutputFilePath while preserving screenBuffer (R35)")
+    func ptyAppendsVerbatimBytesToRawTranscriptAndPreservesScreenBuffer() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relayide-pty-r35-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let rawTranscriptURL = tmpDir.appendingPathComponent("lanes/api.pty")
+        let args = [
+            "--relay-message", "not sent: prompt contains secret (line 1)",
+            "--stdout", "Hello-PTY-Line-1",
+            "--repeat-bytes", "65536",
+            "--exit", "2"
+        ]
+
+        // Control session without rawOutputFilePath
+        let controlSession = POSIXPseudoTerminalSession(laneID: "lane-r35-control", rows: 24, columns: 80)
+        defer { controlSession.terminate() }
+        try controlSession.spawn(executablePath: Self.fakeRelayPath, arguments: args)
+        #expect(controlSession.waitForExit(timeout: 10.0) == true)
+
+        // Recorded session with rawOutputFilePath
+        let recordedSession = POSIXPseudoTerminalSession(laneID: "lane-r35-recorded", rows: 24, columns: 80)
+        defer { recordedSession.terminate() }
+        try recordedSession.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: args,
+            rawOutputFilePath: rawTranscriptURL.path
+        )
+        #expect(recordedSession.waitForExit(timeout: 10.0) == true)
+
+        let metrics = recordedSession.metrics()
+        #expect(metrics.exitStatus == 2)
+        #expect(metrics.bytesReadFromPTY > 65_536)
+        #expect(FileManager.default.fileExists(atPath: rawTranscriptURL.path) == true)
+
+        let rawData = try Data(contentsOf: rawTranscriptURL)
+        #expect(rawData.count == Int(metrics.bytesReadFromPTY))
+
+        let rawText = String(decoding: rawData, as: UTF8.self)
+        #expect(rawText.contains("relay: not sent: prompt contains secret (line 1)\r\n"))
+        #expect(rawText.contains("Hello-PTY-Line-1\r\n"))
+
+        // ScreenBuffer snapshot and scrollback must match the control session identically.
+        #expect(recordedSession.screenBuffer.snapshot().plainTextLines == controlSession.screenBuffer.snapshot().plainTextLines)
+        #expect(recordedSession.screenBuffer.snapshot().scrollbackLineCount == controlSession.screenBuffer.snapshot().scrollbackLineCount)
+
+        // Appending mode: running another session pointing to the same raw file appends bytes verbatim.
+        let secondSession = POSIXPseudoTerminalSession(laneID: "lane-r35-append", rows: 24, columns: 80)
+        defer { secondSession.terminate() }
+        try secondSession.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: ["--relay-message", "second-pass", "--exit", "0"],
+            rawOutputFilePath: rawTranscriptURL.path
+        )
+        #expect(secondSession.waitForExit(timeout: 10.0) == true)
+        let secondMetrics = secondSession.metrics()
+        let combinedData = try Data(contentsOf: rawTranscriptURL)
+        #expect(combinedData.count == Int(metrics.bytesReadFromPTY + secondMetrics.bytesReadFromPTY))
+        #expect(combinedData.starts(with: rawData))
+    }
 }
