@@ -1,6 +1,7 @@
 import Foundation
 import RelayModels
 import RelayOrchestrator
+import RelayPTYCore
 import RelayPluginSDK
 import RelayWorkspaceStore
 import Testing
@@ -413,32 +414,6 @@ struct PluginSDKAndOrchestratorCPMTests {
         }
     }
 
-    // MARK: - 9. `MultiVendorDAGOrchestrator` Headless Vendor CLI Invocation Construction
-
-    @Test("MultiVendorDAGOrchestrator builds headless CLI argument vectors for Claude, Codex, Antigravity, and Vibe")
-    func dagOrchestratorVendorHeadlessInvocations() throws {
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("relay-invoc-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let db = try RelayProjectDatabase(bundleDirectoryURL: tempDir.appendingPathComponent("Invoc.relayide"))
-        let orchestrator = MultiVendorDAGOrchestrator(database: db)
-
-        for vendor in [AgentVendor.claudeCode, .codex, .antigravity, .mistralVibe] {
-            let task = RelayTaskNode(
-                id: "t-\(vendor.rawValue)",
-                title: "Run \(vendor.displayName)",
-                vendor: vendor,
-                laneID: "lane-\(vendor.rawValue)",
-                promptBrief: "Execute zero-copy verification"
-            )
-            let invocation = orchestrator.buildHeadlessInvocation(for: task, worktreePath: tempDir.path)
-            #expect(!invocation.executable.isEmpty)
-            #expect(invocation.arguments.joined(separator: " ").contains("Execute zero-copy verification"))
-        }
-    }
-
     // MARK: - 10. `CriticalPathMethodAnalyzer` Slack, Critical Path & Parallel Speedup
 
     @Test("CriticalPathMethodAnalyzer calculates ES/EF/LS/LF, slack, critical path, and parallel speedup factor")
@@ -743,5 +718,176 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(RelayPlanValidator.isValidLaneID("Upper") == false)
         #expect(RelayPlanValidator.isValidLaneID("under_score") == false)
         #expect(RelayPlanValidator.isValidLaneID(String(repeating: "z", count: 41)) == false)
+    }
+
+    // MARK: - 18. M1 `RelayLogSpendParser` Three Spend Cases (`usd`, `unpriced`, `no_record`, §11)
+
+    @Test("RelayLogSpendParser parses USD cost, comma-formatted unpriced tokens (never 0), and missing/unrecorded entries")
+    func relayLogSpendParserThreeSpendCasesAndByteOffset() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relay-spend-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // 1. USD cost (`cost $0.0123`)
+        let claudeMD = """
+        ## 01-claude: ok, 2s, 2026-11-16 01:10
+
+        - prompt: .relay/01-claude.prompt.md, log: .relay/01-claude.log
+        - claude: model claude-sonnet-4-5, cost $0.0123, session s1
+        - files changed:
+          - a.txt
+        - final message:
+
+        > Done.
+        > STATUS: success
+        """
+        let usd = RelayLogSpendParser.parseStepSpend(fromAppendedMarkdown: claudeMD)
+        #expect(usd.didAppendStepEntry == true)
+        #expect(usd.stepID == "01-claude")
+        #expect(usd.costUSD == 0.0123)
+        #expect(usd.costSource == "usd")
+
+        // 2. Tokens only (`tokens 12,345`) -> costUSD MUST be nil (never 0), costSource == "unpriced"
+        let agyMD = """
+        ## 02-agy: ok, 3s, 2026-11-16 01:11
+
+        - prompt: .relay/02-agy.prompt.md, log: .relay/02-agy.log
+        - agy: model ? (asked for the settings.json default), tokens 12,345
+        - files changed:
+          - b.txt
+        - final message:
+
+        > Done.
+        > STATUS: success
+        """
+        let unpriced = RelayLogSpendParser.parseStepSpend(fromAppendedMarkdown: agyMD)
+        #expect(unpriced.didAppendStepEntry == true)
+        #expect(unpriced.stepID == "02-agy")
+        #expect(unpriced.costUSD == nil)
+        #expect(unpriced.tokens == 12345)
+        #expect(unpriced.costSource == "unpriced")
+
+        // 3a. Missing LOG.md -> didAppendStepEntry == false, costUSD == nil, tokens == nil, costSource == "no_record"
+        let missingURL = tempDir.appendingPathComponent("nonexistent/LOG.md")
+        let missing = RelayLogSpendParser.parseStepSpend(fromLogFileAt: missingURL, initialByteOffset: 0)
+        #expect(missing.didAppendStepEntry == false)
+        #expect(missing.costUSD == nil)
+        #expect(missing.tokens == nil)
+        #expect(missing.costSource == "no_record")
+
+        // 3b. Pre-existing LOG.md with no new step appended (e.g. refused or killed by SIGTERM) -> ignores prior step via initialByteOffset
+        let logURL = tempDir.appendingPathComponent("LOG.md")
+        try Data(claudeMD.utf8).write(to: logURL)
+        let priorOffset = try Data(contentsOf: logURL).count
+        let noNewStep = RelayLogSpendParser.parseStepSpend(fromLogFileAt: logURL, initialByteOffset: priorOffset)
+        #expect(noNewStep.didAppendStepEntry == false)
+        #expect(noNewStep.costUSD == nil)
+        #expect(noNewStep.tokens == nil)
+        #expect(noNewStep.costSource == "no_record")
+
+        // 3c. Step logged after crash (`cost $?`) -> didAppendStepEntry == true, costUSD == nil, tokens == nil, costSource == "no_record"
+        let crashedStep = """
+
+        ## 02-claude: failed (exit 2: stub exited), 0s, 2026-11-16 01:12
+
+        - prompt: .relay/02-claude.prompt.md, log: .relay/02-claude.log
+        - claude: model ?, cost $?
+        - files changed:
+          - (none)
+        """
+        try Data((claudeMD + crashedStep).utf8).write(to: logURL)
+        let crashedReading = RelayLogSpendParser.parseStepSpend(fromLogFileAt: logURL, initialByteOffset: priorOffset)
+        #expect(crashedReading.didAppendStepEntry == true)
+        #expect(crashedReading.stepID == "02-claude")
+        #expect(crashedReading.costUSD == nil)
+        #expect(crashedReading.tokens == nil)
+        #expect(crashedReading.costSource == "no_record")
+    }
+
+    // MARK: - 19. M1 `RelayLaneOutcomeClassifier` Exit & Signal Status Rules (§7, R32, R43)
+
+    @Test("RelayLaneOutcomeClassifier maps exit 0/5/124/2/N and signals accurately without treating signal death as success")
+    func relayLaneOutcomeClassifierMapsExitsRefusalsAndSignals() {
+        // 0 -> succeeded
+        let ok = RelayLaneOutcomeClassifier.classify(
+            termination: .exited(code: 0),
+            ptyTranscript: "relay 01-claude: ok in 1s\r\n",
+            didAppendLogStep: true,
+            language: .en
+        )
+        #expect(ok.status == .succeeded)
+        #expect(ok.exitCode == 0)
+        #expect(ok.signal == nil)
+
+        // 5 -> partial
+        let partial = RelayLaneOutcomeClassifier.classify(
+            termination: .exited(code: 5),
+            ptyTranscript: "relay 01-claude: partial in 1s\r\n",
+            didAppendLogStep: true,
+            language: .en
+        )
+        #expect(partial.status == .partial)
+        #expect(partial.exitCode == 5)
+        #expect(partial.signal == nil)
+
+        // 124 -> timeout
+        let timedOut = RelayLaneOutcomeClassifier.classify(
+            termination: .exited(code: 124),
+            ptyTranscript: "relay 01-claude: timeout after 2s\r\n",
+            didAppendLogStep: true,
+            language: .en
+        )
+        #expect(timedOut.status == .timeout)
+        #expect(timedOut.exitCode == 124)
+        #expect(timedOut.signal == nil)
+
+        // 2 without LOG.md step -> refused, capturing last `relay: ` refusal line (ignoring `relay: warning:`)
+        let ptyRefusal = "relay: warning: minor note\r\nrelay: not sent: prompt looks like it contains a credential:\r\n  - OpenAI/Anthropic key (line 1)\r\n"
+        let refused = RelayLaneOutcomeClassifier.classify(
+            termination: .exited(code: 2),
+            ptyTranscript: ptyRefusal,
+            didAppendLogStep: false,
+            language: .en
+        )
+        #expect(refused.status == .refused)
+        #expect(refused.exitCode == 2)
+        #expect(refused.signal == nil)
+        #expect(refused.reason == "relay: not sent: prompt looks like it contains a credential:")
+
+        // 2 WITH LOG.md step (agent CLI itself exited 2, Row 9) -> failed (exit 2), NOT refused
+        let agentExit2 = RelayLaneOutcomeClassifier.classify(
+            termination: .exited(code: 2),
+            ptyTranscript: "relay 01-claude: failed (exit 2) in 0s; files changed: 0\r\n",
+            didAppendLogStep: true,
+            language: .en
+        )
+        #expect(agentExit2.status == .failed)
+        #expect(agentExit2.exitCode == 2)
+        #expect(agentExit2.signal == nil)
+
+        // Other non-zero (e.g. 3, 125) -> failed (exit N)
+        let exit125 = RelayLaneOutcomeClassifier.classify(
+            termination: .exited(code: 125),
+            ptyTranscript: "",
+            didAppendLogStep: true,
+            language: .zhHans
+        )
+        #expect(exit125.status == .failed)
+        #expect(exit125.exitCode == 125)
+        #expect(exit125.signal == nil)
+        #expect(exit125.reason?.contains("125") == true)
+
+        // Signal death (SIGKILL 9) -> failed (signal 9), exitCode MUST be nil
+        let sig9 = RelayLaneOutcomeClassifier.classify(
+            termination: .signaled(signal: 9),
+            ptyTranscript: "",
+            didAppendLogStep: false,
+            language: .en
+        )
+        #expect(sig9.status == .failed)
+        #expect(sig9.exitCode == nil)
+        #expect(sig9.signal == 9)
+        #expect(sig9.reason?.contains("9") == true)
     }
 }

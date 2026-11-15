@@ -1,0 +1,878 @@
+import Darwin
+import Foundation
+import RelayModels
+import RelayPTYCore
+import RelayWorkspaceStore
+import RelayWorktreeGit
+
+// MARK: - `.relay/LOG.md` Spend & Token Parser (`03-relayide.md` §11, matching `relay_util.py`)
+
+public struct RelayLaneSpendReading: Sendable, Equatable {
+    public let didAppendStepEntry: Bool
+    public let stepID: String?
+    public let costUSD: Double?
+    public let tokens: Int?
+    public let costSource: String
+
+    public init(
+        didAppendStepEntry: Bool,
+        stepID: String? = nil,
+        costUSD: Double? = nil,
+        tokens: Int? = nil,
+        costSource: String
+    ) {
+        self.didAppendStepEntry = didAppendStepEntry
+        self.stepID = stepID
+        self.costUSD = costUSD
+        self.tokens = tokens
+        self.costSource = costSource
+    }
+}
+
+public enum RelayLogSpendParser {
+    // Matches `relay_util.py` lines 121-125 verbatim:
+    // HEADER = re.compile(r"^## (\S+?): (.*), (?:(\d+)s|done in-session by the conductor), (\d{4}-\d\d-\d\d \d\d:\d\d)$")
+    // COST   = re.compile(r"\bcost \$([0-9]+(?:\.[0-9]+)?)")
+    // TOKENS = re.compile(r"\btokens ([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)")
+    private static let headerRegex = try! NSRegularExpression(
+        pattern: #"^## (\S+?): (.*), (?:(\d+)s|done in-session by the conductor), (\d{4}-\d\d-\d\d \d\d:\d\d)$"#
+    )
+    private static let costRegex = try! NSRegularExpression(
+        pattern: #"\bcost \$([0-9]+(?:\.[0-9]+)?)"#
+    )
+    private static let tokensRegex = try! NSRegularExpression(
+        pattern: #"\btokens ([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)"#
+    )
+
+    public static func currentFileByteLength(at logURL: URL) -> Int {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: logURL.path),
+              let size = attrs[.size] as? NSNumber else {
+            return 0
+        }
+        return max(0, size.intValue)
+    }
+
+    public static func parseStepSpend(
+        fromLogFileAt logURL: URL,
+        initialByteOffset: Int = 0
+    ) -> RelayLaneSpendReading {
+        guard let data = try? Data(contentsOf: logURL) else {
+            return RelayLaneSpendReading(didAppendStepEntry: false, costUSD: nil, tokens: nil, costSource: "no_record")
+        }
+        let clampedOffset = max(0, initialByteOffset)
+        guard data.count > clampedOffset else {
+            return RelayLaneSpendReading(didAppendStepEntry: false, costUSD: nil, tokens: nil, costSource: "no_record")
+        }
+        let slice = data.subdata(in: clampedOffset..<data.count)
+        let appendedMarkdown = String(decoding: slice, as: UTF8.self)
+        return parseStepSpend(fromAppendedMarkdown: appendedMarkdown)
+    }
+
+    public static func parseStepSpend(fromAppendedMarkdown markdown: String) -> RelayLaneSpendReading {
+        struct StepAcc {
+            let stepID: String
+            var costUSD: Double?
+            var tokens: Int?
+        }
+
+        let normalized = markdown
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        var steps: [StepAcc] = []
+        for rawLine in normalized.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine)
+            let nsLine = line as NSString
+            let fullRange = NSRange(location: 0, length: nsLine.length)
+
+            if let hMatch = headerRegex.firstMatch(in: line, options: [], range: fullRange),
+               hMatch.numberOfRanges >= 2 {
+                let idStr = nsLine.substring(with: hMatch.range(at: 1))
+                steps.append(StepAcc(stepID: idStr, costUSD: nil, tokens: nil))
+                continue
+            }
+
+            guard !steps.isEmpty, line.hasPrefix("- ") else { continue }
+            let lastIdx = steps.count - 1
+
+            if steps[lastIdx].costUSD == nil,
+               let cMatch = costRegex.firstMatch(in: line, options: [], range: fullRange),
+               cMatch.numberOfRanges >= 2 {
+                let rawNum = nsLine.substring(with: cMatch.range(at: 1))
+                if let parsed = Double(rawNum) {
+                    steps[lastIdx].costUSD = parsed
+                }
+            }
+
+            if steps[lastIdx].tokens == nil,
+               let tMatch = tokensRegex.firstMatch(in: line, options: [], range: fullRange),
+               tMatch.numberOfRanges >= 2 {
+                let rawTok = nsLine.substring(with: tMatch.range(at: 1))
+                    .replacingOccurrences(of: ",", with: "")
+                if let parsedTok = Int(rawTok) {
+                    steps[lastIdx].tokens = parsedTok
+                }
+            }
+        }
+
+        guard let last = steps.last else {
+            return RelayLaneSpendReading(
+                didAppendStepEntry: false,
+                stepID: nil,
+                costUSD: nil,
+                tokens: nil,
+                costSource: "no_record"
+            )
+        }
+
+        if let usd = last.costUSD {
+            return RelayLaneSpendReading(
+                didAppendStepEntry: true,
+                stepID: last.stepID,
+                costUSD: usd,
+                tokens: last.tokens,
+                costSource: "usd"
+            )
+        } else if let tok = last.tokens {
+            return RelayLaneSpendReading(
+                didAppendStepEntry: true,
+                stepID: last.stepID,
+                costUSD: nil,
+                tokens: tok,
+                costSource: "unpriced"
+            )
+        } else {
+            return RelayLaneSpendReading(
+                didAppendStepEntry: true,
+                stepID: last.stepID,
+                costUSD: nil,
+                tokens: nil,
+                costSource: "no_record"
+            )
+        }
+    }
+}
+
+// MARK: - `relay.sh` Exit / Signal Status Classifier (`03-relayide.md` §7, R32, R43)
+
+public struct RelayClassifiedLaneOutcome: Sendable, Equatable {
+    public let status: RelayRunStatus
+    public let exitCode: Int32?
+    public let signal: Int32?
+    public let reason: String?
+
+    public init(
+        status: RelayRunStatus,
+        exitCode: Int32?,
+        signal: Int32?,
+        reason: String?
+    ) {
+        self.status = status
+        self.exitCode = exitCode
+        self.signal = signal
+        self.reason = reason
+    }
+}
+
+public enum RelayLaneOutcomeClassifier {
+    private static let ansiCSIRegex = try! NSRegularExpression(pattern: "\u{1B}\\[[0-9;?]*[ -/]*[@-~]")
+
+    public static func extractLastRelayRefusalLine(from ptyTranscript: String) -> String? {
+        let normalized = ptyTranscript
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var lastRefusal: String?
+        for rawLine in normalized.split(separator: "\n", omittingEmptySubsequences: true) {
+            let lineStr = String(rawLine)
+            let range = NSRange(location: 0, length: (lineStr as NSString).length)
+            let cleaned = ansiCSIRegex.stringByReplacingMatches(in: lineStr, options: [], range: range, withTemplate: "")
+            guard cleaned.hasPrefix("relay: ") else { continue }
+            if cleaned.hasPrefix("relay: warning:") || cleaned.hasPrefix("relay: note:") {
+                continue
+            }
+            lastRefusal = cleaned
+        }
+        return lastRefusal
+    }
+
+    public static func classify(
+        termination: PTYExitReason,
+        ptyTranscript: String,
+        didAppendLogStep: Bool,
+        language: RelayLanguage
+    ) -> RelayClassifiedLaneOutcome {
+        switch termination {
+        case .exited(code: 0):
+            return RelayClassifiedLaneOutcome(status: .succeeded, exitCode: 0, signal: nil, reason: nil)
+        case .exited(code: 5):
+            return RelayClassifiedLaneOutcome(status: .partial, exitCode: 5, signal: nil, reason: nil)
+        case .exited(code: 124):
+            return RelayClassifiedLaneOutcome(status: .timeout, exitCode: 124, signal: nil, reason: nil)
+        case .exited(code: 2):
+            if didAppendLogStep {
+                let reason = RelayLocalizer.select(language, "failed (exit 2)", "失败（退出码 2）")
+                return RelayClassifiedLaneOutcome(status: .failed, exitCode: 2, signal: nil, reason: reason)
+            } else {
+                let refusal = extractLastRelayRefusalLine(from: ptyTranscript)
+                    ?? RelayLocalizer.select(language, "relay: refused (exit 2)", "relay: 被拒绝（退出码 2）")
+                return RelayClassifiedLaneOutcome(status: .refused, exitCode: 2, signal: nil, reason: refusal)
+            }
+        case .exited(code: let code):
+            let reason = RelayLocalizer.select(language, "failed (exit \(code))", "失败（退出码 \(code)）")
+            return RelayClassifiedLaneOutcome(status: .failed, exitCode: code, signal: nil, reason: reason)
+        case .signaled(signal: let sig):
+            let reason = RelayLocalizer.select(language, "failed (signal \(sig))", "失败（信号 \(sig)）")
+            return RelayClassifiedLaneOutcome(status: .failed, exitCode: nil, signal: sig, reason: reason)
+        case .waitFailed(errnoCode: let errCode):
+            let reason = RelayLocalizer.select(
+                language,
+                "failed (waitpid errno \(errCode))",
+                "失败（waitpid errno \(errCode)）"
+            )
+            return RelayClassifiedLaneOutcome(status: .failed, exitCode: nil, signal: nil, reason: reason)
+        }
+    }
+}
+
+// MARK: - Active Per-Lane Process Handle & Thread-Safe Registry (Prepared for Stage 05 Cancellation)
+
+/// Holds a live lane's `POSIXPseudoTerminalSession` and process group leader `pid` (`POSIX_SPAWN_SETSID` sets `pgid == pid`).
+/// Stage 05 uses `RelayActiveLaneRegistry` to iterate active lanes during `SIGINT`/`SIGTERM` cancellation and per-lane hard timeouts.
+public struct RelayActiveLaneProcess: @unchecked Sendable {
+    public let runID: String
+    public let laneID: String
+    public let agent: RelayPlanAgent
+    public let session: POSIXPseudoTerminalSession
+    public let pid: pid_t
+    public let worktreeURL: URL
+    public let branchName: String
+    public let ptyTranscriptURL: URL
+    public let startedAt: Date
+
+    public init(
+        runID: String,
+        laneID: String,
+        agent: RelayPlanAgent,
+        session: POSIXPseudoTerminalSession,
+        pid: pid_t,
+        worktreeURL: URL,
+        branchName: String,
+        ptyTranscriptURL: URL,
+        startedAt: Date
+    ) {
+        self.runID = runID
+        self.laneID = laneID
+        self.agent = agent
+        self.session = session
+        self.pid = pid
+        self.worktreeURL = worktreeURL
+        self.branchName = branchName
+        self.ptyTranscriptURL = ptyTranscriptURL
+        self.startedAt = startedAt
+    }
+}
+
+public final class RelayActiveLaneRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var activeByLaneID: [String: RelayActiveLaneProcess] = [:]
+    private var cancelledLaneIDs: Set<String> = []
+    private var killedByHardLimitLaneIDs: Set<String> = []
+    private var runCancellingFlag: Bool = false
+
+    public init() {}
+
+    public func register(_ process: RelayActiveLaneProcess) {
+        lock.lock()
+        activeByLaneID[process.laneID] = process
+        lock.unlock()
+    }
+
+    @discardableResult
+    public func unregister(laneID: String) -> RelayActiveLaneProcess? {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeByLaneID.removeValue(forKey: laneID)
+    }
+
+    public func activeProcess(forLaneID laneID: String) -> RelayActiveLaneProcess? {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeByLaneID[laneID]
+    }
+
+    public func snapshotActiveProcesses() -> [RelayActiveLaneProcess] {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeByLaneID.keys.sorted().compactMap { activeByLaneID[$0] }
+    }
+
+    public var isRunCancelling: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return runCancellingFlag
+    }
+
+    public func markRunCancelling() {
+        lock.lock()
+        runCancellingFlag = true
+        lock.unlock()
+    }
+
+    public func markLaneCancelled(_ laneID: String) {
+        lock.lock()
+        cancelledLaneIDs.insert(laneID)
+        lock.unlock()
+    }
+
+    public func isLaneCancelled(_ laneID: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelledLaneIDs.contains(laneID)
+    }
+
+    public func markLaneKilledByHardLimit(_ laneID: String) {
+        lock.lock()
+        killedByHardLimitLaneIDs.insert(laneID)
+        lock.unlock()
+    }
+
+    public func isLaneKilledByHardLimit(_ laneID: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return killedByHardLimitLaneIDs.contains(laneID)
+    }
+}
+
+// MARK: - Event-Driven Single-Predecessor DAG Scheduler (`03-relayide.md` §4–§7, §10–§11, §13; R36, R38, R46, R47, R49)
+
+public struct RelayDAGRunSchedulerResult: Sendable {
+    public let runRecord: RelayRunRecord
+    public let cliExitCode: Int32
+
+    public init(runRecord: RelayRunRecord, cliExitCode: Int32) {
+        self.runRecord = runRecord
+        self.cliExitCode = cliExitCode
+    }
+}
+
+/// Standalone M1 `run` scheduler. Intentionally never instantiates `MultiVendorDAGOrchestrator` (R49).
+public final class RelayDAGRunScheduler: @unchecked Sendable {
+    public let runID: String
+    public let validatedPlan: RelayValidatedRunPlan
+    public let relayScript: ResolvedRelayScript
+    public let runDirectoryURL: URL
+    public let projectBundleURL: URL
+    public let database: RelayProjectDatabase
+    public let gitEngine: GitWorktreePlumbingEngine
+    public let language: RelayLanguage
+    public let environment: [String: String]
+    public let activeLaneRegistry: RelayActiveLaneRegistry
+    public let emitStderrLine: @Sendable (String) -> Void
+
+    /// Enforces strictly at most one `git worktree add -b` running at a time (`03-relayide.md` §4).
+    private let worktreeSerialQueue = DispatchQueue(label: "io.github.zxu756.RelayIDE.run.worktree-serial")
+    private let stateLock = NSLock()
+    private var laneRecordsByID: [String: RelayRunLaneRecord] = [:]
+    private var firstFatalError: RelayIDEError?
+    private let childrenByPredecessor: [String: [RelayValidatedLaneSpec]]
+    private let rootLanes: [RelayValidatedLaneSpec]
+
+    public init(
+        runID: String,
+        validatedPlan: RelayValidatedRunPlan,
+        relayScript: ResolvedRelayScript,
+        runDirectoryURL: URL,
+        projectBundleURL: URL,
+        database: RelayProjectDatabase,
+        gitEngine: GitWorktreePlumbingEngine = GitWorktreePlumbingEngine(),
+        language: RelayLanguage,
+        environment: [String: String],
+        activeLaneRegistry: RelayActiveLaneRegistry = RelayActiveLaneRegistry(),
+        emitStderrLine: @escaping @Sendable (String) -> Void
+    ) {
+        self.runID = runID
+        self.validatedPlan = validatedPlan
+        self.relayScript = relayScript
+        self.runDirectoryURL = runDirectoryURL
+        self.projectBundleURL = projectBundleURL
+        self.database = database
+        self.gitEngine = gitEngine
+        self.language = language
+        self.environment = environment
+        self.activeLaneRegistry = activeLaneRegistry
+        self.emitStderrLine = emitStderrLine
+
+        var records: [String: RelayRunLaneRecord] = [:]
+        var children: [String: [RelayValidatedLaneSpec]] = [:]
+        var roots: [RelayValidatedLaneSpec] = []
+        for spec in validatedPlan.lanes {
+            records[spec.id] = RelayRunLaneRecord(
+                runID: runID,
+                laneID: spec.id,
+                ordinal: spec.ordinal,
+                agent: spec.agent,
+                promptPath: spec.resolvedPromptURL.path,
+                after: spec.after,
+                status: .pending
+            )
+            if let pred = spec.after.first {
+                children[pred, default: []].append(spec)
+            } else {
+                roots.append(spec)
+            }
+        }
+        self.laneRecordsByID = records
+        self.childrenByPredecessor = children
+        self.rootLanes = roots
+    }
+
+    public func run() async throws -> RelayDAGRunSchedulerResult {
+        let lanesDirURL = runDirectoryURL.appendingPathComponent("lanes", isDirectory: true)
+        try FileManager.default.createDirectory(at: lanesDirURL, withIntermediateDirectories: true)
+
+        await withTaskGroup(of: Void.self) { group in
+            for rootSpec in rootLanes {
+                let baseOID = validatedPlan.baseCommitOID
+                group.addTask {
+                    await self.executeSubtree(rootedAt: rootSpec, startCommitOID: baseOID)
+                }
+            }
+            await group.waitForAll()
+        }
+
+        if let fatal = currentFatalError() {
+            reconcileAbortedRunOnFatalError(fatal)
+            throw fatal
+        }
+
+        let orderedLanes = snapshotOrderedLaneRecords()
+        let overallStatus = Self.computeOverallRunStatus(from: orderedLanes)
+        let allSucceeded = orderedLanes.allSatisfy {
+            $0.status == .succeeded || $0.status == .succeededNoChanges
+        }
+        let cliExitCode: Int32 = allSucceeded ? 0 : 1
+
+        try database.updateRunStatus(
+            runID: runID,
+            status: overallStatus,
+            reason: nil,
+            finishedAt: Date()
+        )
+
+        guard let persisted = try database.fetchRun(runID: runID, reconcileWithLock: false) else {
+            throw RelayIDEError.relayEnvironmentFailure("Persisted run '\(runID)' missing after completion")
+        }
+        return RelayDAGRunSchedulerResult(runRecord: persisted, cliExitCode: cliExitCode)
+    }
+
+    public static func computeOverallRunStatus(from lanes: [RelayRunLaneRecord]) -> RelayRunStatus {
+        if lanes.allSatisfy({ $0.status == .succeeded || $0.status == .succeededNoChanges }) {
+            return .succeeded
+        }
+        if lanes.contains(where: { $0.status == .interrupted }) {
+            return .interrupted
+        }
+        if lanes.contains(where: { $0.status == .cancelled }) {
+            return .cancelled
+        }
+        let onlySuccessPartialOrSkipped = lanes.allSatisfy {
+            $0.status == .succeeded || $0.status == .succeededNoChanges || $0.status == .partial || $0.status == .skipped
+        }
+        if onlySuccessPartialOrSkipped && lanes.contains(where: { $0.status == .partial }) {
+            return .partial
+        }
+        return .failed
+    }
+
+    // MARK: - Recursive Event-Driven Subtree Execution (Zero Wave Barriers)
+
+    private func executeSubtree(rootedAt spec: RelayValidatedLaneSpec, startCommitOID: String) async {
+        guard currentFatalError() == nil, !activeLaneRegistry.isRunCancelling else {
+            return
+        }
+
+        let outcomeOpt = await executeSingleLane(spec: spec, startCommitOID: startCommitOID)
+        guard let outcome = outcomeOpt, currentFatalError() == nil else {
+            return
+        }
+
+        let directChildren = childrenByPredecessor[spec.id] ?? []
+        guard !directChildren.isEmpty else { return }
+
+        if outcome.record.status == .succeeded || outcome.record.status == .succeededNoChanges {
+            let nextBaseOID = outcome.headCommitOID
+            await withTaskGroup(of: Void.self) { childGroup in
+                for childSpec in directChildren {
+                    childGroup.addTask {
+                        await self.executeSubtree(rootedAt: childSpec, startCommitOID: nextBaseOID)
+                    }
+                }
+                await childGroup.waitForAll()
+            }
+        } else {
+            markSubtreeSkipped(
+                children: directChildren,
+                failedPredecessorID: spec.id,
+                failedPredecessorStatus: outcome.record.status
+            )
+        }
+    }
+
+    private struct SingleLaneCompletion {
+        let record: RelayRunLaneRecord
+        let headCommitOID: String
+    }
+
+    private func createLaneWorktreeSerially(
+        spec: RelayValidatedLaneSpec,
+        startCommitOID: String,
+        worktreesRootPath: String
+    ) async throws -> ManagedWorktreeLane {
+        try await withCheckedThrowingContinuation { continuation in
+            worktreeSerialQueue.async {
+                do {
+                    guard self.currentFatalError() == nil, !self.activeLaneRegistry.isRunCancelling else {
+                        throw RelayIDEError.relayRunInterrupted(runID: self.runID, reason: "cancelled before worktree creation")
+                    }
+                    let wt = try self.gitEngine.createLaneWorktree(
+                        repositoryPath: self.validatedPlan.resolvedRepoURL.path,
+                        runID: self.runID,
+                        laneID: spec.id,
+                        displayName: spec.id,
+                        vendor: spec.agent.agentVendor,
+                        baseRef: startCommitOID,
+                        worktreesRootDirectory: worktreesRootPath,
+                        environment: self.environment
+                    )
+                    continuation.resume(returning: wt)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func executeSingleLane(
+        spec: RelayValidatedLaneSpec,
+        startCommitOID: String
+    ) async -> SingleLaneCompletion? {
+        let worktreesRootURL = runDirectoryURL.appendingPathComponent("worktrees", isDirectory: true)
+        let ptyURL = runDirectoryURL
+            .appendingPathComponent("lanes", isDirectory: true)
+            .appendingPathComponent("\(spec.id).pty")
+
+        do {
+            // 1. Serially create worktree `<project>/runs/<runID>/worktrees/<lane>` and branch `relay/<runID>/<lane>` (`-b`, never `-B`)
+            let managedWT = try await createLaneWorktreeSerially(
+                spec: spec,
+                startCommitOID: startCommitOID,
+                worktreesRootPath: worktreesRootURL.path
+            )
+
+            let worktreeURL = URL(fileURLWithPath: managedWT.worktreePath).standardizedFileURL
+            let logURL = worktreeURL.appendingPathComponent(".relay/LOG.md")
+            let initialLogOffset = RelayLogSpendParser.currentFileByteLength(at: logURL)
+
+            // 2. Spawn `<relay.sh> <agent> <worktree-abs-path> <prompt-abs-path>` inside a real PTY
+            let session = POSIXPseudoTerminalSession(laneID: spec.id)
+            try session.spawn(
+                executablePath: relayScript.url.standardizedFileURL.path,
+                arguments: [
+                    spec.agent.rawValue,
+                    worktreeURL.path,
+                    spec.resolvedPromptURL.standardizedFileURL.path
+                ],
+                workingDirectory: worktreeURL.path,
+                baseEnvironment: environment,
+                rawOutputFilePath: ptyURL.path
+            )
+
+            let childPID = session.childProcessID
+            let startedAt = Date()
+            let activeProc = RelayActiveLaneProcess(
+                runID: runID,
+                laneID: spec.id,
+                agent: spec.agent,
+                session: session,
+                pid: childPID,
+                worktreeURL: worktreeURL,
+                branchName: managedWT.branchName,
+                ptyTranscriptURL: ptyURL,
+                startedAt: startedAt
+            )
+            activeLaneRegistry.register(activeProc)
+            defer { activeLaneRegistry.unregister(laneID: spec.id) }
+
+            var runningRecord = snapshotLaneRecord(for: spec.id)
+            runningRecord.status = .running
+            runningRecord.startedAt = startedAt
+            runningRecord.pid = childPID > 0 ? childPID : nil
+            runningRecord.branch = managedWT.branchName
+            runningRecord.worktreePath = worktreeURL.path
+            try persistLaneRecord(runningRecord)
+            emitStderrLine(formatStartLine(spec: spec, pid: childPID, branchName: managedWT.branchName))
+
+            // 3. Wait asynchronously for PTY exit & full transcript flush
+            let exitReason = await session.awaitExit()
+            let finishedAt = Date()
+
+            // If a sibling lane triggered a fatal internal RelayIDE error (125), unwind immediately without committing
+            if currentFatalError() != nil {
+                return nil
+            }
+
+            // 4. Read `.pty` transcript, parse `.relay/LOG.md` spend, and classify outcome
+            let ptyData = (try? Data(contentsOf: ptyURL)) ?? Data()
+            let ptyText = String(decoding: ptyData, as: UTF8.self)
+            let spend = RelayLogSpendParser.parseStepSpend(
+                fromLogFileAt: logURL,
+                initialByteOffset: initialLogOffset
+            )
+            let classified = RelayLaneOutcomeClassifier.classify(
+                termination: exitReason,
+                ptyTranscript: ptyText,
+                didAppendLogStep: spend.didAppendStepEntry,
+                language: language
+            )
+
+            var finalStatus = classified.status
+            var commitOID: String? = nil
+            var uncommittedFiles: [String]? = nil
+            var headCommitForSuccessors = startCommitOID
+
+            // 5. Commit only on `.succeeded` and `.partial` (`--no-verify`, `:(exclude).relay`); otherwise record dirty files
+            if classified.status == .succeeded || classified.status == .partial {
+                let commitResult = try gitEngine.commitLaneChangesIfNeeded(
+                    worktreePath: worktreeURL.path,
+                    startCommitOID: startCommitOID,
+                    runID: runID,
+                    laneID: spec.id,
+                    agent: spec.agent,
+                    status: classified.status,
+                    environment: environment
+                )
+                switch commitResult {
+                case .committed(let oid):
+                    commitOID = oid
+                    headCommitForSuccessors = oid
+                case .preservedExistingCommits(let headOID):
+                    commitOID = headOID
+                    headCommitForSuccessors = headOID
+                case .noChanges(let headOID):
+                    commitOID = nil
+                    headCommitForSuccessors = headOID
+                    if classified.status == .succeeded {
+                        finalStatus = .succeededNoChanges
+                    }
+                }
+            } else {
+                uncommittedFiles = try gitEngine.listUncommittedFilesExcludingRelay(
+                    in: worktreeURL.path,
+                    environment: environment
+                )
+            }
+
+            var completedRecord = runningRecord
+            completedRecord.status = finalStatus
+            completedRecord.exitCode = classified.exitCode
+            completedRecord.signal = classified.signal
+            completedRecord.reason = classified.reason
+            completedRecord.finishedAt = finishedAt
+            completedRecord.costUSD = spend.costUSD
+            completedRecord.tokens = spend.tokens
+            completedRecord.costSource = spend.costSource
+            completedRecord.commitOID = commitOID
+            completedRecord.uncommittedFiles = uncommittedFiles
+
+            try persistLaneRecord(completedRecord)
+            emitStderrLine(formatFinishLine(record: completedRecord, startedAt: startedAt, finishedAt: finishedAt))
+            return SingleLaneCompletion(record: completedRecord, headCommitOID: headCommitForSuccessors)
+        } catch let relayErr as RelayIDEError {
+            recordFatalInternalError(relayErr)
+            return nil
+        } catch {
+            recordFatalInternalError(.relayEnvironmentFailure(error.localizedDescription))
+            return nil
+        }
+    }
+
+    private func markSubtreeSkipped(
+        children: [RelayValidatedLaneSpec],
+        failedPredecessorID: String,
+        failedPredecessorStatus: RelayRunStatus
+    ) {
+        let isZh = language.isChinese
+        for childSpec in children {
+            guard currentFatalError() == nil else { return }
+            let skipReason = isZh
+                ? "已跳过：前置通道 '\(failedPredecessorID)' 状态为\(failedPredecessorStatus.localizedLabel(in: .zhHans))（\(failedPredecessorStatus.rawValue)）"
+                : "skipped: predecessor '\(failedPredecessorID)' finished with status \(failedPredecessorStatus.rawValue)"
+
+            var skippedRecord = snapshotLaneRecord(for: childSpec.id)
+            skippedRecord.status = .skipped
+            skippedRecord.exitCode = nil
+            skippedRecord.signal = nil
+            skippedRecord.reason = skipReason
+            skippedRecord.startedAt = nil
+            skippedRecord.finishedAt = Date()
+            skippedRecord.pid = nil
+            skippedRecord.costUSD = nil
+            skippedRecord.tokens = nil
+            skippedRecord.costSource = nil
+            skippedRecord.branch = nil
+            skippedRecord.commitOID = nil
+            skippedRecord.worktreePath = nil
+            skippedRecord.uncommittedFiles = nil
+
+            do {
+                try persistLaneRecord(skippedRecord)
+            } catch let relayErr as RelayIDEError {
+                recordFatalInternalError(relayErr)
+                return
+            } catch {
+                recordFatalInternalError(.relayEnvironmentFailure(error.localizedDescription))
+                return
+            }
+
+            let skipLine = isZh
+                ? "[relay] 通道 \(childSpec.id) (\(childSpec.agent.rawValue)) 已跳过 · \(skipReason)"
+                : "[relay] lane \(childSpec.id) (\(childSpec.agent.rawValue)) skipped · \(skipReason)"
+            emitStderrLine(skipLine)
+
+            if let grandChildren = childrenByPredecessor[childSpec.id], !grandChildren.isEmpty {
+                markSubtreeSkipped(
+                    children: grandChildren,
+                    failedPredecessorID: childSpec.id,
+                    failedPredecessorStatus: .skipped
+                )
+            }
+        }
+    }
+
+    // MARK: - Internal Fatal Error & State Helpers
+
+    private func snapshotLaneRecord(for laneID: String) -> RelayRunLaneRecord {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return laneRecordsByID[laneID]!
+    }
+
+    private func snapshotOrderedLaneRecords() -> [RelayRunLaneRecord] {
+        stateLock.lock()
+        let values = Array(laneRecordsByID.values)
+        stateLock.unlock()
+        return values.sorted { $0.ordinal < $1.ordinal }
+    }
+
+    private func persistLaneRecord(_ record: RelayRunLaneRecord) throws {
+        try database.updateRunLane(record)
+        stateLock.lock()
+        laneRecordsByID[record.laneID] = record
+        stateLock.unlock()
+    }
+
+    private func currentFatalError() -> RelayIDEError? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return firstFatalError
+    }
+
+    private func recordFatalInternalError(_ error: RelayIDEError) {
+        var shouldAbortSiblings = false
+        stateLock.lock()
+        if firstFatalError == nil {
+            firstFatalError = error
+            shouldAbortSiblings = true
+        }
+        stateLock.unlock()
+
+        guard shouldAbortSiblings else { return }
+        activeLaneRegistry.markRunCancelling()
+        for active in activeLaneRegistry.snapshotActiveProcesses() {
+            active.session.terminate(signal: SIGINT)
+        }
+    }
+
+    private func reconcileAbortedRunOnFatalError(_ error: RelayIDEError) {
+        let isZh = language.isChinese
+        let fatalReason = isZh
+            ? "中断（RelayIDE 出错）：\(error.localizedDescription(in: language))"
+            : "interrupted (RelayIDE error): \(error.localizedDescription(in: language))"
+        let now = Date()
+
+        for record in snapshotOrderedLaneRecords() where !record.status.isTerminal {
+            var updated = record
+            if updated.status == .running {
+                updated.status = .interrupted
+                updated.reason = fatalReason
+                updated.finishedAt = now
+                if let wt = updated.worktreePath {
+                    updated.uncommittedFiles = try? gitEngine.listUncommittedFilesExcludingRelay(
+                        in: wt,
+                        environment: environment
+                    )
+                }
+            } else {
+                updated.status = .skipped
+                updated.reason = fatalReason
+                updated.finishedAt = now
+            }
+            try? database.updateRunLane(updated)
+            stateLock.lock()
+            laneRecordsByID[updated.laneID] = updated
+            stateLock.unlock()
+        }
+
+        try? database.updateRunStatus(
+            runID: runID,
+            status: .interrupted,
+            reason: fatalReason,
+            finishedAt: now
+        )
+    }
+
+    // MARK: - Localized Stderr Progress Formatting (`03-relayide.md` §13)
+
+    private func formatStartLine(spec: RelayValidatedLaneSpec, pid: pid_t, branchName: String) -> String {
+        if language.isChinese {
+            return "[relay] 通道 \(spec.id) (\(spec.agent.rawValue)) 已启动 · PID \(pid) · 分支 \(branchName)"
+        } else {
+            return "[relay] lane \(spec.id) (\(spec.agent.rawValue)) started · pid \(pid) · branch \(branchName)"
+        }
+    }
+
+    private func formatFinishLine(record: RelayRunLaneRecord, startedAt: Date, finishedAt: Date) -> String {
+        let isZh = language.isChinese
+        let statusLabel = record.status.localizedLabel(in: language)
+        let exitPart: String
+        if let sig = record.signal {
+            exitPart = isZh ? "信号 \(sig)" : "signal \(sig)"
+        } else if let code = record.exitCode {
+            exitPart = isZh ? "退出码 \(code)" : "exit \(code)"
+        } else {
+            exitPart = "-"
+        }
+        let durationStr = String(format: "%.2fs", max(0, finishedAt.timeIntervalSince(startedAt)))
+        let costPart: String
+        if let usd = record.costUSD {
+            costPart = isZh ? String(format: "花费 $%.4f", usd) : String(format: "cost $%.4f", usd)
+        } else if record.costSource == "unpriced", let tok = record.tokens {
+            costPart = isZh ? "花费 未计价（\(tok) tokens）" : "cost unpriced (\(tok) tokens)"
+        } else {
+            costPart = isZh ? "花费 无记录" : "cost no record"
+        }
+        let commitPart: String
+        if let oid = record.commitOID {
+            commitPart = isZh ? "提交 \(String(oid.prefix(12)))" : "commit \(String(oid.prefix(12)))"
+        } else {
+            commitPart = isZh ? "提交 无" : "commit none"
+        }
+        let reasonSuffix = record.reason.map { " · \($0)" } ?? ""
+
+        if isZh {
+            return "[relay] 通道 \(record.laneID) (\(record.agent.rawValue)) 已结束 · 状态 \(statusLabel) · \(exitPart) · 耗时 \(durationStr) · \(costPart) · \(commitPart)\(reasonSuffix)"
+        } else {
+            return "[relay] lane \(record.laneID) (\(record.agent.rawValue)) finished · status \(statusLabel) · \(exitPart) · time \(durationStr) · \(costPart) · \(commitPart)\(reasonSuffix)"
+        }
+    }
+}

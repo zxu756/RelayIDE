@@ -17,19 +17,23 @@ public struct RelayCLIExecutionResult: Sendable, Equatable {
     /// True when `stdout` is file content that must reach the caller byte for byte (no newline appended).
     /// `semantic-merge` sets it: an extra trailing newline would itself be a change nobody made.
     public let stdoutIsVerbatim: Bool
+    /// True when `stderr` lines were already streamed live to `FileHandle.standardError` during execution.
+    public let stderrAlreadyStreamed: Bool
 
     public init(
         stdout: String = "",
         stderr: String = "",
         exitCode: Int32 = 0,
         error: RelayIDEError? = nil,
-        stdoutIsVerbatim: Bool = false
+        stdoutIsVerbatim: Bool = false,
+        stderrAlreadyStreamed: Bool = false
     ) {
         self.stdout = stdout
         self.stderr = stderr
         self.exitCode = exitCode
         self.error = error
         self.stdoutIsVerbatim = stdoutIsVerbatim
+        self.stderrAlreadyStreamed = stderrAlreadyStreamed
     }
 }
 
@@ -113,7 +117,16 @@ public struct RelayCLIRunner: Sendable {
         "--version"
     ]
 
-    public init() {}
+    public let runIDProvider: (@Sendable () -> String)?
+    public let activeLaneRegistry: RelayActiveLaneRegistry?
+
+    public init(
+        runIDProvider: (@Sendable () -> String)? = nil,
+        activeLaneRegistry: RelayActiveLaneRegistry? = nil
+    ) {
+        self.runIDProvider = runIDProvider
+        self.activeLaneRegistry = activeLaneRegistry
+    }
 
     /// Classifies `CommandLine.arguments.dropFirst()` without touching AppKit/SwiftUI (`03-relayide.md` §1, R39).
     /// When the first effective argument does not start with `-`, is not a `.relayproj` path, and is not a known
@@ -193,7 +206,8 @@ public struct RelayCLIRunner: Sendable {
 
     public func executeCommand(
         arguments: [String],
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        onLiveStderrLine: (@Sendable (String) -> Void)? = nil
     ) async -> RelayCLIExecutionResult {
         let lang = Self.resolveCLILanguage(arguments: arguments, environment: environment)
         let normalizedArgs = Self.stripLanguageArguments(from: arguments)
@@ -244,31 +258,41 @@ public struct RelayCLIRunner: Sendable {
 
             case "run":
                 let parsedRun = try parseRunCLIArguments(rest, language: lang)
-                let outcome = await RelayRunExecutor().execute(
+                let outcome = await RelayRunExecutor(
+                    runIDProvider: runIDProvider,
+                    activeLaneRegistry: activeLaneRegistry
+                ).execute(
                     planPath: parsedRun.planPath,
                     projectBundlePath: parsedRun.projectPath,
                     explicitRelayShPath: parsedRun.relayShPath,
                     language: lang,
-                    environment: environment
+                    environment: environment,
+                    onStderrLine: onLiveStderrLine
                 )
-                if outcome.exitCode == 0, let record = outcome.runRecord {
+                if (outcome.exitCode == 0 || outcome.exitCode == 1), let record = outcome.runRecord {
                     let json = try RelayRunJSONCodec.encode(record)
                     let stderrText = outcome.stderrNotes.joined(separator: "\n")
                     return RelayCLIExecutionResult(
                         stdout: json,
                         stderr: stderrText,
-                        exitCode: 0
+                        exitCode: outcome.exitCode,
+                        stderrAlreadyStreamed: onLiveStderrLine != nil
                     )
                 } else {
                     var errLines = outcome.stderrNotes
                     if let err = outcome.error {
-                        errLines.append(err.localizedDescription(in: lang))
+                        let rendered = err.localizedDescription(in: lang)
+                        if !rendered.isEmpty {
+                            errLines.append(rendered)
+                            onLiveStderrLine?(rendered)
+                        }
                     }
                     return RelayCLIExecutionResult(
                         stdout: "",
                         stderr: errLines.filter { !$0.isEmpty }.joined(separator: "\n"),
                         exitCode: outcome.exitCode,
-                        error: outcome.error
+                        error: outcome.error,
+                        stderrAlreadyStreamed: onLiveStderrLine != nil
                     )
                 }
 

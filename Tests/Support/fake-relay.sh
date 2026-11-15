@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Deterministic test double for unit tests of RelayPTYCore and downstream runners.
-# Never invokes any external coding agent CLI.
+# Deterministic test double for unit tests of RelayPTYCore and RelayIDE `run` scheduling.
+# Never invokes the real relay.sh or any external coding agent CLI.
 #
-# Supported options (CLI flags override FAKE_RELAY_* environment variables):
+# Mode 1 — Flag / env-driven PTY session tests (CLI flags override FAKE_RELAY_* env vars):
 #   --exit <code>             Exit with integer status <code> (default: 0)
 #   --sleep <seconds>         Sleep <seconds> before exiting or self-signaling
 #   --kill-self <signal>      Terminate this process via <signal> (e.g. KILL, TERM, INT, 9, 15, 2)
@@ -13,11 +13,418 @@
 #   --child-pid-file <path>   Spawn a SIGHUP-ignoring child in the same process group and record its PID
 #   --slow-term <seconds>     Catch SIGTERM, sleep <seconds>, then re-raise SIGTERM with SIG_DFL
 #
-# Positional arguments (such as <agent> <workdir> <prompt-file>) are accepted so callers that
-# invoke a relay-shaped command line can drive behaviour through FAKE_RELAY_* variables too.
+# Mode 2 — Relay step invocation `<fake-relay.sh> <agent> <workdir> <prompt-file>` (when invoked with
+# 3 positional arguments, no `--*` flags, and no `FAKE_RELAY_*` overrides):
+#   Reads deterministic `STUB ...` and `FAKE_RELAY ...` directives from `<prompt-file>`, operates
+#   inside `<workdir>`, writes a realistic `<workdir>/.relay/LOG.md` step entry (unless suppressed),
+#   records `$STUB_TRACE_DIR/<lane>.trace` timestamps when `STUB_TRACE_DIR` is set, and exits with
+#   `relay.sh`-compatible exit codes (0, 2, 5, 124, N, or signal death).
 
 set -u
 
+die_by_signal() {
+    local sig="$1"
+    exec /usr/bin/perl -MPOSIX -e '
+        my $s = shift;
+        $s =~ s/^SIG//i;
+        my $empty = POSIX::SigSet->new();
+        POSIX::sigprocmask(SIG_SETMASK, $empty);
+        $SIG{INT} = $SIG{TERM} = $SIG{HUP} = $SIG{QUIT} = $SIG{ALRM} = "DEFAULT";
+        kill $s, $$;
+        sleep 1;
+    ' "${sig}"
+}
+
+now_epoch_ts() {
+    /usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f\n", time()' < /dev/null
+}
+
+HAS_FAKE_ENV=0
+if [[ -n "${FAKE_RELAY_EXIT:-}" || -n "${FAKE_RELAY_SLEEP:-}" || -n "${FAKE_RELAY_KILL_SELF:-}" || \
+      -n "${FAKE_RELAY_MESSAGE:-}" || -n "${FAKE_RELAY_STDOUT:-}" || -n "${FAKE_RELAY_REPEAT_BYTES:-}" || \
+      -n "${FAKE_RELAY_READY_FILE:-}" || -n "${FAKE_RELAY_CHILD_PID_FILE:-}" || -n "${FAKE_RELAY_SLOW_TERM:-}" ]]; then
+    HAS_FAKE_ENV=1
+fi
+
+HAS_DASH_FLAG=0
+for arg in "$@"; do
+    case "$arg" in
+        -*)
+            HAS_DASH_FLAG=1
+            break
+            ;;
+    esac
+done
+
+# Enter Mode 2 when invoked as `<fake-relay.sh> <agent> <workdir> <prompt-file>` without Mode 1 overrides.
+if [[ $HAS_FAKE_ENV -eq 0 && $HAS_DASH_FLAG -eq 0 && $# -eq 3 && -f "$3" ]]; then
+    AGENT="$1"
+    WORKDIR="$2"
+    PROMPT_FILE="$3"
+
+    if [[ -n "${RELAY_WORKER:-}" ]]; then
+        printf 'relay: refusing to start a relay step from inside a relay worker (RELAY_WORKER=%s)\n' "${RELAY_WORKER}" >&2
+        exit 2
+    fi
+
+    case "$AGENT" in
+        claude|codex|agy|vibe) ;;
+        *)
+            printf 'relay: unknown agent: %s\n' "$AGENT" >&2
+            exit 2
+            ;;
+    esac
+
+    if [[ ! -d "$WORKDIR" ]]; then
+        printf 'relay: workdir does not exist: %s\n' "$WORKDIR" >&2
+        exit 2
+    fi
+
+    cd "$WORKDIR" || exit 2
+    WORKDIR="$(pwd -P)"
+    LANE_NAME="${STUB_LANE:-$(basename "$WORKDIR")}"
+    START_TS="$(now_epoch_ts)"
+    PROMPT_TEXT="$(cat "$PROMPT_FILE"; printf x)"
+    PROMPT_TEXT="${PROMPT_TEXT%x}"
+
+    # Pre-scan for `STUB LANE <id>` outside WRITE_BLOCK regions.
+    PRE_IN_BLOCK=0
+    PRE_EOF=""
+    while IFS= read -r -u 3 pre_raw || [[ -n "$pre_raw" ]]; do
+        pre_line="${pre_raw%$'\r'}"
+        if [[ $PRE_IN_BLOCK -eq 1 ]]; then
+            [[ "$pre_line" == "$PRE_EOF" ]] && PRE_IN_BLOCK=0
+            continue
+        fi
+        case "$pre_line" in
+            "STUB "*|"STUB	"*)
+                pre_rest="${pre_line#STUB}"
+                pre_rest="${pre_rest#"${pre_rest%%[![:space:]]*}"}"
+                pre_cmd="$(printf '%s' "${pre_rest%%[[:space:]]*}" | tr '[:lower:]' '[:upper:]')"
+                pre_arg="${pre_rest#"${pre_rest%%[[:space:]]*}"}"
+                pre_arg="${pre_arg#"${pre_arg%%[![:space:]]*}"}"
+                if [[ "$pre_cmd" == "WRITE_BLOCK" && -n "$pre_arg" ]]; then
+                    pre_p="${pre_arg%%[[:space:]]*}"
+                    pre_rem="${pre_arg#"$pre_p"}"
+                    pre_rem="${pre_rem#"${pre_rem%%[![:space:]]*}"}"
+                    pre_eof="${pre_rem%%[[:space:]]*}"
+                    [[ -n "$pre_eof" ]] && { PRE_IN_BLOCK=1; PRE_EOF="$pre_eof"; }
+                elif [[ "$pre_cmd" == "LANE" && -n "$pre_arg" ]]; then
+                    LANE_NAME="${pre_arg%%[[:space:]]*}"
+                fi
+                ;;
+        esac
+    done 3<<< "$PROMPT_TEXT"
+
+    START_TRACE_WRITTEN=0
+    ensure_start_trace() {
+        if [[ $START_TRACE_WRITTEN -eq 0 ]]; then
+            START_TRACE_WRITTEN=1
+            if [[ -n "${STUB_TRACE_DIR:-}" ]]; then
+                mkdir -p "$STUB_TRACE_DIR"
+                printf 'start %s %s %s %s\n' "$START_TS" "$$" "$AGENT" "$LANE_NAME" >> "${STUB_TRACE_DIR}/${LANE_NAME}.trace"
+            fi
+        fi
+    }
+
+    write_end_trace() {
+        local rc="$1"
+        if [[ -n "${STUB_TRACE_DIR:-}" ]]; then
+            local end_ts
+            end_ts="$(now_epoch_ts)"
+            printf 'end %s %s %s %s %s\n' "$end_ts" "$$" "$AGENT" "$LANE_NAME" "$rc" >> "${STUB_TRACE_DIR}/${LANE_NAME}.trace"
+        fi
+    }
+
+    resolve_path() {
+        local raw_p="$1"
+        case "$raw_p" in
+            /*) printf '%s' "$raw_p" ;;
+            *)  printf '%s/%s' "$WORKDIR" "$raw_p" ;;
+        esac
+    }
+
+    EXPLICIT_COST=""
+    EXPLICIT_TOKENS=""
+    NO_COST=0
+    NO_LOG=0
+    WORKER_STATUS="success"
+    MESSAGE_BODY=""
+    EXIT_CODE=0
+    IN_BLOCK=0
+    BLOCK_TARGET=""
+    BLOCK_EOF=""
+    BLOCK_BUF=""
+    TRACE_TAG="stub-trace-dir=${STUB_TRACE_DIR:-untagged}"
+
+    while IFS= read -r -u 3 raw_line || [[ -n "$raw_line" ]]; do
+        line="${raw_line%$'\r'}"
+        if [[ $IN_BLOCK -eq 1 ]]; then
+            if [[ "$line" == "$BLOCK_EOF" ]]; then
+                mkdir -p "$(dirname "$BLOCK_TARGET")"
+                printf '%s' "$BLOCK_BUF" > "$BLOCK_TARGET"
+                IN_BLOCK=0
+                BLOCK_TARGET=""
+                BLOCK_EOF=""
+                BLOCK_BUF=""
+            else
+                BLOCK_BUF="${BLOCK_BUF}${line}"$'\n'
+            fi
+            continue
+        fi
+
+        PREFIX_KIND=""
+        case "$line" in
+            "FAKE_RELAY "*|"FAKE_RELAY	"*)
+                PREFIX_KIND="FAKE_RELAY"
+                rest="${line#FAKE_RELAY}"
+                ;;
+            STUB|"STUB "*|"STUB	"*)
+                PREFIX_KIND="STUB"
+                rest="${line#STUB}"
+                ;;
+            *)
+                continue
+                ;;
+        esac
+
+        rest="${rest#"${rest%%[![:space:]]*}"}"
+        [[ -z "$rest" ]] && continue
+        cmd="${rest%%[[:space:]]*}"
+        arg_str="${rest#"$cmd"}"
+        cmd_upper="$(printf '%s' "$cmd" | tr '[:lower:]' '[:upper:]')"
+
+        case "$cmd_upper" in
+            LANE)
+                ;;
+            REFUSE)
+                msg="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                printf 'relay: %s\n' "${msg:-not sent: refused by fake-relay}" >&2
+                exit 2
+                ;;
+            WARNING)
+                msg="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                printf 'relay: warning: %s\n' "$msg" >&2
+                ;;
+            NO_LOG)
+                NO_LOG=1
+                ;;
+            NO_COST)
+                NO_COST=1
+                ;;
+            TIMEOUT)
+                ensure_start_trace
+                EXIT_CODE=124
+                NO_COST=1
+                break
+                ;;
+            KILL_SELF|KILL_RELAY|SIGNAL)
+                ensure_start_trace
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                sig_tok="${trimmed%%[[:space:]]*}"
+                [[ -n "$sig_tok" ]] && die_by_signal "$sig_tok"
+                ;;
+            READY|TOUCH)
+                ensure_start_trace
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                if [[ -n "$trimmed" ]]; then
+                    ready_p="$(resolve_path "${trimmed%%[[:space:]]*}")"
+                    mkdir -p "$(dirname "$ready_p")"
+                    : > "$ready_p"
+                fi
+                ;;
+            WRITE)
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                [[ -z "$trimmed" ]] && continue
+                if [[ "$trimmed" == *[[:space:]]* ]]; then
+                    rel_p="${trimmed%%[[:space:]]*}"
+                    rem="${trimmed#"$rel_p"}"
+                    rem="${rem# }"
+                    target_p="$(resolve_path "$rel_p")"
+                    mkdir -p "$(dirname "$target_p")"
+                    printf '%s\n' "$rem" > "$target_p"
+                else
+                    target_p="$(resolve_path "$trimmed")"
+                    mkdir -p "$(dirname "$target_p")"
+                    : > "$target_p"
+                fi
+                ;;
+            APPEND)
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                [[ -z "$trimmed" ]] && continue
+                if [[ "$trimmed" == *[[:space:]]* ]]; then
+                    rel_p="${trimmed%%[[:space:]]*}"
+                    rem="${trimmed#"$rel_p"}"
+                    rem="${rem# }"
+                    target_p="$(resolve_path "$rel_p")"
+                    mkdir -p "$(dirname "$target_p")"
+                    printf '%s\n' "$rem" >> "$target_p"
+                else
+                    target_p="$(resolve_path "$trimmed")"
+                    mkdir -p "$(dirname "$target_p")"
+                    printf '\n' >> "$target_p"
+                fi
+                ;;
+            WRITE_BLOCK)
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                [[ -z "$trimmed" ]] && continue
+                rel_p="${trimmed%%[[:space:]]*}"
+                rem="${trimmed#"$rel_p"}"
+                rem="${rem#"${rem%%[![:space:]]*}"}"
+                eof_tok="${rem%%[[:space:]]*}"
+                if [[ -n "$rel_p" && -n "$eof_tok" ]]; then
+                    IN_BLOCK=1
+                    BLOCK_TARGET="$(resolve_path "$rel_p")"
+                    BLOCK_EOF="$eof_tok"
+                    BLOCK_BUF=""
+                fi
+                ;;
+            SLEEP)
+                ensure_start_trace
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                sleep_sec="${trimmed%%[[:space:]]*}"
+                if [[ -n "$sleep_sec" ]]; then
+                    /usr/bin/perl -e '
+                        my ($sec, $tag) = @ARGV;
+                        select(undef, undef, undef, $sec + 0);
+                    ' "$sleep_sec" "$TRACE_TAG" < /dev/null
+                fi
+                ;;
+            WAIT|WAIT_FILE|BARRIER)
+                ensure_start_trace
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                [[ -z "$trimmed" ]] && continue
+                wait_raw="${trimmed%%[[:space:]]*}"
+                rem="${trimmed#"$wait_raw"}"
+                rem="${rem#"${rem%%[![:space:]]*}"}"
+                wait_timeout="${rem%%[[:space:]]*}"
+                wait_target="$(resolve_path "$wait_raw")"
+                /usr/bin/perl -MTime::HiRes=time -e '
+                    my ($p, $t, $tag) = @ARGV;
+                    my $limit = ($t ne "" ? $t + 0 : 0);
+                    my $t0 = time();
+                    while (! -e $p) {
+                        if ($limit > 0 && (time() - $t0) >= $limit) { exit 124; }
+                        select(undef, undef, undef, 0.02);
+                    }
+                ' "$wait_target" "${wait_timeout:-0}" "$TRACE_TAG" < /dev/null
+                wait_rc=$?
+                if [[ $wait_rc -ne 0 ]]; then
+                    EXIT_CODE="$wait_rc"
+                    NO_COST=1
+                    break
+                fi
+                ;;
+            GIT_COMMIT)
+                msg="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                /usr/bin/git add -A -- . >/dev/null 2>&1 || true
+                /usr/bin/git reset -q HEAD -- .relay >/dev/null 2>&1 || true
+                /usr/bin/git -c user.useConfigOnly=true -c commit.gpgsign=false commit --no-verify -m "${msg:-agent commit}" >/dev/null 2>&1 || true
+                ;;
+            COST)
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                [[ -n "$trimmed" ]] && EXPLICIT_COST="${trimmed%%[[:space:]]*}"
+                ;;
+            TOKENS)
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                if [[ -n "$trimmed" ]]; then
+                    tok_raw="${trimmed%%[[:space:]]*}"
+                    EXPLICIT_TOKENS="${tok_raw//,/}"
+                fi
+                ;;
+            STATUS|STATUS:)
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                trimmed="${trimmed#:}"
+                trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+                if [[ -n "$trimmed" ]]; then
+                    WORKER_STATUS="$(printf '%s' "${trimmed%%[[:space:]]*}" | tr '[:upper:]' '[:lower:]')"
+                fi
+                ;;
+            MESSAGE)
+                MESSAGE_BODY="${arg_str# }"
+                ;;
+            EXIT)
+                trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                EXIT_CODE="${trimmed%%[[:space:]]*}"
+                EXIT_CODE="${EXIT_CODE:-0}"
+                if [[ "$EXIT_CODE" != "0" ]]; then
+                    NO_COST=1
+                    break
+                fi
+                ;;
+        esac
+    done 3<<< "$PROMPT_TEXT"
+
+    ensure_start_trace
+
+    RC="$EXIT_CODE"
+    if [[ "$RC" -eq 0 ]]; then
+        if [[ "$WORKER_STATUS" == "partial" ]]; then
+            RC=5
+        elif [[ "$WORKER_STATUS" == "failed" ]]; then
+            RC=1
+        fi
+    fi
+
+    case "$RC" in
+        0) STATUS_TEXT="ok" ;;
+        5) STATUS_TEXT="partial (the worker reported STATUS: partial)" ;;
+        124) STATUS_TEXT="timeout after 2s" ;;
+        *) STATUS_TEXT="failed (exit $RC)" ;;
+    esac
+
+    if [[ $NO_COST -eq 1 ]]; then
+        META_LINE="${AGENT}: model ?, cost \$?"
+    elif [[ -n "$EXPLICIT_COST" ]]; then
+        FMT_COST="$(awk -v c="$EXPLICIT_COST" 'BEGIN { printf "%.4f", c }')"
+        META_LINE="${AGENT}: model fake-${AGENT}, cost \$${FMT_COST}"
+    elif [[ -n "$EXPLICIT_TOKENS" ]]; then
+        FMT_TOK="$(/usr/bin/python3 -I -c 'import sys; print("{:,}".format(int(sys.argv[1])))' "$EXPLICIT_TOKENS")"
+        META_LINE="${AGENT}: model fake-${AGENT}, tokens ${FMT_TOK}"
+    elif [[ "$AGENT" == "claude" || "$AGENT" == "vibe" ]]; then
+        META_LINE="${AGENT}: model fake-${AGENT}, cost \$0.0010"
+    else
+        META_LINE="${AGENT}: model fake-${AGENT}, tokens 1,200"
+    fi
+
+    FINAL_BODY="${MESSAGE_BODY:-Fake relay (${AGENT}) completed lane ${LANE_NAME}.}"
+    STEP_TS="$(date -u '+%Y-%m-%d %H:%M')"
+
+    if /usr/bin/git -C "${WORKDIR}" rev-parse --git-dir >/dev/null 2>&1; then
+        EX_PATH="$(/usr/bin/git -C "${WORKDIR}" rev-parse --git-path info/exclude 2>/dev/null || true)"
+        if [[ -n "${EX_PATH}" ]]; then
+            case "${EX_PATH}" in /*) ;; *) EX_PATH="${WORKDIR}/${EX_PATH}" ;; esac
+            mkdir -p "$(dirname "${EX_PATH}")"
+            grep -qx '.relay/' "${EX_PATH}" 2>/dev/null || echo '.relay/' >> "${EX_PATH}"
+        fi
+    fi
+
+    if [[ $NO_LOG -eq 0 ]]; then
+        mkdir -p "${WORKDIR}/.relay"
+        {
+            printf '## 01-%s: %s, 1s, %s\n\n' "$AGENT" "$STATUS_TEXT" "$STEP_TS"
+            printf -- '- prompt: .relay/01-%s.prompt.md, log: .relay/01-%s.log\n' "$AGENT" "$AGENT"
+            printf -- '- %s\n' "$META_LINE"
+            printf -- '- files changed:\n  - (recorded)\n'
+            printf -- '- final message:\n\n'
+            if [[ "$RC" -eq 0 || "$RC" -eq 5 ]]; then
+                printf '> %s\n> STATUS: %s\n\n' "$FINAL_BODY" "$WORKER_STATUS"
+            else
+                printf '> (empty; see the log)\n\n'
+            fi
+        } >> "${WORKDIR}/.relay/LOG.md"
+    fi
+
+    printf 'relay 01-%s: %s in 1s; files changed: 0; %s\n' "$AGENT" "$STATUS_TEXT" "$META_LINE"
+    if [[ "$RC" -eq 0 || "$RC" -eq 5 ]]; then
+        printf '%s\nSTATUS: %s\n' "$FINAL_BODY" "$WORKER_STATUS"
+    fi
+
+    write_end_trace "$RC"
+    exit "$RC"
+fi
+
+# Mode 1 — Flag / env-driven PTY session behavior
 EXIT_CODE="${FAKE_RELAY_EXIT:-0}"
 SLEEP_SECONDS="${FAKE_RELAY_SLEEP:-0}"
 KILL_SELF_SIGNAL="${FAKE_RELAY_KILL_SELF:-}"
@@ -75,19 +482,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-die_by_signal() {
-    local sig="$1"
-    exec /usr/bin/perl -MPOSIX -e '
-        my $s = shift;
-        $s =~ s/^SIG//i;
-        my $empty = POSIX::SigSet->new();
-        POSIX::sigprocmask(SIG_SETMASK, $empty);
-        $SIG{INT} = $SIG{TERM} = $SIG{HUP} = $SIG{QUIT} = $SIG{ALRM} = "DEFAULT";
-        kill $s, $$;
-        sleep 1;
-    ' "${sig}"
-}
 
 if [[ -n "${SLOW_TERM_SECONDS}" ]]; then
     trap 'sleep "'"${SLOW_TERM_SECONDS}"'"; die_by_signal TERM' TERM

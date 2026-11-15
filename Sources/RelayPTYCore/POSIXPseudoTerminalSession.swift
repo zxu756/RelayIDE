@@ -216,6 +216,7 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
         executablePath: String,
         arguments: [String] = [],
         workingDirectory: String? = nil,
+        baseEnvironment: [String: String]? = nil,
         environmentOverrides: [String: String] = [:],
         unsetEnvironmentKeys: Set<String> = [],
         rawOutputFilePath: String? = nil
@@ -327,7 +328,7 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
         )
 
         // Build argv & envp
-        var mergedEnv = ProcessInfo.processInfo.environment
+        var mergedEnv = baseEnvironment ?? ProcessInfo.processInfo.environment
         for k in unsetEnvironmentKeys {
             mergedEnv.removeValue(forKey: k)
         }
@@ -485,11 +486,29 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
         }
     }
 
+    /// Current spawned child PID (`-1` if not yet spawned).
+    public var childProcessID: pid_t {
+        state.condition.lock()
+        defer { state.condition.unlock() }
+        return state.childPID
+    }
+
     /// Waits until the spawned child has exited, been reaped, and flushed its final PTY output.
     /// Returns `true` if the session is no longer running, or `false` if `timeout` elapsed first.
     @discardableResult
     public func waitForExit(timeout: TimeInterval? = nil) -> Bool {
         state.waitForExit(timeout: timeout)
+    }
+
+    /// Non-blocking async wait that resolves once the child has exited, been reaped, and closed its `.pty` transcript.
+    public func awaitExit() async -> PTYExitReason {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = self.state.waitForExit(timeout: nil)
+                let reason = self.metrics().exitReason ?? .waitFailed(errnoCode: ECHILD)
+                continuation.resume(returning: reason)
+            }
+        }
     }
 
     /// Signals the child's entire process group (`-pid`) and blocks until the process group has genuinely exited

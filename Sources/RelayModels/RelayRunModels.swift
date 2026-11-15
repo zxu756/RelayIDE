@@ -97,6 +97,35 @@ public struct RelayPlanLaneSpec: Sendable, Codable, Hashable, Equatable {
         self.after = after
     }
 
+    /// Enforces `^[a-z0-9][a-z0-9-]{0,39}$` strictly over ASCII bytes and reserves `"integration"` (`03-relayide.md` §2, R36).
+    public static func isValidLaneID(_ id: String) -> Bool {
+        guard id != "integration" else { return false }
+        let bytes = Array(id.utf8)
+        guard !bytes.isEmpty, bytes.count <= 40 else { return false }
+        let isLowercaseOrDigit: (UInt8) -> Bool = { b in
+            (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39)
+        }
+        guard isLowercaseOrDigit(bytes[0]) else { return false }
+        for b in bytes.dropFirst() {
+            guard isLowercaseOrDigit(b) || b == 0x2D else { return false }
+        }
+        return true
+    }
+
+    /// Enforces safe single-segment ASCII run identifier (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, no slashes or `..`).
+    public static func isValidRunID(_ runID: String) -> Bool {
+        let bytes = Array(runID.utf8)
+        guard !bytes.isEmpty, bytes.count <= 64 else { return false }
+        let isAlphaNum: (UInt8) -> Bool = { b in
+            (b >= 0x61 && b <= 0x7A) || (b >= 0x41 && b <= 0x5A) || (b >= 0x30 && b <= 0x39)
+        }
+        guard isAlphaNum(bytes[0]) else { return false }
+        for b in bytes.dropFirst() {
+            guard isAlphaNum(b) || b == 0x2D || b == 0x5F else { return false }
+        }
+        return true
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(String.self, forKey: .id)

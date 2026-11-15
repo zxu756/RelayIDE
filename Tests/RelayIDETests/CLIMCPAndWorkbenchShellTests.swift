@@ -2259,9 +2259,9 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(wtCount == 1)
     }
 
-    @Test("RelayCLIRunner run resolves relative repo/prompt paths and RELAYIDE_RELAY_SH, copies plan.json, records base OID & relay.sh SHA-256, marks run interrupted ('调度尚未实现'), releases lock, and exits 125")
-    func cliRunEndOfStage03PersistsPendingRunAndMarksInterruptedExit125() async throws {
-        let fx = try makeIsolatedRunFixture(prefix: "relay-run-stage03")
+    @Test("RelayCLIRunner run resolves relative repo/prompt paths and RELAYIDE_RELAY_SH, executes predecessor-chained lanes, commits changes, releases lock, and matches status --run JSON")
+    func cliRunResolvesRelativePathsExecutesChainedLanesAndMatchesStatusRun() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-stage04-chain")
         defer { try? FileManager.default.removeItem(at: fx.rootURL) }
 
         // Place plan.json in <root>/plans/plan.json using relative repo "../target-repo" and relative prompts
@@ -2295,10 +2295,8 @@ struct CLIMCPAndWorkbenchShellTests {
             environment: env
         )
 
-        // Stage 03 contract: never exit 0, exit 125 with empty stdout and explanatory stderr
-        #expect(runRes.exitCode == 125)
-        #expect(runRes.stdout.isEmpty)
-        #expect(runRes.stderr.contains("调度尚未实现"))
+        #expect(runRes.exitCode == 0)
+        #expect(!runRes.stdout.isEmpty)
         #expect(runRes.stderr.contains("M2"))
 
         // Lock must have been cleanly released before returning!
@@ -2306,18 +2304,9 @@ struct CLIMCPAndWorkbenchShellTests {
         let probeLock = try RelayProjectRunLock.acquire(bundleDirectoryURL: fx.projectURL, runID: "20261116-050000-0001")
         probeLock.release()
 
-        // Inspect persisted run via `status --project <工程> --runs` and `status --project <工程> --run <id>`
-        let runsRes = await cli.executeCommand(
-            arguments: ["status", "--project", fx.projectURL.path, "--runs"],
-            environment: fx.baseEnvironment
-        )
-        #expect(runsRes.exitCode == 0)
-        let runs = try RelayRunJSONCodec.decode([RelayRunRecord].self, from: runsRes.stdout)
-        let recorded = try #require(runs.first)
-        #expect(runs.count == 1)
+        let recorded = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: runRes.stdout)
         #expect(recorded.runID.range(of: #"^\d{8}-\d{6}-[0-9a-f]{4}$"#, options: .regularExpression) != nil)
-        #expect(recorded.status == .interrupted)
-        #expect(recorded.reason == "调度尚未实现")
+        #expect(recorded.status == .succeeded)
         #expect(recorded.baseRef == "main")
         #expect(recorded.baseCommitOID == fx.baseCommitOID)
         #expect(recorded.verifyCommand == "swift test")
@@ -2332,22 +2321,26 @@ struct CLIMCPAndWorkbenchShellTests {
         let copiedData = try Data(contentsOf: expectedCopyURL)
         #expect(copiedData == Data(rawPlanText.utf8))
 
-        // Lanes must be pending (never succeeded, never running), with resolved prompt paths and preserved order
+        // Both lanes succeeded and `docs` started from `api`'s committed branch head!
         #expect(recorded.lanes.count == 2)
         #expect(recorded.lanes.map(\.laneID) == ["api", "docs"])
-        #expect(recorded.lanes.allSatisfy { $0.status == .pending })
-        #expect(recorded.lanes.allSatisfy { $0.status != .succeeded })
-        #expect(recorded.lanes[1].after == ["api"])
-        #expect(recorded.lanes[0].promptPath.hasSuffix("/plans/prompts/api.md"))
+        #expect(recorded.lanes.allSatisfy { $0.status == .succeeded })
+        let apiCommit = try #require(recorded.lanes[0].commitOID)
+        let docsCommit = try #require(recorded.lanes[1].commitOID)
+        let docsParent = try runTool("/usr/bin/git", ["rev-parse", "\(docsCommit)^"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(docsParent == apiCommit)
+        let docsChangedFromBase = try runTool("/usr/bin/git", ["diff", "--name-only", "\(fx.baseCommitOID)..\(docsCommit)"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+            .stdout.split(whereSeparator: \.isNewline).map(String.init)
+        #expect(docsChangedFromBase == ["api.txt", "docs.txt"])
 
-        // Single-run status query matches
+        // Single-run status query JSON must equal `run` stdout byte-for-byte!
         let singleStatusRes = await cli.executeCommand(
             arguments: ["status", "--project", fx.projectURL.path, "--run", recorded.runID],
             environment: fx.baseEnvironment
         )
         #expect(singleStatusRes.exitCode == 0)
-        let singleDecoded = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: singleStatusRes.stdout)
-        #expect(singleDecoded == recorded)
+        #expect(singleStatusRes.stdout == runRes.stdout)
 
         // Also verify default $HOME discovery order (--relay-sh > RELAYIDE_RELAY_SH > $HOME/...) in isolated HOME
         let homeScriptsDir = [".agents", "skills", "agent-relay", "scripts"].reduce(fx.homeURL) { partial, component in
@@ -2373,10 +2366,562 @@ struct CLIMCPAndWorkbenchShellTests {
             language: .en
         )
         #expect(resolvedFromFlag.url.standardizedFileURL == fx.fakeRelayShURL.standardizedFileURL)
+    }
 
-        // Also verify zero worktrees or relay/* branches were created in Stage 03
-        let wtList = try runTool("/usr/bin/git", ["worktree", "list", "--porcelain"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
-        let wtCount = wtList.stdout.components(separatedBy: "\n").filter { $0.hasPrefix("worktree ") }.count
-        #expect(wtCount == 1)
+    // MARK: - 28. M1 Stage 04 Scheduling, Commits, Spend, Statuses, Branch Collision & Live Status Tests
+
+    private func parseTraceInterval(at traceURL: URL) throws -> (start: Double, end: Double) {
+        let text = try String(contentsOf: traceURL, encoding: .utf8)
+        var startVal: Double?
+        var endVal: Double?
+        for line in text.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: " ").map(String.init)
+            if parts.count >= 2, parts[0] == "start", startVal == nil {
+                startVal = Double(parts[1])
+            } else if parts.count >= 2, parts[0] == "end" {
+                endVal = Double(parts[1])
+            }
+        }
+        guard let s = startVal, let e = endVal else {
+            throw RelayIDEError.relayEnvironmentFailure("Incomplete trace file at \(traceURL.path): \(text)")
+        }
+        return (s, e)
+    }
+
+    @Test("RelayCLIRunner run executes two independent lanes in parallel (overlapping trace intervals), creates isolated worktrees & branches with 1 commit each, keeps main clean, supports concurrent status --run, and outputs identical JSON")
+    func cliRunParallelIndependentLanesWorktreesCommitsAndLiveStatus() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-parallel")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let traceDir = fx.rootURL.appendingPathComponent("traces", isDirectory: true)
+        let gatesDir = fx.rootURL.appendingPathComponent("gates", isDirectory: true)
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: traceDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: gatesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+
+        let readyA = gatesDir.appendingPathComponent("ready-a")
+        let readyB = gatesDir.appendingPathComponent("ready-b")
+        let releaseGate = gatesDir.appendingPathComponent("release")
+
+        try """
+        STUB WRITE a.txt alpha-payload
+        STUB READY \(readyA.path)
+        STUB WAIT \(releaseGate.path) 30
+        STUB COST 0.0125
+        """.write(to: plansDir.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+
+        try """
+        STUB WRITE b.txt beta-payload
+        STUB READY \(readyB.path)
+        STUB WAIT \(releaseGate.path) 30
+        STUB TOKENS 2400
+        """.write(to: plansDir.appendingPathComponent("b.md"), atomically: true, encoding: .utf8)
+
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "a", "agent": "claude", "prompt": "a.md", "after": []},
+            {"id": "b", "agent": "codex", "prompt": "b.md", "after": []}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        var env = fx.baseEnvironment
+        env["STUB_TRACE_DIR"] = traceDir.path
+
+        final class BoolBox: @unchecked Sendable { var done = false }
+        let taskState = BoolBox()
+        let cli = RelayCLIRunner()
+        let runTask = Task {
+            let r = await cli.executeCommand(
+                arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: env
+            )
+            taskState.done = true
+            return r
+        }
+
+        // Wait until BOTH lanes reach the barrier simultaneously (or `runTask` exits early on error)
+        let deadline = Date().addingTimeInterval(25.0)
+        while (!FileManager.default.fileExists(atPath: readyA.path) || !FileManager.default.fileExists(atPath: readyB.path)) && !taskState.done && Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: readyA.path))
+        #expect(FileManager.default.fileExists(atPath: readyB.path))
+
+        // While both lanes are running, query `status --runs` and `status --run` concurrently!
+        let liveRunsRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--runs"],
+            environment: fx.baseEnvironment
+        )
+        #expect(liveRunsRes.exitCode == 0)
+        let liveRuns = try RelayRunJSONCodec.decode([RelayRunRecord].self, from: liveRunsRes.stdout)
+        let liveRun = try #require(liveRuns.first)
+        #expect(liveRun.status == .running)
+        #expect(liveRun.lanes.allSatisfy { $0.status == .running })
+        for lane in liveRun.lanes {
+            let pid = try #require(lane.pid)
+            #expect(Darwin.kill(pid, 0) == 0)
+        }
+
+        // Release barrier and await `run` completion
+        try Data().write(to: releaseGate)
+        let runRes = await runTask.value
+        #expect(runRes.exitCode == 0)
+
+        // Verify interval overlap from trace files: startA < endB && startB < endA
+        let intervalA = try parseTraceInterval(at: traceDir.appendingPathComponent("a.trace"))
+        let intervalB = try parseTraceInterval(at: traceDir.appendingPathComponent("b.trace"))
+        #expect(intervalA.start < intervalB.end && intervalB.start < intervalA.end)
+
+        // Decode JSON and verify byte-for-byte match with `status --project <工程> --run <runID>`
+        let finished = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: runRes.stdout)
+        let statusRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", finished.runID],
+            environment: fx.baseEnvironment
+        )
+        #expect(statusRes.exitCode == 0)
+        #expect(statusRes.stdout == runRes.stdout)
+
+        // Verify main repo cleanliness and unchanged `main` commit OID
+        let mainStatus = try runTool("/usr/bin/git", ["status", "--porcelain"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        #expect(mainStatus.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        let mainHead = try runTool("/usr/bin/git", ["rev-parse", "main"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(mainHead == fx.baseCommitOID)
+
+        // Verify branches, 1 commit ahead of base each, exact single file diff, zero .relay/ paths, repo identity, and .pty files
+        let runDir = fx.projectURL.appendingPathComponent("runs/\(finished.runID)", isDirectory: true)
+        for (laneID, expectedFile) in [("a", "a.txt"), ("b", "b.txt")] {
+            let branch = "relay/\(finished.runID)/\(laneID)"
+            let ahead = try runTool("/usr/bin/git", ["rev-list", "--count", "\(fx.baseCommitOID)..\(branch)"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+                .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            #expect(ahead == "1")
+            let diffFiles = try runTool("/usr/bin/git", ["diff", "--name-only", "\(fx.baseCommitOID)..\(branch)"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+                .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            #expect(diffFiles == expectedFile)
+            #expect(!diffFiles.contains(".relay"))
+            let author = try runTool("/usr/bin/git", ["log", "-1", "--format=%an <%ae>", branch], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+                .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            #expect(author == "Relay Unit Tester <unit-tester@relay.invalid>")
+
+            let ptyPath = runDir.appendingPathComponent("lanes/\(laneID).pty").path
+            let wtPath = runDir.appendingPathComponent("worktrees/\(laneID)").path
+            #expect(FileManager.default.fileExists(atPath: ptyPath))
+            #expect(FileManager.default.fileExists(atPath: wtPath))
+            let ptyText = try String(contentsOfFile: ptyPath, encoding: .utf8)
+            #expect(ptyText.contains("relay 01-"))
+        }
+
+        // Stderr must have start & finish lines for both lanes
+        let stderrLines = runRes.stderr.split(whereSeparator: \.isNewline).map(String.init)
+        #expect(stderrLines.count >= 4)
+        #expect(stderrLines.contains { $0.contains("lane a") && $0.contains("started") })
+        #expect(stderrLines.contains { $0.contains("lane a") && $0.contains("finished") })
+        #expect(stderrLines.contains { $0.contains("lane b") && $0.contains("started") })
+        #expect(stderrLines.contains { $0.contains("lane b") && $0.contains("finished") })
+    }
+
+    @Test("RelayCLIRunner run schedules without wave barriers: fast predecessor launches its successor while slow independent lane is still blocked")
+    func cliRunEventDrivenNoWaveBarrierScheduling() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-nowave")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let gatesDir = fx.rootURL.appendingPathComponent("gates", isDirectory: true)
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: gatesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+
+        let slowReady = gatesDir.appendingPathComponent("slow-ready")
+        let slowRelease = gatesDir.appendingPathComponent("slow-release")
+        let fastChildDone = gatesDir.appendingPathComponent("fast-child-done")
+
+        try "STUB WRITE fast.txt 1\n".write(to: plansDir.appendingPathComponent("fast.md"), atomically: true, encoding: .utf8)
+        try """
+        STUB WRITE fast-child.txt 2
+        STUB READY \(fastChildDone.path)
+        """.write(to: plansDir.appendingPathComponent("fast-child.md"), atomically: true, encoding: .utf8)
+        try """
+        STUB READY \(slowReady.path)
+        STUB WAIT \(slowRelease.path) 30
+        STUB WRITE slow.txt 3
+        """.write(to: plansDir.appendingPathComponent("slow.md"), atomically: true, encoding: .utf8)
+
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "fast", "agent": "claude", "prompt": "fast.md", "after": []},
+            {"id": "slow", "agent": "codex", "prompt": "slow.md", "after": []},
+            {"id": "fast-child", "agent": "agy", "prompt": "fast-child.md", "after": ["fast"]}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        final class BoolBox: @unchecked Sendable { var done = false }
+        let taskState = BoolBox()
+        let cli = RelayCLIRunner()
+        let runTask = Task {
+            let r = await cli.executeCommand(
+                arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+                environment: fx.baseEnvironment
+            )
+            taskState.done = true
+            return r
+        }
+
+        // `fast-child` MUST run and create `fastChildDone` BEFORE we ever release `slowRelease`!
+        // A wave-based scheduler would deadlock here waiting for Wave 0 (`slow`) before starting Wave 1 (`fast-child`)!
+        let deadline = Date().addingTimeInterval(20.0)
+        while (!FileManager.default.fileExists(atPath: fastChildDone.path) || !FileManager.default.fileExists(atPath: slowReady.path)) && !taskState.done && Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: fastChildDone.path))
+        #expect(FileManager.default.fileExists(atPath: slowReady.path))
+
+        try Data().write(to: slowRelease)
+        let res = await runTask.value
+        #expect(res.exitCode == 0)
+        let record = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res.stdout)
+        #expect(record.lanes.allSatisfy { $0.status == .succeeded })
+    }
+
+    @Test("RelayCLIRunner run skips successors on predecessor failure or partial completion without creating worktrees or branches, commits partial changes, records dirty files on failed lanes, and exits 1 with matching JSON")
+    func cliRunPredecessorFailureAndPartialSkipsSuccessorsAndMatchesStatusJSON() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-fail-partial")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let traceDir = fx.rootURL.appendingPathComponent("traces", isDirectory: true)
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: traceDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+
+        // A fails (exit 3) after writing dirty-a.txt -> B (`after: ["a"]`) and C (`after: ["b"]`) skipped!
+        // P finishes `partial` (exit 5) after writing part.txt -> Q (`after: ["p"]`) skipped, while P HAS a commit!
+        // D is independent and succeeds!
+        try """
+        STUB WRITE dirty-a.txt uncommitted-payload
+        STUB EXIT 3
+        """.write(to: plansDir.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        try "STUB WRITE should-not-run-b.txt x\n".write(to: plansDir.appendingPathComponent("b.md"), atomically: true, encoding: .utf8)
+        try "STUB WRITE should-not-run-c.txt x\n".write(to: plansDir.appendingPathComponent("c.md"), atomically: true, encoding: .utf8)
+        try """
+        STUB WRITE part.txt partial-work
+        STUB STATUS partial
+        """.write(to: plansDir.appendingPathComponent("p.md"), atomically: true, encoding: .utf8)
+        try "STUB WRITE should-not-run-q.txt x\n".write(to: plansDir.appendingPathComponent("q.md"), atomically: true, encoding: .utf8)
+        try "STUB WRITE ok-d.txt clean-work\n".write(to: plansDir.appendingPathComponent("d.md"), atomically: true, encoding: .utf8)
+
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "a", "agent": "claude", "prompt": "a.md", "after": []},
+            {"id": "b", "agent": "codex", "prompt": "b.md", "after": ["a"]},
+            {"id": "c", "agent": "vibe", "prompt": "c.md", "after": ["b"]},
+            {"id": "p", "agent": "claude", "prompt": "p.md", "after": []},
+            {"id": "q", "agent": "agy", "prompt": "q.md", "after": ["p"]},
+            {"id": "d", "agent": "codex", "prompt": "d.md", "after": []}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        var env = fx.baseEnvironment
+        env["STUB_TRACE_DIR"] = traceDir.path
+
+        let cli = RelayCLIRunner()
+        let runRes = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+            environment: env
+        )
+
+        #expect(runRes.exitCode == 1)
+        #expect(!runRes.stdout.isEmpty)
+
+        // `run` stdout JSON must equal `status --run` JSON byte-for-byte even when exitCode == 1!
+        let record = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: runRes.stdout)
+        let statusRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", record.runID],
+            environment: fx.baseEnvironment
+        )
+        #expect(statusRes.exitCode == 0)
+        #expect(statusRes.stdout == runRes.stdout)
+
+        let byID = Dictionary(uniqueKeysWithValues: record.lanes.map { ($0.laneID, $0) })
+
+        // Check `a`: failed, exitCode 3, no commit, uncommittedFiles == ["dirty-a.txt"]
+        let laneA = try #require(byID["a"])
+        #expect(laneA.status == .failed)
+        #expect(laneA.exitCode == 3)
+        #expect(laneA.commitOID == nil)
+        #expect(laneA.uncommittedFiles == ["dirty-a.txt"])
+        let aheadA = try runTool("/usr/bin/git", ["rev-list", "--count", "\(fx.baseCommitOID)..relay/\(record.runID)/a"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(aheadA == "0")
+
+        // Check `b`, `c`, `q`: skipped, reason names predecessor & status, NO worktree, NO branch, NO trace!
+        let runDir = fx.projectURL.appendingPathComponent("runs/\(record.runID)", isDirectory: true)
+        for (skippedID, predID, predStatusWord) in [("b", "a", "failed"), ("c", "b", "skipped"), ("q", "p", "partial")] {
+            let skipped = try #require(byID[skippedID])
+            #expect(skipped.status == .skipped)
+            #expect(skipped.reason?.contains(predID) == true)
+            #expect(skipped.reason?.contains(predStatusWord) == true)
+            #expect(skipped.worktreePath == nil)
+            #expect(skipped.branch == nil)
+            #expect(skipped.commitOID == nil)
+            #expect(!FileManager.default.fileExists(atPath: runDir.appendingPathComponent("worktrees/\(skippedID)").path))
+            #expect(!FileManager.default.fileExists(atPath: traceDir.appendingPathComponent("\(skippedID).trace").path))
+            let refCheck = try runTool("/usr/bin/git", ["show-ref", "--verify", "--quiet", "refs/heads/relay/\(record.runID)/\(skippedID)"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+            #expect(refCheck.exitCode != 0)
+        }
+
+        // Check `p`: partial, exitCode 5, HAS commit on `relay/<runID>/p` with subject containing `: partial`!
+        let laneP = try #require(byID["p"])
+        #expect(laneP.status == .partial)
+        #expect(laneP.exitCode == 5)
+        let pCommit = try #require(laneP.commitOID)
+        let pSubject = try runTool("/usr/bin/git", ["log", "-1", "--format=%s", pCommit], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(pSubject == "relay \(record.runID) p (claude): partial")
+
+        // Check `d`: succeeded
+        let laneD = try #require(byID["d"])
+        #expect(laneD.status == .succeeded)
+        #expect(laneD.commitOID != nil)
+    }
+
+    @Test("RelayCLIRunner run classifies refused (relay: reason), agent exit 2 (failed), timeout (124), and signal death (signal 9, exitCode null, never succeeded)")
+    func cliRunRefusedAgentExit2TimeoutAndSignalDeathClassification() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-outcomes")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+
+        try """
+        FAKE_RELAY WARNING minor note
+        FAKE_RELAY REFUSE not sent: prompt looks like it contains a credential:
+        """.write(to: plansDir.appendingPathComponent("refuse.md"), atomically: true, encoding: .utf8)
+
+        try "STUB EXIT 2\n".write(to: plansDir.appendingPathComponent("agent-exit2.md"), atomically: true, encoding: .utf8)
+        try "FAKE_RELAY TIMEOUT\n".write(to: plansDir.appendingPathComponent("timeout.md"), atomically: true, encoding: .utf8)
+        try "FAKE_RELAY KILL_SELF 9\n".write(to: plansDir.appendingPathComponent("sig9.md"), atomically: true, encoding: .utf8)
+
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "refuse-lane", "agent": "claude", "prompt": "refuse.md", "after": []},
+            {"id": "exit2-lane", "agent": "codex", "prompt": "agent-exit2.md", "after": []},
+            {"id": "timeout-lane", "agent": "agy", "prompt": "timeout.md", "after": []},
+            {"id": "sig9-lane", "agent": "vibe", "prompt": "sig9.md", "after": []}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        let cli = RelayCLIRunner()
+        let res = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+            environment: fx.baseEnvironment
+        )
+
+        // Note: `run` itself MUST return 1 (completed with failed/refused/timeout lanes), NEVER 2 or 125!
+        #expect(res.exitCode == 1)
+        let record = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res.stdout)
+        let byID = Dictionary(uniqueKeysWithValues: record.lanes.map { ($0.laneID, $0) })
+
+        let refused = try #require(byID["refuse-lane"])
+        #expect(refused.status == .refused)
+        #expect(refused.exitCode == 2)
+        #expect(refused.reason == "relay: not sent: prompt looks like it contains a credential:")
+        #expect(refused.commitOID == nil)
+
+        let exit2 = try #require(byID["exit2-lane"])
+        #expect(exit2.status == .failed)
+        #expect(exit2.exitCode == 2)
+        #expect(exit2.commitOID == nil)
+
+        let timedOut = try #require(byID["timeout-lane"])
+        #expect(timedOut.status == .timeout)
+        #expect(timedOut.exitCode == 124)
+        #expect(timedOut.commitOID == nil)
+
+        let sig9 = try #require(byID["sig9-lane"])
+        #expect(sig9.status == .failed)
+        #expect(sig9.status != .succeeded)
+        #expect(sig9.signal == 9)
+        #expect(sig9.exitCode == nil)
+        #expect(sig9.commitOID == nil)
+
+        // Verify raw JSON explicitly encodes `"exitCode" : null` on signal-killed lane
+        let parsedJSON = try JSONSerialization.jsonObject(with: Data(res.stdout.utf8)) as? [String: Any]
+        let rawLanes = parsedJSON?["lanes"] as? [[String: Any]]
+        let rawSig9 = rawLanes?.first { ($0["laneID"] as? String) == "sig9-lane" }
+        #expect(rawSig9?["exitCode"] is NSNull)
+        #expect((rawSig9?["signal"] as? Int) == 9)
+    }
+
+    @Test("RelayCLIRunner run handles no-change lanes (succeeded-no-changes, zero commits, exit 0), preserves agent commits, and records all three spend cases without writing 0")
+    func cliRunNoChangesAgentCommitsAndThreeSpendCases() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-spend-nochange")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+
+        // 1. No file changes + USD spend
+        try """
+        STUB COST 0.0456
+        """.write(to: plansDir.appendingPathComponent("noop-usd.md"), atomically: true, encoding: .utf8)
+
+        // 2. Agent makes its own commit + leaves unstaged file + unpriced tokens only
+        try """
+        STUB WRITE step1.txt from-agent
+        STUB GIT_COMMIT agent-own-commit
+        STUB WRITE step2.txt unstaged-afterwards
+        STUB TOKENS 9876
+        """.write(to: plansDir.appendingPathComponent("selfcommit-tok.md"), atomically: true, encoding: .utf8)
+
+        // 3. No LOG.md entry (`FAKE_RELAY NO_LOG`) -> `no_record`, costUSD == nil, tokens == nil (never 0!)
+        try """
+        FAKE_RELAY NO_LOG
+        STUB WRITE nolog.txt ok
+        """.write(to: plansDir.appendingPathComponent("nolog.md"), atomically: true, encoding: .utf8)
+
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "noop-usd", "agent": "claude", "prompt": "noop-usd.md", "after": []},
+            {"id": "selfcommit-tok", "agent": "agy", "prompt": "selfcommit-tok.md", "after": ["noop-usd"]},
+            {"id": "nolog", "agent": "vibe", "prompt": "nolog.md", "after": []}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        let cli = RelayCLIRunner()
+        let res = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+            environment: fx.baseEnvironment
+        )
+
+        #expect(res.exitCode == 0)
+        let record = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res.stdout)
+        let byID = Dictionary(uniqueKeysWithValues: record.lanes.map { ($0.laneID, $0) })
+
+        // 1. `noop-usd`: succeeded-no-changes, zero commits, costUSD == 0.0456, costSource == "usd"
+        let noop = try #require(byID["noop-usd"])
+        #expect(noop.status == .succeededNoChanges)
+        #expect(noop.commitOID == nil)
+        #expect(noop.costUSD == 0.0456)
+        #expect(noop.costSource == "usd")
+        let noopAhead = try runTool("/usr/bin/git", ["rev-list", "--count", "\(fx.baseCommitOID)..relay/\(record.runID)/noop-usd"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(noopAhead == "0")
+
+        // 2. `selfcommit-tok`: succeeded (also verifies successor after succeeded-no-changes runs!), 2 commits ahead of base, tokens == 9876, costUSD == nil, costSource == "unpriced"
+        let selfCommit = try #require(byID["selfcommit-tok"])
+        #expect(selfCommit.status == .succeeded)
+        #expect(selfCommit.costUSD == nil)
+        #expect(selfCommit.tokens == 9876)
+        #expect(selfCommit.costSource == "unpriced")
+        let selfAhead = try runTool("/usr/bin/git", ["rev-list", "--count", "\(fx.baseCommitOID)..relay/\(record.runID)/selfcommit-tok"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(selfAhead == "2")
+
+        // 3. `nolog`: succeeded, costUSD == nil, tokens == nil, costSource == "no_record"
+        let nolog = try #require(byID["nolog"])
+        #expect(nolog.status == .succeeded)
+        #expect(nolog.costUSD == nil)
+        #expect(nolog.tokens == nil)
+        #expect(nolog.costSource == "no_record")
+
+        // Raw JSON check: costUSD on unpriced/no_record and tokens on no_record are explicit `null`, NEVER `0`!
+        let parsedJSON = try JSONSerialization.jsonObject(with: Data(res.stdout.utf8)) as? [String: Any]
+        let rawLanes = parsedJSON?["lanes"] as? [[String: Any]]
+        let rawUnpriced = rawLanes?.first { ($0["laneID"] as? String) == "selfcommit-tok" }
+        let rawNoLog = rawLanes?.first { ($0["laneID"] as? String) == "nolog" }
+        #expect(rawUnpriced?["costUSD"] is NSNull)
+        #expect(rawNoLog?["costUSD"] is NSNull)
+        #expect(rawNoLog?["tokens"] is NSNull)
+    }
+
+    @Test("RelayCLIRunner run exits 125 with empty stdout when relay/<runID>/<lane> branch already exists without resetting the existing branch, and localizes stderr across --lang zh/en while keeping English JSON status words")
+    func cliRunExistingBranchExits125PreservingCommitAndLocalizesStderr() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-run-collision-lang")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+        try "STUB WRITE out.txt hi\n".write(to: plansDir.appendingPathComponent("api.md"), atomically: true, encoding: .utf8)
+
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "api", "agent": "claude", "prompt": "api.md", "after": []}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        // Pre-create branch `relay/<collidingRunID>/api` with an extra commit
+        let collidingRunID = "20261116-090000-dead"
+        let collidingBranch = "relay/\(collidingRunID)/api"
+        _ = try runTool("/usr/bin/git", ["checkout", "-b", collidingBranch, fx.baseCommitOID], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        try "do-not-lose\n".write(to: fx.repoURL.appendingPathComponent("keep.txt"), atomically: true, encoding: .utf8)
+        _ = try runTool("/usr/bin/git", ["add", "keep.txt"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        _ = try runTool("/usr/bin/git", ["commit", "-m", "precious existing commit"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        let preciousOID = try runTool("/usr/bin/git", ["rev-parse", "HEAD"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = try runTool("/usr/bin/git", ["checkout", "main"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        #expect(preciousOID != fx.baseCommitOID)
+
+        let collidingCLI = RelayCLIRunner(runIDProvider: { collidingRunID })
+        let collisionRes = await collidingCLI.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+            environment: fx.baseEnvironment
+        )
+        #expect(collisionRes.exitCode == 125)
+        #expect(collisionRes.stdout.isEmpty)
+        let afterCollisionOID = try runTool("/usr/bin/git", ["rev-parse", "refs/heads/\(collidingBranch)"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(afterCollisionOID == preciousOID)
+
+        // Now run with normal unique runIDs under `--lang zh` and `--lang en`: stderr language differs, JSON status token is identical `"succeeded"`
+        let normalCLI = RelayCLIRunner()
+        let resZH = await normalCLI.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "zh"],
+            environment: fx.baseEnvironment
+        )
+        let resEN = await normalCLI.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+            environment: fx.baseEnvironment
+        )
+        #expect(resZH.exitCode == 0)
+        #expect(resEN.exitCode == 0)
+        #expect(resZH.stderr != resEN.stderr)
+        #expect(resZH.stderr.contains("通道 api"))
+        #expect(resEN.stderr.contains("lane api"))
+
+        let recZH = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: resZH.stdout)
+        let recEN = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: resEN.stdout)
+        #expect(recZH.status.rawValue == "succeeded")
+        #expect(recEN.status.rawValue == "succeeded")
+        #expect(recZH.lanes[0].status.rawValue == "succeeded")
+        #expect(recEN.lanes[0].status.rawValue == "succeeded")
     }
 }

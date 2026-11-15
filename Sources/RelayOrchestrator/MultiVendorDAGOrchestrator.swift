@@ -78,33 +78,6 @@ public final class MultiVendorDAGOrchestrator: @unchecked Sendable {
         return waves
     }
 
-    /// Resolves the installed vendor CLI binary on disk (consistent with `agent-relay` paths) if available.
-    public func resolveVendorExecutable(for vendor: AgentVendor) -> String? {
-        for path in vendor.defaultExecutableCandidates {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return path
-            }
-        }
-        return nil
-    }
-
-    /// Builds headless CLI invocation arguments for a given vendor & prompt brief.
-    public func buildHeadlessInvocation(for task: RelayTaskNode, worktreePath: String) -> (executable: String, arguments: [String]) {
-        let exe = resolveVendorExecutable(for: task.vendor) ?? "/bin/zsh"
-        switch task.vendor {
-        case .claudeCode:
-            return (exe, ["-p", task.promptBrief, "--output-format", "json"])
-        case .codex:
-            return (exe, ["exec", "--cd", worktreePath, task.promptBrief])
-        case .antigravity:
-            return (exe, ["chat", "--mode", "agent", "-y", "--workspace", worktreePath, task.promptBrief])
-        case .mistralVibe:
-            return (exe, ["-p", task.promptBrief, "--workdir", worktreePath])
-        case .customShell:
-            return ("/bin/zsh", ["-lc", task.verificationShellCommand ?? "echo 'Verifier gate passed'"])
-        }
-    }
-
     /// Seeds a complete, deterministic multi-vendor workspace with real Git commits, PTY transcripts, 3-Way AST Merges, Wiretap telemetry, and Guardrail findings.
     public func seedIndustrialDemoWorkspace(workspaceName: String = "PaymentsCore-Relay") throws {
         let demoRepoDir = database.bundleDirectoryURL.appendingPathComponent("demo-repo").path

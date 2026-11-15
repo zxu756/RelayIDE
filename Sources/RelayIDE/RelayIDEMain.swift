@@ -77,8 +77,17 @@ enum RelayIDEBootstrap {
             }
 
         case .headlessCLI(let filteredArgs, let subcommand):
+            let stderrLock = NSLock()
+            let liveStderrWriter: @Sendable (String) -> Void = { line in
+                stderrLock.lock()
+                FileHandle.standardError.write(Data((line + "\n").utf8))
+                stderrLock.unlock()
+            }
             let runner = RelayCLIRunner()
-            let result = await runner.executeCommand(arguments: filteredArgs)
+            let result = await runner.executeCommand(
+                arguments: filteredArgs,
+                onLiveStderrLine: liveStderrWriter
+            )
             if result.exitCode == 0, subcommand == "export-html" {
                 let subcommandArgs = stripLeadingLanguageFlags(from: filteredArgs)
                 if let htmlOutURL = parseExportHTMLTargetURL(from: subcommandArgs) {
@@ -106,7 +115,7 @@ enum RelayIDEBootstrap {
                 print(result.stdout)
             }
         }
-        if !result.stderr.isEmpty {
+        if !result.stderr.isEmpty && !result.stderrAlreadyStreamed {
             FileHandle.standardError.write(Data((result.stderr + "\n").utf8))
         }
         Darwin.exit(result.exitCode)

@@ -45,18 +45,7 @@ public enum RelayRunIDGenerator {
 public enum RelayPlanValidator {
     /// Enforces `^[a-z0-9][a-z0-9-]{0,39}$` strictly over ASCII bytes and reserves `"integration"`.
     public static func isValidLaneID(_ id: String) -> Bool {
-        guard id != "integration" else { return false }
-        let bytes = Array(id.utf8)
-        guard !bytes.isEmpty, bytes.count <= 40 else { return false }
-        let first = bytes[0]
-        let isLowercaseOrDigit: (UInt8) -> Bool = { b in
-            (b >= 0x61 && b <= 0x7A) || (b >= 0x30 && b <= 0x39)
-        }
-        guard isLowercaseOrDigit(first) else { return false }
-        for b in bytes.dropFirst() {
-            guard isLowercaseOrDigit(b) || b == 0x2D else { return false }
-        }
-        return true
+        RelayPlanLaneSpec.isValidLaneID(id)
     }
 
     /// Validates `plan.json`, environment preconditions (`RELAY_BUDGET_USD`), lane IDs, prompts, single-predecessor DAG,
@@ -423,7 +412,16 @@ public struct RelayRunExecutionOutcome: Sendable, Equatable {
 }
 
 public struct RelayRunExecutor: Sendable {
-    public init() {}
+    public let runIDProvider: (@Sendable () -> String)?
+    public let activeLaneRegistry: RelayActiveLaneRegistry?
+
+    public init(
+        runIDProvider: (@Sendable () -> String)? = nil,
+        activeLaneRegistry: RelayActiveLaneRegistry? = nil
+    ) {
+        self.runIDProvider = runIDProvider
+        self.activeLaneRegistry = activeLaneRegistry
+    }
 
     /// Resolves `relay.sh` in order: `--relay-sh`, `RELAYIDE_RELAY_SH`, `$HOME/.agents/skills/agent-relay/scripts/relay.sh`.
     /// Verifies executable permission, sibling `relay_util.py`, and computes lowercase SHA-256 hex.
@@ -499,7 +497,8 @@ public struct RelayRunExecutor: Sendable {
         projectBundlePath: String,
         explicitRelayShPath: String?,
         language: RelayLanguage,
-        environment: [String: String]
+        environment: [String: String],
+        onStderrLine: (@Sendable (String) -> Void)? = nil
     ) async -> RelayRunExecutionOutcome {
         let isZh = language.isChinese
         let projectBundleURL = URL(fileURLWithPath: projectBundlePath).standardizedFileURL
@@ -583,7 +582,30 @@ public struct RelayRunExecutor: Sendable {
         }
 
         // 5. Open existing SQLite ledger, acquire non-blocking `<project>/run.lock`, copy `plan.json`, and persist `running`/`pending` rows
-        var stderrNotes: [String] = []
+        final class StderrCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            private let liveHandler: (@Sendable (String) -> Void)?
+
+            init(liveHandler: (@Sendable (String) -> Void)?) {
+                self.liveHandler = liveHandler
+            }
+
+            func emit(_ line: String) {
+                lock.lock()
+                lines.append(line)
+                lock.unlock()
+                liveHandler?(line)
+            }
+
+            func snapshot() -> [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return lines
+            }
+        }
+
+        let collector = StderrCollector(liveHandler: onStderrLine)
         do {
             let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: projectBundleURL)
             let runID = try generateUniqueRunID(projectBundleURL: projectBundleURL, database: db)
@@ -602,7 +624,7 @@ public struct RelayRunExecutor: Sendable {
             try validatedPlan.rawPlanData.write(to: planCopyURL, options: .atomic)
 
             if validatedPlan.verifyCommand != nil {
-                stderrNotes.append(
+                collector.emit(
                     isZh
                         ? "提示：计划包含 verify 命令，M1 仅将其记录到运行台账，将在 M2 执行。"
                         : "Note: plan includes a 'verify' command; M1 records it in the run ledger without executing it (scheduled for M2)."
@@ -639,7 +661,7 @@ public struct RelayRunExecutor: Sendable {
             )
             try db.createRun(initialRecord)
 
-            let finalRecord = try await executeScheduledLanes(
+            let schedulerResult = try await executeScheduledLanes(
                 runID: runID,
                 validatedPlan: validatedPlan,
                 relayScript: relayScript,
@@ -647,18 +669,19 @@ public struct RelayRunExecutor: Sendable {
                 projectBundleURL: projectBundleURL,
                 database: db,
                 language: language,
-                environment: environment
+                environment: environment,
+                emitStderrLine: collector.emit
             )
             return RelayRunExecutionOutcome(
-                runRecord: finalRecord,
-                stderrNotes: stderrNotes,
-                exitCode: 0,
+                runRecord: schedulerResult.runRecord,
+                stderrNotes: collector.snapshot(),
+                exitCode: schedulerResult.cliExitCode,
                 error: nil
             )
         } catch let relayErr as RelayIDEError {
             return RelayRunExecutionOutcome(
                 runRecord: nil,
-                stderrNotes: stderrNotes,
+                stderrNotes: collector.snapshot(),
                 exitCode: relayErr.cliExitCode,
                 error: relayErr
             )
@@ -666,17 +689,15 @@ public struct RelayRunExecutor: Sendable {
             let wrapped = RelayIDEError.relayEnvironmentFailure(error.localizedDescription)
             return RelayRunExecutionOutcome(
                 runRecord: nil,
-                stderrNotes: stderrNotes,
+                stderrNotes: collector.snapshot(),
                 exitCode: wrapped.cliExitCode,
                 error: wrapped
             )
         }
     }
 
-    // MARK: - Stage 04 Handoff Point: Lane Worktree Setup & DAG Scheduling
+    // MARK: - Stage 04 Lane Worktree Setup & Event-Driven DAG Scheduling (`RelayDAGRunScheduler`)
 
-    /// Stage 03 stops immediately after locking `<project>/run.lock`, copying `plan.json`, and inserting the
-    /// `running` run + `pending` lane rows. Stage 04 replaces this body with worktree setup and real DAG scheduling.
     private func executeScheduledLanes(
         runID: String,
         validatedPlan: RelayValidatedRunPlan,
@@ -685,22 +706,31 @@ public struct RelayRunExecutor: Sendable {
         projectBundleURL: URL,
         database: RelayProjectDatabase,
         language: RelayLanguage,
-        environment: [String: String]
-    ) async throws -> RelayRunRecord {
-        let unimplementedReason = "调度尚未实现"
-        try database.updateRunStatus(
+        environment: [String: String],
+        emitStderrLine: @escaping @Sendable (String) -> Void
+    ) async throws -> RelayDAGRunSchedulerResult {
+        let scheduler = RelayDAGRunScheduler(
             runID: runID,
-            status: .interrupted,
-            reason: unimplementedReason,
-            finishedAt: Date()
+            validatedPlan: validatedPlan,
+            relayScript: relayScript,
+            runDirectoryURL: runDirectoryURL,
+            projectBundleURL: projectBundleURL,
+            database: database,
+            language: language,
+            environment: environment,
+            activeLaneRegistry: activeLaneRegistry ?? RelayActiveLaneRegistry(),
+            emitStderrLine: emitStderrLine
         )
-        throw RelayIDEError.relayRunInterrupted(runID: runID, reason: unimplementedReason)
+        return try await scheduler.run()
     }
 
     private func generateUniqueRunID(
         projectBundleURL: URL,
         database: RelayProjectDatabase
     ) throws -> String {
+        if let custom = runIDProvider {
+            return custom()
+        }
         let runsRootURL = projectBundleURL.appendingPathComponent("runs", isDirectory: true)
         for _ in 0..<32 {
             let candidate = RelayRunIDGenerator.generate()

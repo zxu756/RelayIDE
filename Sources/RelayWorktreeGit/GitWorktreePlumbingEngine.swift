@@ -23,28 +23,63 @@ public struct GitWorktreePlumbingEngine: Sendable {
         try runGit(["rev-parse", "HEAD"], cwd: repoPath).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    public enum LaneCommitResult: Sendable, Equatable {
+        case committed(commitOID: String)
+        case preservedExistingCommits(headCommitOID: String)
+        case noChanges(headCommitOID: String)
+    }
+
     public func createLaneWorktree(
         repositoryPath: String,
+        runID: String = "manual",
         laneID: String,
         displayName: String,
         vendor: AgentVendor,
         baseRef: String = "HEAD",
         worktreesRootDirectory: String,
-        ownershipRule: FileOwnershipRule = FileOwnershipRule()
+        ownershipRule: FileOwnershipRule = FileOwnershipRule(),
+        environment: [String: String]? = nil
     ) throws -> ManagedWorktreeLane {
-        let baseOID = try runGit(["rev-parse", baseRef], cwd: repositoryPath).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard RelayPlanLaneSpec.isValidLaneID(laneID) else {
+            let reservedHint = laneID == "integration" ? " ('integration' is reserved)" : ""
+            throw RelayIDEError.invalidRunPlan(
+                "Invalid lane id '\(laneID)'\(reservedHint): must match ^[a-z0-9][a-z0-9-]{0,39}$"
+            )
+        }
+        guard RelayPlanLaneSpec.isValidRunID(runID) else {
+            throw RelayIDEError.invalidRunPlan(
+                "Invalid run id '\(runID)': must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+            )
+        }
+
+        let baseOID = try runGit(["rev-parse", "--verify", "\(baseRef)^{commit}"], cwd: repositoryPath, environment: environment)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let worktreePath = (worktreesRootDirectory as NSString).appendingPathComponent(laneID)
-        let branchName = "relay/\(laneID)"
+        let branchName = "relay/\(runID)/\(laneID)"
 
         if FileManager.default.fileExists(atPath: worktreePath) {
             throw RelayIDEError.worktreeAlreadyExists(worktreePath)
         }
+
+        let branchExistsCheck = try runGitCommand(
+            ["show-ref", "--verify", "--quiet", "refs/heads/\(branchName)"],
+            cwd: repositoryPath,
+            environment: environment
+        )
+        if branchExistsCheck.exitCode == 0 {
+            throw RelayIDEError.gitPlumbingFailure(
+                command: "git worktree add -b \(branchName) \(worktreePath) \(baseOID)",
+                exitCode: 128,
+                stderr: "fatal: a branch named '\(branchName)' already exists"
+            )
+        }
+
         try FileManager.default.createDirectory(
             atPath: worktreesRootDirectory,
             withIntermediateDirectories: true
         )
 
-        _ = try runGit(["worktree", "add", "-B", branchName, worktreePath, baseOID], cwd: repositoryPath)
+        _ = try runGit(["worktree", "add", "-b", branchName, worktreePath, baseOID], cwd: repositoryPath, environment: environment)
         return ManagedWorktreeLane(
             id: laneID,
             displayName: displayName,
@@ -56,6 +91,98 @@ public struct GitWorktreePlumbingEngine: Sendable {
             dirtyFiles: [],
             ownershipRule: ownershipRule
         )
+    }
+
+    public func commitLaneChangesIfNeeded(
+        worktreePath: String,
+        startCommitOID: String,
+        runID: String,
+        laneID: String,
+        agent: RelayPlanAgent,
+        status: RelayRunStatus,
+        environment: [String: String]? = nil
+    ) throws -> LaneCommitResult {
+        // Stage all worktree changes, then explicitly reset `.relay` against `HEAD`.
+        // Note: Passing `:(exclude).relay` to `git add` fails with exit code 1 on Apple Git whenever `relay.sh`
+        // has written `.relay/` into `.git/info/exclude`; `git add -A -- .` + `git reset -q HEAD -- .relay`
+        // succeeds in both ignored and `!.relay`-negated (R47) repositories while keeping `.relay/` out of commits.
+        _ = try runGit(
+            ["add", "-A", "--", "."],
+            cwd: worktreePath,
+            environment: environment
+        )
+        _ = try runGit(
+            ["reset", "-q", "HEAD", "--", ".relay"],
+            cwd: worktreePath,
+            environment: environment
+        )
+
+        let diffCheck = try runGitCommand(
+            ["diff", "--cached", "--quiet", "--exit-code"],
+            cwd: worktreePath,
+            environment: environment
+        )
+        if diffCheck.exitCode == 0 {
+            let currentHead = try runGit(["rev-parse", "HEAD"], cwd: worktreePath, environment: environment)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if currentHead == startCommitOID {
+                return .noChanges(headCommitOID: currentHead)
+            } else {
+                return .preservedExistingCommits(headCommitOID: currentHead)
+            }
+        } else if diffCheck.exitCode != 1 {
+            throw RelayIDEError.gitPlumbingFailure(
+                command: "git diff --cached --quiet --exit-code",
+                exitCode: diffCheck.exitCode,
+                stderr: diffCheck.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+
+        let subject = "relay \(runID) \(laneID) (\(agent.rawValue)): \(status.rawValue)"
+        let body = "Committed by RelayIDE with --no-verify (repository verify checks run in M2)."
+        _ = try runGit(
+            [
+                "-c", "user.useConfigOnly=true",
+                "-c", "commit.gpgsign=false",
+                "commit",
+                "--no-verify",
+                "-m", subject,
+                "-m", body
+            ],
+            cwd: worktreePath,
+            environment: environment
+        )
+        let committedOID = try runGit(["rev-parse", "HEAD"], cwd: worktreePath, environment: environment)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return .committed(commitOID: committedOID)
+    }
+
+    public func listUncommittedFilesExcludingRelay(
+        in worktreePath: String,
+        environment: [String: String]? = nil
+    ) throws -> [String] {
+        let raw = try runGit(["status", "--porcelain=v1", "-z", "-uall"], cwd: worktreePath, environment: environment)
+        let entries = raw.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+        var collected = Set<String>()
+        var idx = 0
+        while idx < entries.count {
+            let entry = entries[idx]
+            idx += 1
+            guard entry.count >= 4 else { continue }
+            let xy = Array(entry.prefix(2))
+            let path = String(entry.dropFirst(3))
+            if xy[0] == "R" || xy[0] == "C" {
+                // Skip the second NUL-terminated field (`orig_path`) in porcelain v1 `-z` mode
+                if idx < entries.count {
+                    idx += 1
+                }
+            }
+            if path == ".relay" || path.hasPrefix(".relay/") {
+                continue
+            }
+            collected.insert(path)
+        }
+        return collected.sorted()
     }
 
     public func removeLaneWorktree(repositoryPath: String, worktreePath: String, deleteBranch: String? = nil) throws {

@@ -808,4 +808,342 @@ struct WorktreeGitDiffAndHandoffTests {
             _ = try engine.verifyGitRepository(at: plainDir.path)
         }
     }
+
+    // MARK: - 19. M1 `createLaneWorktree` (`-b`, `relay/<runID>/<laneID>`, No Reset, Lane ID Guard, R36)
+
+    @Test("GitWorktreePlumbingEngine.createLaneWorktree creates relay/<runID>/<laneID> with -b, refuses existing branches without resetting them (exit 125), and validates laneID before creating directories (R36)")
+    func createLaneWorktreeEnforcesRunBranchWithoutResetAndValidatesLaneID() throws {
+        let tempRoot = try makeIsolatedTempDirectory(prefix: "relay-r36")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let homeDir = tempRoot.appendingPathComponent("home", isDirectory: true)
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+
+        let gitEnv: [String: String] = [
+            "HOME": homeDir.path,
+            "CFFIXED_USER_HOME": homeDir.path,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": "/usr/bin:/bin"
+        ]
+
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "Fake R36 Author"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "r36@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+        try "v1\n".write(to: repoDir.appendingPathComponent("base.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "base.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "base"], cwd: repoDir.path, environment: gitEnv)
+        let baseOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 1. Invalid lane names (`a/b`, `../escape`, `integration`) must fail with exit 2 BEFORE creating worktreesRootDirectory
+        let untouchedRoot = tempRoot.appendingPathComponent("should-not-be-created/worktrees", isDirectory: true)
+        for badID in ["a/b", "../escape", "integration"] {
+            do {
+                _ = try engine.createLaneWorktree(
+                    repositoryPath: repoDir.path,
+                    runID: "20261116-010000-0001",
+                    laneID: badID,
+                    displayName: badID,
+                    vendor: .claudeCode,
+                    baseRef: baseOID,
+                    worktreesRootDirectory: untouchedRoot.path,
+                    environment: gitEnv
+                )
+                Issue.record("Expected createLaneWorktree to reject invalid laneID '\(badID)'")
+            } catch let err as RelayIDEError {
+                #expect(err.cliExitCode == 2)
+            }
+            #expect(!FileManager.default.fileExists(atPath: untouchedRoot.path))
+        }
+
+        // 2. Valid creation produces branch `relay/<runID>/<laneID>` at `<worktreesRoot>/<laneID>`
+        let run1ID = "20261116-010000-aaaa"
+        let wtRoot1 = tempRoot.appendingPathComponent("runs/\(run1ID)/worktrees", isDirectory: true)
+        let laneA = try engine.createLaneWorktree(
+            repositoryPath: repoDir.path,
+            runID: run1ID,
+            laneID: "api",
+            displayName: "api",
+            vendor: .claudeCode,
+            baseRef: baseOID,
+            worktreesRootDirectory: wtRoot1.path,
+            environment: gitEnv
+        )
+        #expect(laneA.branchName == "relay/\(run1ID)/api")
+        #expect(laneA.worktreePath == wtRoot1.appendingPathComponent("api").path)
+        let branchRefOID = try engine.runGit(["rev-parse", "refs/heads/relay/\(run1ID)/api"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(branchRefOID == baseOID)
+
+        // 3. Pre-existing branch `relay/<run2ID>/api` with an extra commit must NEVER be reset (-b, not -B); error cliExitCode == 125
+        let run2ID = "20261116-010001-bbbb"
+        let preexistingBranch = "relay/\(run2ID)/api"
+        _ = try engine.runGit(["checkout", "-b", preexistingBranch, baseOID], cwd: repoDir.path, environment: gitEnv)
+        try "precious-work\n".write(to: repoDir.appendingPathComponent("precious.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "precious.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "precious commit"], cwd: repoDir.path, environment: gitEnv)
+        let preciousOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = try engine.runGit(["checkout", "main"], cwd: repoDir.path, environment: gitEnv)
+        #expect(preciousOID != baseOID)
+
+        let wtRoot2 = tempRoot.appendingPathComponent("runs/\(run2ID)/worktrees", isDirectory: true)
+        do {
+            _ = try engine.createLaneWorktree(
+                repositoryPath: repoDir.path,
+                runID: run2ID,
+                laneID: "api",
+                displayName: "api",
+                vendor: .claudeCode,
+                baseRef: baseOID,
+                worktreesRootDirectory: wtRoot2.path,
+                environment: gitEnv
+            )
+            Issue.record("Expected createLaneWorktree to fail when branch '\(preexistingBranch)' already exists")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+
+        let afterAttemptOID = try engine.runGit(["rev-parse", "refs/heads/\(preexistingBranch)"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(afterAttemptOID == preciousOID)
+    }
+
+    // MARK: - 20. M1 Lane Commit (`--no-verify`, `:(exclude).relay`, No-Changes, Agent Commits) & Uncommitted List (R46, R47)
+
+    @Test("GitWorktreePlumbingEngine commits lane changes with --no-verify and :(exclude).relay, skips empty commits, preserves agent commits, and lists uncommitted files")
+    func laneCommitExcludesRelaySkipsHooksPreservesAgentCommitsAndListsDirtyFiles() throws {
+        let tempRoot = try makeIsolatedTempDirectory(prefix: "relay-r47")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let homeDir = tempRoot.appendingPathComponent("home", isDirectory: true)
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+
+        let gitEnv: [String: String] = [
+            "HOME": homeDir.path,
+            "CFFIXED_USER_HOME": homeDir.path,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": "/usr/bin:/bin"
+        ]
+
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "Lane Committer"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "committer@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+        // Deliberately add `!.relay` in .gitignore to verify R47 pathspec exclusion `:(exclude).relay`
+        try "!.relay\n!.relay/**\n".write(to: repoDir.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", ".gitignore"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "init with !.relay"], cwd: repoDir.path, environment: gitEnv)
+        let baseOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Install a failing pre-commit hook to verify `--no-verify` skips hooks in M1
+        let hooksDir = repoDir.appendingPathComponent(".git/hooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+        let preCommitURL = hooksDir.appendingPathComponent("pre-commit")
+        try "#!/bin/sh\necho 'hook should be skipped' >&2\nexit 1\n".write(to: preCommitURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: preCommitURL.path)
+
+        let runID = "20261116-010500-c0de"
+        let wtRoot = tempRoot.appendingPathComponent("runs/\(runID)/worktrees", isDirectory: true)
+
+        // Case 1: Changes + .relay/ files -> commits ONLY non-.relay files, uses repo identity, skips pre-commit hook
+        let wt1 = try engine.createLaneWorktree(
+            repositoryPath: repoDir.path,
+            runID: runID,
+            laneID: "api",
+            displayName: "api",
+            vendor: .claudeCode,
+            baseRef: baseOID,
+            worktreesRootDirectory: wtRoot.path,
+            environment: gitEnv
+        )
+        let wt1URL = URL(fileURLWithPath: wt1.worktreePath)
+        try FileManager.default.createDirectory(at: wt1URL.appendingPathComponent(".relay"), withIntermediateDirectories: true)
+        try "## 01-claude: ok, 1s, 2026-11-16 01:05\n".write(
+            to: wt1URL.appendingPathComponent(".relay/LOG.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "export const api = 1;\n".write(
+            to: wt1URL.appendingPathComponent("api.ts"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let res1 = try engine.commitLaneChangesIfNeeded(
+            worktreePath: wt1.worktreePath,
+            startCommitOID: baseOID,
+            runID: runID,
+            laneID: "api",
+            agent: .claude,
+            status: .succeeded,
+            environment: gitEnv
+        )
+        guard case .committed(let commit1OID) = res1 else {
+            Issue.record("Expected .committed, got \(res1)")
+            return
+        }
+        #expect(commit1OID != baseOID)
+        let changed1 = try engine.runGit(["diff", "--name-only", "\(baseOID)..\(commit1OID)"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(changed1 == "api.ts")
+        let subject1 = try engine.runGit(["log", "-1", "--format=%s", commit1OID], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(subject1 == "relay \(runID) api (claude): succeeded")
+        let author1 = try engine.runGit(["log", "-1", "--format=%an <%ae>", commit1OID], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(author1 == "Lane Committer <committer@relay.invalid>")
+
+        // Case 2: Only .relay/ files, no repo changes -> `.noChanges`, zero new commits
+        let wt2 = try engine.createLaneWorktree(
+            repositoryPath: repoDir.path,
+            runID: runID,
+            laneID: "noop",
+            displayName: "noop",
+            vendor: .codex,
+            baseRef: baseOID,
+            worktreesRootDirectory: wtRoot.path,
+            environment: gitEnv
+        )
+        let wt2URL = URL(fileURLWithPath: wt2.worktreePath)
+        try FileManager.default.createDirectory(at: wt2URL.appendingPathComponent(".relay"), withIntermediateDirectories: true)
+        try "log\n".write(to: wt2URL.appendingPathComponent(".relay/LOG.md"), atomically: true, encoding: .utf8)
+        let res2 = try engine.commitLaneChangesIfNeeded(
+            worktreePath: wt2.worktreePath,
+            startCommitOID: baseOID,
+            runID: runID,
+            laneID: "noop",
+            agent: .codex,
+            status: .succeeded,
+            environment: gitEnv
+        )
+        #expect(res2 == .noChanges(headCommitOID: baseOID))
+        let count2 = try engine.runGit(["rev-list", "--count", "\(baseOID)..\(wt2.branchName)"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(count2 == "0")
+
+        // Case 3: Agent already committed its own work (`--no-verify`) + left an unstaged file -> preserves agent commit + adds 1 RelayIDE commit
+        let wt3 = try engine.createLaneWorktree(
+            repositoryPath: repoDir.path,
+            runID: runID,
+            laneID: "selfcommit",
+            displayName: "selfcommit",
+            vendor: .antigravity,
+            baseRef: baseOID,
+            worktreesRootDirectory: wtRoot.path,
+            environment: gitEnv
+        )
+        let wt3URL = URL(fileURLWithPath: wt3.worktreePath)
+        try "step1\n".write(to: wt3URL.appendingPathComponent("step1.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "step1.txt"], cwd: wt3.worktreePath, environment: gitEnv)
+        _ = try engine.runGit(["commit", "--no-verify", "-m", "agent own commit"], cwd: wt3.worktreePath, environment: gitEnv)
+        let agentCommitOID = try engine.runGit(["rev-parse", "HEAD"], cwd: wt3.worktreePath, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try "step2\n".write(to: wt3URL.appendingPathComponent("step2.txt"), atomically: true, encoding: .utf8)
+        let res3 = try engine.commitLaneChangesIfNeeded(
+            worktreePath: wt3.worktreePath,
+            startCommitOID: baseOID,
+            runID: runID,
+            laneID: "selfcommit",
+            agent: .agy,
+            status: .partial,
+            environment: gitEnv
+        )
+        guard case .committed(let relayTopOID) = res3 else {
+            Issue.record("Expected .committed on top of agent commit, got \(res3)")
+            return
+        }
+        let parentOfTop = try engine.runGit(["rev-parse", "\(relayTopOID)^"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(parentOfTop == agentCommitOID)
+
+        // Case 3b: Calling commitLaneChangesIfNeeded again when HEAD != startCommitOID and only .relay changed preserves HEAD
+        try FileManager.default.createDirectory(at: wt3URL.appendingPathComponent(".relay"), withIntermediateDirectories: true)
+        try "log2\n".write(to: wt3URL.appendingPathComponent(".relay/LOG.md"), atomically: true, encoding: .utf8)
+        let res3b = try engine.commitLaneChangesIfNeeded(
+            worktreePath: wt3.worktreePath,
+            startCommitOID: baseOID,
+            runID: runID,
+            laneID: "selfcommit",
+            agent: .agy,
+            status: .succeeded,
+            environment: gitEnv
+        )
+        #expect(res3b == .preservedExistingCommits(headCommitOID: relayTopOID))
+
+        // Case 4: Failed lane dirty files -> listUncommittedFilesExcludingRelay lists dirty files without .relay/
+        let wt4 = try engine.createLaneWorktree(
+            repositoryPath: repoDir.path,
+            runID: runID,
+            laneID: "dirty",
+            displayName: "dirty",
+            vendor: .mistralVibe,
+            baseRef: baseOID,
+            worktreesRootDirectory: wtRoot.path,
+            environment: gitEnv
+        )
+        let wt4URL = URL(fileURLWithPath: wt4.worktreePath)
+        try FileManager.default.createDirectory(at: wt4URL.appendingPathComponent(".relay"), withIntermediateDirectories: true)
+        try "log\n".write(to: wt4URL.appendingPathComponent(".relay/LOG.md"), atomically: true, encoding: .utf8)
+        try "untracked\n".write(to: wt4URL.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
+        try "# modified\n".write(to: wt4URL.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        let dirtyList = try engine.listUncommittedFilesExcludingRelay(in: wt4.worktreePath, environment: gitEnv)
+        #expect(dirtyList == [".gitignore", "untracked.txt"])
+
+        // Case 5: Real `relay.sh` writes `.relay/` into `.git/info/exclude` on a normal repository without `.gitignore` negation;
+        // `commitLaneChangesIfNeeded` must succeed (exit 0) and commit only non-`.relay` files without failing on ignored pathspecs.
+        let repoInfoExcludeDir = tempRoot.appendingPathComponent("repo-info-exclude", isDirectory: true)
+        try FileManager.default.createDirectory(at: repoInfoExcludeDir, withIntermediateDirectories: true)
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoInfoExcludeDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "Lane Committer"], cwd: repoInfoExcludeDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "committer@relay.invalid"], cwd: repoInfoExcludeDir.path, environment: gitEnv)
+        try "readme\n".write(to: repoInfoExcludeDir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "README.md"], cwd: repoInfoExcludeDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "init"], cwd: repoInfoExcludeDir.path, environment: gitEnv)
+        let baseInfoOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoInfoExcludeDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let infoExcludeURL = repoInfoExcludeDir.appendingPathComponent(".git/info/exclude")
+        try FileManager.default.createDirectory(at: infoExcludeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try ".relay/\n".write(to: infoExcludeURL, atomically: true, encoding: .utf8)
+
+        let wt5 = try engine.createLaneWorktree(
+            repositoryPath: repoInfoExcludeDir.path,
+            runID: runID,
+            laneID: "real-relay",
+            displayName: "real-relay",
+            vendor: .claudeCode,
+            baseRef: baseInfoOID,
+            worktreesRootDirectory: tempRoot.appendingPathComponent("runs-ie/\(runID)/worktrees").path,
+            environment: gitEnv
+        )
+        let wt5URL = URL(fileURLWithPath: wt5.worktreePath)
+        try FileManager.default.createDirectory(at: wt5URL.appendingPathComponent(".relay"), withIntermediateDirectories: true)
+        try "## 01-claude: ok, 1s, 2026-11-16 01:06\n".write(to: wt5URL.appendingPathComponent(".relay/LOG.md"), atomically: true, encoding: .utf8)
+        try "hello\n".write(to: wt5URL.appendingPathComponent("feature.txt"), atomically: true, encoding: .utf8)
+        let res5 = try engine.commitLaneChangesIfNeeded(
+            worktreePath: wt5.worktreePath,
+            startCommitOID: baseInfoOID,
+            runID: runID,
+            laneID: "real-relay",
+            agent: .claude,
+            status: .succeeded,
+            environment: gitEnv
+        )
+        guard case .committed(let commit5OID) = res5 else {
+            Issue.record("Expected .committed when .relay/ is in .git/info/exclude, got \(res5)")
+            return
+        }
+        let changed5 = try engine.runGit(["diff", "--name-only", "\(baseInfoOID)..\(commit5OID)"], cwd: repoInfoExcludeDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(changed5 == "feature.txt")
+    }
 }
