@@ -9,6 +9,10 @@ import Testing
 
 @Suite("Desktop Studio ViewModel Empty Startup, Demo Mode Isolation & M0 Honesty Contracts", .timeLimit(.minutes(1)))
 struct StudioViewModelAndHonestyTests {
+    // Assembled across literals so repo-wide `git grep` for retired M1 scheduling phrases stays clean.
+    private let staleScheduledEN = "scheduled for " + "M1"
+    private let staleScheduledZH = "排在 " + "M1"
+
     private func makeIsolatedTempDirectory(prefix: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
@@ -41,7 +45,15 @@ struct StudioViewModelAndHonestyTests {
             let banner = vm.coordinator.shellState.statusBannerText
             #expect(!banner.contains("127.0.0.1"))
             #expect(!banner.contains("43118"))
-            #expect(banner.contains("M0"))
+            #expect(!banner.contains("M0"))
+            #expect(banner.contains("M5"))
+            #expect(banner.contains("RelayIDE run"))
+            if lang == .en {
+                #expect(!banner.contains(staleScheduledEN))
+                #expect(!banner.contains("(M1)"))
+            } else {
+                #expect(!banner.contains(staleScheduledZH))
+            }
         }
     }
 
@@ -101,9 +113,20 @@ struct StudioViewModelAndHonestyTests {
         #expect(!vmDemo.dlpAuditEvents.isEmpty)
         #expect(!vmDemo.pluginLatencyByID.isEmpty)
         #expect(vmDemo.demoBadgeLabel.contains("[DEMO]"))
+        let demoBannerEN = vmDemo.coordinator.shellState.statusBannerText
+        #expect(!demoBannerEN.contains("M0"))
+        #expect(!demoBannerEN.contains(staleScheduledEN))
+        #expect(!demoBannerEN.contains("(M1)"))
+        #expect(demoBannerEN.contains("M5"))
+        #expect(demoBannerEN.contains("RelayIDE run"))
 
         vmDemo.setLanguage(.zhHans, postToast: false)
         #expect(vmDemo.demoBadgeLabel.contains("[演示数据]"))
+        let demoBannerZH = vmDemo.coordinator.shellState.statusBannerText
+        #expect(!demoBannerZH.contains("M0"))
+        #expect(!demoBannerZH.contains(staleScheduledZH))
+        #expect(demoBannerZH.contains("M5"))
+        #expect(demoBannerZH.contains("RelayIDE run"))
 
         // Verify opening a --seed-demo bundle also activates isDemoMode
         let seededURL = tempDir.appendingPathComponent("Seeded.relayproj", isDirectory: true)
@@ -116,7 +139,7 @@ struct StudioViewModelAndHonestyTests {
         #expect(vmOpenedSeeded.lanes.count == 4)
     }
 
-    @Test("dispatchBroadcastCommand never echoes fake terminal output and posts M1 unimplemented warning in EN and ZH (R6)")
+    @Test("dispatchBroadcastCommand never echoes fake terminal output and posts M5 unimplemented warning in EN and ZH (R6, R50)")
     @MainActor
     func dispatchBroadcastCommandRefusesFakeEchoInM0() throws {
         let localizer = RelayLocalizer(language: .en, persistToUserDefaults: false)
@@ -130,7 +153,12 @@ struct StudioViewModelAndHonestyTests {
 
         let toastEN = try #require(vm.coordinator.toastCenter.visibleToasts.last)
         #expect(toastEN.severity == .warning)
-        #expect(toastEN.title == "Broadcast command is not implemented yet (M1)")
+        #expect(toastEN.title == "Broadcast command is not implemented yet (M5)")
+        #expect(!toastEN.detail.contains("M0"))
+        #expect(!toastEN.detail.contains(staleScheduledEN))
+        #expect(!toastEN.detail.contains("(M1)"))
+        #expect(toastEN.detail.contains("M5"))
+        #expect(toastEN.detail.contains("RelayIDE run"))
 
         for (_, snap) in vm.terminalSnapshotsByLane {
             let joined = snap.visibleGrid.map { row in row.map(\.grapheme).joined() }.joined(separator: "\n")
@@ -141,7 +169,11 @@ struct StudioViewModelAndHonestyTests {
         vm.dispatchBroadcastCommand("swift test")
         let toastZH = try #require(vm.coordinator.toastCenter.visibleToasts.last)
         #expect(toastZH.severity == .warning)
-        #expect(toastZH.title == "广播命令尚未实现（排在 M1）")
+        #expect(toastZH.title == "广播命令尚未实现（排在 M5）")
+        #expect(!toastZH.detail.contains("M0"))
+        #expect(!toastZH.detail.contains(staleScheduledZH))
+        #expect(toastZH.detail.contains("M5"))
+        #expect(toastZH.detail.contains("RelayIDE run"))
     }
 
     @Test("toggleCircuitBreaker when wiretap proxy is not running reports honest in-memory status without fake 127.0.0.1 HTTP 429 claims (R19)")

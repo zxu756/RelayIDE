@@ -975,14 +975,14 @@ public final class RelayStudioViewModel: ObservableObject {
         if isDemoMode {
             coordinator.shellState.statusBannerText = RelayLocalizer.select(
                 lang,
-                "[DEMO] Synthetic 4-lane preview · M0 does not launch coding agents yet",
-                "[演示数据] 4 通道合成预览 · 当前版本（M0）尚不会启动任何 coding agent"
+                "[DEMO] Synthetic 4-lane preview · Desktop UI not connected to live runs yet (M5, does not launch agents; use 'RelayIDE run' in CLI)",
+                "[演示数据] 4 通道合成预览 · 桌面界面尚未接入真实运行（排在 M5，界面不启动 agent；请在命令行用 RelayIDE run）"
             )
         } else if lanes.isEmpty {
             coordinator.shellState.statusBannerText = RelayLocalizer.select(
                 lang,
-                "Empty workspace · M0 does not launch coding agents yet",
-                "空工作区 · 当前版本（M0）尚不会启动任何 coding agent"
+                "Empty workspace · Desktop UI not connected to live runs yet (M5, does not launch agents; use 'RelayIDE run' in CLI)",
+                "空工作区 · 桌面界面尚未接入真实运行（排在 M5，界面不启动 agent；请在命令行用 RelayIDE run）"
             )
         } else if isWiretapProxyRunning {
             coordinator.shellState.statusBannerText = RelayLocalizer.select(
@@ -1377,12 +1377,12 @@ public final class RelayStudioViewModel: ObservableObject {
         coordinator.toastCenter.post(
             severity: .warning,
             title: L(
-                "Broadcast command is not implemented yet (M1)",
-                "广播命令尚未实现（排在 M1）"
+                "Broadcast command is not implemented yet (M5)",
+                "广播命令尚未实现（排在 M5）"
             ),
             detail: L(
-                "M0 does not launch coding agents or execute broadcast commands across worktrees.",
-                "当前版本（M0）尚不启动任何 coding agent，也不向工作树广播执行命令。"
+                "The desktop UI is not connected to live runs yet (scheduled for M5), does not launch coding agents, and does not execute broadcast commands across worktrees; use 'RelayIDE run' on the command line to run agents.",
+                "桌面界面尚未接入真实运行（排在 M5），界面本身不启动 coding agent，也不向工作树广播执行命令；请在命令行使用 RelayIDE run 运行 agent。"
             )
         )
     }

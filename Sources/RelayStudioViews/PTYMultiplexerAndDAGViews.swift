@@ -370,8 +370,8 @@ public struct PTYMultiplexerGridView: View {
 
                 Text(
                     viewModel.L(
-                        "This version (M0) does not launch coding agents yet (scheduled for M1 via agent-relay). Launch with --demo or click Load Demo Preview to inspect synthetic sample data.",
-                        "当前版本（M0）尚不会启动任何 coding agent（M1 将基于 agent-relay 接入）。传入 --demo 或点击下方按钮可载入合成演示预览数据。"
+                        "The desktop UI is not connected to live runs yet (scheduled for M5) and does not launch coding agents; use 'RelayIDE run' on the command line to run agents. Launch with --demo or click Load Demo Preview to inspect synthetic sample data.",
+                        "桌面界面尚未接入真实运行（排在 M5），界面本身不会启动 coding agent；请在命令行使用 RelayIDE run 运行 agent。传入 --demo 或点击下方按钮可载入合成演示预览数据。"
                     )
                 )
                 .font(.system(size: 11.5))

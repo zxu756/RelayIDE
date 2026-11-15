@@ -45,7 +45,7 @@
 - **M2 (Branch Merge Pipeline & `verify` Gate)**: Merging completed lane branches onto `relay/<run-id>/integration` via `git merge --no-ff`, aborting cleanly on conflicts, and streaming `verify` command output with process-group timeout cleanup.
 - **M3 (Semantic Merge Evaluation)**: Corpus evaluation against real open-source merge commits (`git merge-file` vs current engine vs `mergiraf`) to decide whether semantic merge is replaced with `SwiftSyntax` / `tree-sitter` or removed.
 - **M4 (Spend & Whole-Job Budget)**: Cross-lane whole-job budget enforcement and deciding whether to keep or remove the standalone loopback proxy.
-- **M5 (Desktop UI Connected to Live Runs)**: Wiring the SwiftUI terminal grid, lane status/spend list, file ownership view, and merge studio to live M1/M2 runs, plus real broadcast command execution (`⌘⇧B` currently reports `"Broadcast command is not implemented yet (M1)"`).
+- **M5 (Desktop UI Connected to Live Runs)**: Wiring the SwiftUI terminal grid, lane status/spend list, file ownership view, and merge studio to live M1/M2 runs, plus real broadcast command execution (`⌘⇧B` currently reports `"Broadcast command is not implemented yet (M5)"`).
 
 ---
 

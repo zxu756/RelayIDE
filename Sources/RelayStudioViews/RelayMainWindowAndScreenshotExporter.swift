@@ -483,7 +483,7 @@ public struct RelayStudioRootWorkbenchView: View {
                     Circle()
                         .fill(RelayBauhausDesign.agySignalGreen)
                         .frame(width: 6, height: 6)
-                    Text("SQLite WAL v4 · FTS5")
+                    Text("SQLite WAL v\(RelayProjectDatabase.currentSchemaVersion) · FTS5")
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .foregroundStyle(RelayBauhausDesign.espressoInk)
                         .fixedSize(horizontal: true, vertical: false)

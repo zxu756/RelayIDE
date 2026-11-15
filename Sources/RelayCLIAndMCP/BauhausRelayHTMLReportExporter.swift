@@ -114,10 +114,10 @@ public struct BauhausRelayHTMLReportExporter: Sendable {
         let schemaMetaEN = "Schema v\(stats.schemaVersion) · SQLite WAL \(walTotalBytes) B"
         let schemaMetaZH = "架构 v\(stats.schemaVersion) · SQLite WAL \(walTotalBytes) 字节"
         let kickerEN = isDemoWorkspace
-            ? "RelayIDE v1.2.0 Synthetic Demo Workspace Snapshot (M0 Preview Only)"
+            ? "RelayIDE v1.2.0 Synthetic Demo Workspace Snapshot (Preview Only, Not Output from Live Agent Runs)"
             : "RelayIDE v1.2.0 Workspace Ledger Snapshot"
         let kickerZH = isDemoWorkspace
-            ? "RelayIDE v1.2.0 合成演示工作区快照（M0 仅供预览，非真实智能体运行产物）"
+            ? "RelayIDE v1.2.0 合成演示工作区快照（仅供预览，非真实智能体运行产物）"
             : "RelayIDE v1.2.0 工作区台账快照"
         let demoBannerHTML: String = {
             guard isDemoWorkspace else { return "" }

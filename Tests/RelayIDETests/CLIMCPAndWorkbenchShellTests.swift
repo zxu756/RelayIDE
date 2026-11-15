@@ -800,6 +800,10 @@ struct CLIMCPAndWorkbenchShellTests {
         let html = try String(contentsOf: htmlURL, encoding: .utf8)
         #expect(html.contains("[DEMO]"))
         #expect(html.contains("[演示数据]"))
+        #expect(html.contains(#"class="kicker""#))
+        #expect(html.contains("RelayIDE v1.2.0 Synthetic Demo Workspace Snapshot (Preview Only, Not Output from Live Agent Runs)"))
+        #expect(html.contains("RelayIDE v1.2.0 合成演示工作区快照（仅供预览，非真实智能体运行产物）"))
+        #expect(!html.contains("M0"))
     }
 
     @Test("semantic-merge CLI and MCP exit 1 with git's conflict text on a true conflict, and merge the former Python corruption case (09) cleanly")
