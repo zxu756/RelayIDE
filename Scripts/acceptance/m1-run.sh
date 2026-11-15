@@ -33,6 +33,7 @@ fi
 
 # Resolve real home and relay.sh BEFORE replacing HOME or RELAY_CLI_HOME.
 REAL_HOME="${HOME}"
+ORIG_PATH="${PATH}"
 if [[ -n "${RELAYIDE_RELAY_SH:-}" ]]; then
     CANDIDATE_RELAY_SH="${RELAYIDE_RELAY_SH}"
 else
@@ -420,7 +421,9 @@ record_fail() {
     local row="$1"
     local msg="$2"
     echo "[FAIL] Row ${row}: ${msg}"
-    printf 'Row %s: %s\n' "${row}" "${msg}" >> "${FAIL_LOG}"
+    if [[ -n "${WORK_TMP:-}" && -d "${WORK_TMP}" ]]; then
+        printf 'Row %s: %s\n' "${row}" "${msg}" >> "${FAIL_LOG}"
+    fi
     FAIL_COUNT=$(( FAIL_COUNT + 1 ))
 }
 
@@ -1612,6 +1615,460 @@ assert b1 in refs and b2 in refs, (b1, b2, refs)
 PY
 }
 
+# ------------------------------------------------------------------
+# Rows 18..25: RelayIDE own 125 errors, plan/argument 2 errors, missing git identity,
+#              repeated plan runs, .pty verification, stdout==status JSON, zh/en parity, decoy check
+# ------------------------------------------------------------------
+row_18_relayide_own_errors_exit_125() {
+    local d="${WORK_TMP}/r18"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    printf 'STUB WRITE src/ok.txt should-not-run\n' > "${d}/prompts/ok.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "ok", "agent": "claude", "prompt": "prompts/ok.md", "after": []}
+  ]
+}
+EOF
+
+    local wt_before br_before
+    wt_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" worktree list --porcelain)"
+    br_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" for-each-ref --format='%(refname)' refs/heads/ | sort)"
+
+    # 18a: --relay-sh pointing to nonexistent file -> 125
+    set +e
+    invoke_product "${d}/out-nosh.txt" "${d}/err-nosh.txt" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${d}/does-not-exist-relay.sh" --lang zh
+    local rc1=$?
+    set -e
+    [[ "${rc1}" -eq 125 && ! -s "${d}/out-nosh.txt" && -s "${d}/err-nosh.txt" ]] || {
+        echo "missing --relay-sh check failed: rc=${rc1}" >&2
+        return 1
+    }
+
+    # 18b: RELAY_WORKER set in environment -> 125
+    set +e
+    invoke_product "${d}/out-worker.txt" "${d}/err-worker.txt" \
+        "RELAY_WORKER=nested-worker-01" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    local rc2=$?
+    set -e
+    [[ "${rc2}" -eq 125 && ! -s "${d}/out-worker.txt" && -s "${d}/err-worker.txt" ]] || {
+        echo "RELAY_WORKER check failed: rc=${rc2}" >&2
+        return 1
+    }
+    grep -Fq "RELAY_WORKER" "${d}/err-worker.txt" || { echo "stderr did not mention RELAY_WORKER" >&2; return 1; }
+
+    local wt_after br_after
+    wt_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" worktree list --porcelain)"
+    br_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" for-each-ref --format='%(refname)' refs/heads/ | sort)"
+    [[ "${wt_after}" == "${wt_before}" && "${br_after}" == "${br_before}" && ! -e "${d}/traces/ok.trace" ]] || {
+        echo "125 precheck created unexpected worktree, branch, or trace" >&2
+        return 1
+    }
+
+    invoke_product "${d}/runs.json" "${d}/runs.err" -- status --project "${d}/Proj.relayproj" --runs --lang zh
+    /usr/bin/python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == []' "${d}/runs.json"
+}
+
+assert_exit_2_plan_error_case() {
+    local label="$1"
+    local repo_dir="$2"
+    local proj_dir="$3"
+    local traces_dir="$4"
+    local check_proj_exists="$5"
+    local out_f="$6"
+    local err_f="$7"
+    shift 7
+
+    local wt_before br_before
+    wt_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" worktree list --porcelain)"
+    br_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" for-each-ref --format='%(refname)' refs/heads/ | sort)"
+
+    set +e
+    invoke_product "${out_f}" "${err_f}" "$@"
+    local rc=$?
+    set -e
+
+    if [[ "${rc}" -ne 2 || -s "${out_f}" || ! -s "${err_f}" ]]; then
+        echo "plan error case '${label}' failed: rc=${rc}, stdout_size=$(wc -c <"${out_f}"), stderr_size=$(wc -c <"${err_f}")" >&2
+        return 1
+    fi
+
+    local wt_after br_after trace_files
+    wt_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" worktree list --porcelain)"
+    br_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo_dir}" for-each-ref --format='%(refname)' refs/heads/ | sort)"
+    trace_files="$(find "${traces_dir}" -type f 2>/dev/null || true)"
+    if [[ "${wt_after}" != "${wt_before}" || "${br_after}" != "${br_before}" || -n "${trace_files}" ]]; then
+        echo "plan error case '${label}' mutated worktrees, branches, or traces" >&2
+        return 1
+    fi
+
+    if [[ "${check_proj_exists}" -eq 1 ]]; then
+        invoke_product "${out_f}.runs" "${err_f}.runs" -- status --project "${proj_dir}" --runs --lang zh
+        /usr/bin/python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == []' "${out_f}.runs"
+    else
+        [[ ! -e "${proj_dir}" ]] || { echo "missing --project '${proj_dir}' was auto-created" >&2; return 1; }
+    fi
+}
+
+row_19_plan_and_argument_errors_exit_2() {
+    local d="${WORK_TMP}/r19"
+    mkdir -p "${d}/prompts" "${d}/traces" "${d}/not-a-git-repo" "${d}/plans"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    printf 'STUB WRITE src/x.txt never\n' > "${d}/prompts/ok.md"
+    local ok_prompt="${d}/prompts/ok.md"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+
+    # 1. Dependency cycle
+    cat > "${d}/plans/cycle.json" <<EOF
+{"repo": "${repo}", "base": "main", "lanes": [
+  {"id": "a", "agent": "claude", "prompt": "${ok_prompt}", "after": ["b"]},
+  {"id": "b", "agent": "codex",  "prompt": "${ok_prompt}", "after": ["a"]}
+]}
+EOF
+    assert_exit_2_plan_error_case "cycle" "${repo}" "${proj}" "${traces}" 1 "${d}/o1" "${d}/e1" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/cycle.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 2. Nonexistent `after` lane
+    cat > "${d}/plans/bad-after.json" <<EOF
+{"repo": "${repo}", "base": "main", "lanes": [
+  {"id": "a", "agent": "claude", "prompt": "${ok_prompt}", "after": ["ghost"]}
+]}
+EOF
+    assert_exit_2_plan_error_case "missing-after" "${repo}" "${proj}" "${traces}" 1 "${d}/o2" "${d}/e2" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/bad-after.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 3. Duplicate lane ID
+    cat > "${d}/plans/dup.json" <<EOF
+{"repo": "${repo}", "base": "main", "lanes": [
+  {"id": "dup", "agent": "claude", "prompt": "${ok_prompt}", "after": []},
+  {"id": "dup", "agent": "codex",  "prompt": "${ok_prompt}", "after": []}
+]}
+EOF
+    assert_exit_2_plan_error_case "duplicate-lane" "${repo}" "${proj}" "${traces}" 1 "${d}/o3" "${d}/e3" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/dup.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 4. Lane ID `a/b`
+    cat > "${d}/plans/slash.json" <<EOF
+{"repo": "${repo}", "base": "main", "lanes": [
+  {"id": "a/b", "agent": "claude", "prompt": "${ok_prompt}", "after": []}
+]}
+EOF
+    assert_exit_2_plan_error_case "lane-a/b" "${repo}" "${proj}" "${traces}" 1 "${d}/o4" "${d}/e4" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/slash.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 5. Lane ID `../x`
+    cat > "${d}/plans/dotdot.json" <<EOF
+{"repo": "${repo}", "base": "main", "lanes": [
+  {"id": "../x", "agent": "claude", "prompt": "${ok_prompt}", "after": []}
+]}
+EOF
+    assert_exit_2_plan_error_case "lane-../x" "${repo}" "${proj}" "${traces}" 1 "${d}/o5" "${d}/e5" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/dotdot.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 6. Reserved lane ID `integration`
+    cat > "${d}/plans/integration.json" <<EOF
+{"repo": "${repo}", "base": "main", "lanes": [
+  {"id": "integration", "agent": "claude", "prompt": "${ok_prompt}", "after": []}
+]}
+EOF
+    assert_exit_2_plan_error_case "lane-integration" "${repo}" "${proj}" "${traces}" 1 "${d}/o6" "${d}/e6" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/integration.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 7. Unknown `agent`
+    cat > "${d}/plans/unknown-agent.json" <<EOF
+{"repo": "${repo}", "base": "main", "lanes": [
+  {"id": "a", "agent": "unknown-vendor", "prompt": "${ok_prompt}", "after": []}
+]}
+EOF
+    assert_exit_2_plan_error_case "unknown-agent" "${repo}" "${proj}" "${traces}" 1 "${d}/o7" "${d}/e7" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/unknown-agent.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 8. Missing prompt file
+    cat > "${d}/plans/missing-prompt.json" <<EOF
+{"repo": "${repo}", "base": "main", "lanes": [
+  {"id": "a", "agent": "claude", "prompt": "${d}/prompts/does-not-exist.md", "after": []}
+]}
+EOF
+    assert_exit_2_plan_error_case "missing-prompt" "${repo}" "${proj}" "${traces}" 1 "${d}/o8" "${d}/e8" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/missing-prompt.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 9. `repo` is not a git repository
+    cat > "${d}/plans/not-git.json" <<EOF
+{"repo": "${d}/not-a-git-repo", "base": "main", "lanes": [
+  {"id": "a", "agent": "claude", "prompt": "${ok_prompt}", "after": []}
+]}
+EOF
+    assert_exit_2_plan_error_case "repo-not-git" "${repo}" "${proj}" "${traces}" 1 "${d}/o9" "${d}/e9" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/not-git.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 10. Nonexistent `base` ref
+    cat > "${d}/plans/bad-base.json" <<EOF
+{"repo": "${repo}", "base": "no-such-branch-ref", "lanes": [
+  {"id": "a", "agent": "claude", "prompt": "${ok_prompt}", "after": []}
+]}
+EOF
+    assert_exit_2_plan_error_case "missing-base" "${repo}" "${proj}" "${traces}" 1 "${d}/o10" "${d}/e10" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/bad-base.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 11. Valid plan for `--project` nonexistent & `RELAY_BUDGET_USD`
+    cat > "${d}/plans/valid.json" <<EOF
+{"repo": "${repo}", "base": "main", "lanes": [
+  {"id": "a", "agent": "claude", "prompt": "${ok_prompt}", "after": []}
+]}
+EOF
+    assert_exit_2_plan_error_case "missing-project" "${repo}" "${d}/Missing.relayproj" "${traces}" 0 "${d}/o11" "${d}/e11" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/valid.json" --project "${d}/Missing.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 12. Project bundle located inside `repo` working tree
+    init_temp_git_repo "${d}/repo-inside" 1
+    init_temp_project "${d}/repo-inside/Inside.relayproj"
+    cat > "${d}/plans/inside-proj.json" <<EOF
+{"repo": "${d}/repo-inside", "base": "main", "lanes": [
+  {"id": "a", "agent": "claude", "prompt": "${ok_prompt}", "after": []}
+]}
+EOF
+    assert_exit_2_plan_error_case "project-inside-repo" "${d}/repo-inside" "${d}/repo-inside/Inside.relayproj" "${traces}" 1 "${d}/o12" "${d}/e12" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/inside-proj.json" --project "${d}/repo-inside/Inside.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 13. Multiple predecessors (`after` length > 1)
+    cat > "${d}/plans/multi-after.json" <<EOF
+{"repo": "${repo}", "base": "main", "lanes": [
+  {"id": "a", "agent": "claude", "prompt": "${ok_prompt}", "after": []},
+  {"id": "b", "agent": "codex",  "prompt": "${ok_prompt}", "after": []},
+  {"id": "c", "agent": "agy",    "prompt": "${ok_prompt}", "after": ["a", "b"]}
+]}
+EOF
+    assert_exit_2_plan_error_case "multiple-predecessors" "${repo}" "${proj}" "${traces}" 1 "${d}/o13" "${d}/e13" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/multi-after.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 14. `RELAY_BUDGET_USD` set in environment
+    assert_exit_2_plan_error_case "relay-budget-usd" "${repo}" "${proj}" "${traces}" 1 "${d}/o14" "${d}/e14" \
+        "RELAY_BUDGET_USD=5.00" "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/valid.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    # 15. Malformed JSON
+    printf '{ invalid json\n' > "${d}/plans/malformed.json"
+    assert_exit_2_plan_error_case "malformed-json" "${repo}" "${proj}" "${traces}" 1 "${d}/o15" "${d}/e15" \
+        "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/malformed.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+}
+
+row_20_missing_git_identity_rejected_exit_2() {
+    local d="${WORK_TMP}/r20"
+    mkdir -p "${d}/prompts" "${d}/traces" "${d}/empty-home"
+    init_temp_git_repo "${d}/repo" 0
+    init_temp_project "${d}/Proj.relayproj"
+
+    local commits_before branches_before
+    commits_before="$(HOME="${d}/empty-home" git -C "${d}/repo" rev-list --all --count)"
+    branches_before="$(HOME="${d}/empty-home" git -C "${d}/repo" for-each-ref --format='%(refname:short)' refs/heads/ | sort)"
+
+    printf 'STUB WRITE src/id.txt should-not-run\n' > "${d}/prompts/id.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "idcheck", "agent": "claude", "prompt": "prompts/id.md", "after": []}
+  ]
+}
+EOF
+
+    set +e
+    invoke_product "${d}/run.stdout" "${d}/run.stderr" \
+        "RELAY_CLI_HOME=${d}/empty-home" "GIT_CONFIG_NOSYSTEM=1" "GIT_CONFIG_GLOBAL=/dev/null" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    local rc=$?
+    set -e
+
+    local commits_after branches_after
+    commits_after="$(HOME="${d}/empty-home" git -C "${d}/repo" rev-list --all --count)"
+    branches_after="$(HOME="${d}/empty-home" git -C "${d}/repo" for-each-ref --format='%(refname:short)' refs/heads/ | sort)"
+
+    [[ "${rc}" -eq 2 && ! -s "${d}/run.stdout" && -s "${d}/run.stderr" ]] || {
+        echo "missing git identity check failed: rc=${rc}" >&2
+        return 1
+    }
+    grep -Eiq 'user\.name|user\.email|身份|identity' "${d}/run.stderr" || {
+        echo "stderr did not mention configuring git identity" >&2
+        return 1
+    }
+    [[ "${commits_after}" == "${commits_before}" && "${branches_after}" == "${branches_before}" && ! -e "${d}/traces/idcheck.trace" ]] || {
+        echo "missing git identity run created commits, branches, or traces" >&2
+        return 1
+    }
+}
+
+row_21_same_plan_twice_preserves_first_branch_and_commit() {
+    local d="${WORK_TMP}/r21"
+    mkdir -p "${d}/prompts" "${d}/traces"
+    init_temp_git_repo "${d}/repo" 1
+    init_temp_project "${d}/Proj.relayproj"
+
+    printf 'STUB WRITE src/repeat.txt repeated-work\n' > "${d}/prompts/w.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "w", "agent": "claude", "prompt": "prompts/w.md", "after": []}
+  ]
+}
+EOF
+
+    invoke_product "${d}/run1.stdout" "${d}/run1.stderr" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    local b1 oid1_before
+    b1="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lanes"][0]["branch"])' "${d}/run1.stdout")"
+    oid1_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse "${b1}")"
+
+    invoke_product "${d}/run2.stdout" "${d}/run2.stderr" "STUB_TRACE_DIR=${d}/traces" -- \
+        run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh
+
+    local b2 oid2 oid1_after
+    b2="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lanes"][0]["branch"])' "${d}/run2.stdout")"
+    oid2="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse "${b2}")"
+    oid1_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse "${b1}")"
+
+    [[ -n "${b1}" && -n "${b2}" && "${b1}" != "${b2}" && "${oid1_after}" == "${oid1_before}" && -n "${oid2}" ]]
+}
+
+row_22_row1_pty_transcripts_contain_relay_status_and_final_message() {
+    local s1="${WORK_TMP}/s1"
+    [[ -s "${s1}/run_id.txt" ]] || { echo "Scenario 1 run_id.txt missing" >&2; return 1; }
+    local run_id
+    run_id="$(cat "${s1}/run_id.txt")"
+
+    /usr/bin/python3 - "${s1}/Proj.relayproj/runs/${run_id}/lanes/a.pty" "${s1}/Proj.relayproj/runs/${run_id}/lanes/b.pty" <<'PY'
+import os, re, sys
+
+for pty_path, vendor, msg in [
+    (sys.argv[1], "claude", "Final message from lane a"),
+    (sys.argv[2], "vibe",   "Final message from lane b"),
+]:
+    assert os.path.isfile(pty_path) and os.path.getsize(pty_path) > 0, f"missing or empty {pty_path}"
+    raw = open(pty_path, "rb").read().decode("utf-8", errors="replace")
+    norm = raw.replace("\r\n", "\n")
+    assert re.search(rf"^relay \d+-{vendor}: ok in \d+s;", norm, re.M), f"missing relay status line in {pty_path}: {norm!r}"
+    assert msg in norm and "STATUS: success" in norm, f"missing stub final message in {pty_path}: {norm!r}"
+PY
+}
+
+row_23_run_stdout_matches_status_run_json() {
+    local pair
+    for pair in "${WORK_TMP}/s1" "${WORK_TMP}/r05" "${WORK_TMP}/r07"; do
+        [[ -s "${pair}/run.stdout" ]] || { echo "missing ${pair}/run.stdout" >&2; return 1; }
+        local run_id
+        run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${pair}/run.stdout")"
+        invoke_product "${pair}/status-check.stdout" "${pair}/status-check.stderr" -- \
+            status --project "${pair}/Proj.relayproj" --run "${run_id}" --lang zh
+
+        cmp -s "${pair}/run.stdout" "${pair}/status-check.stdout" || {
+            echo "byte mismatch between run stdout and status --run in ${pair}" >&2
+            return 1
+        }
+        /usr/bin/python3 - "${pair}/run.stdout" "${pair}/status-check.stdout" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1], encoding="utf-8"))
+s = json.load(open(sys.argv[2], encoding="utf-8"))
+assert r == s, (r, s)
+for rl, sl in zip(r["lanes"], s["lanes"]):
+    for k in ("status", "exitCode", "signal", "costUSD", "tokens", "costSource", "commitOID"):
+        assert rl[k] == sl[k], (k, rl[k], sl[k])
+PY
+    done
+}
+
+row_24_bilingual_zh_en_stderr_differs_while_json_status_identical() {
+    local d="${WORK_TMP}/r24"
+    mkdir -p "${d}"
+
+    # Replay Row 2 (2 succeeded lanes) under zh and en
+    local lang
+    for lang in zh en; do
+        local sub="${d}/r2-${lang}"
+        mkdir -p "${sub}/prompts" "${sub}/traces"
+        init_temp_git_repo "${sub}/repo" 1
+        init_temp_project "${sub}/Proj.relayproj"
+        printf 'STUB WRITE src/a.txt ok-a\nSTUB COST 0.01\n' > "${sub}/prompts/a.md"
+        printf 'STUB WRITE src/b.txt ok-b\nSTUB COST 0.02\n' > "${sub}/prompts/b.md"
+        cat > "${sub}/plan.json" <<EOF
+{"repo": "${sub}/repo", "base": "main", "lanes": [
+  {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+  {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+]}
+EOF
+        invoke_product "${sub}/run.stdout" "${sub}/run.stderr" "STUB_TRACE_DIR=${sub}/traces" -- \
+            run "${sub}/plan.json" --project "${sub}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang "${lang}"
+    done
+
+    # Replay Row 7 (a exit 3, b after a, c ok) under zh and en
+    for lang in zh en; do
+        local sub="${d}/r7-${lang}"
+        mkdir -p "${sub}/prompts" "${sub}/traces"
+        init_temp_git_repo "${sub}/repo" 1
+        init_temp_project "${sub}/Proj.relayproj"
+        printf 'STUB WRITE dirty.txt x\nSTUB EXIT 3\n' > "${sub}/prompts/a.md"
+        printf 'STUB WRITE src/b.txt never\n' > "${sub}/prompts/b.md"
+        printf 'STUB WRITE src/c.txt ok-c\n' > "${sub}/prompts/c.md"
+        cat > "${sub}/plan.json" <<EOF
+{"repo": "${sub}/repo", "base": "main", "lanes": [
+  {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+  {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": ["a"]},
+  {"id": "c", "agent": "vibe",   "prompt": "prompts/c.md", "after": []}
+]}
+EOF
+        set +e
+        invoke_product "${sub}/run.stdout" "${sub}/run.stderr" "STUB_TRACE_DIR=${sub}/traces" -- \
+            run "${sub}/plan.json" --project "${sub}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang "${lang}"
+        local rc=$?
+        set -e
+        [[ "${rc}" -eq 1 ]] || { echo "Row 24 r7-${lang} expected exit 1, got ${rc}" >&2; return 1; }
+    done
+
+    /usr/bin/python3 - "${d}/r2-zh" "${d}/r2-en" "${d}/r7-zh" "${d}/r7-en" <<'PY'
+import json, os, sys
+
+def load_pair(dir_path):
+    j = json.load(open(os.path.join(dir_path, "run.stdout"), encoding="utf-8"))
+    e = open(os.path.join(dir_path, "run.stderr"), encoding="utf-8").read()
+    return j, e
+
+j2_zh, e2_zh = load_pair(sys.argv[1])
+j2_en, e2_en = load_pair(sys.argv[2])
+assert e2_zh != e2_en, "stderr did not differ between zh and en for Row 2"
+assert "通道 " in e2_zh and "lane " not in e2_zh, e2_zh
+assert "lane " in e2_en and "通道 " not in e2_en, e2_en
+assert j2_zh["status"] == j2_en["status"] == "succeeded"
+assert {l["laneID"]: l["status"] for l in j2_zh["lanes"]} == {l["laneID"]: l["status"] for l in j2_en["lanes"]} == {"a": "succeeded", "b": "succeeded"}
+
+j7_zh, e7_zh = load_pair(sys.argv[3])
+j7_en, e7_en = load_pair(sys.argv[4])
+assert e7_zh != e7_en, "stderr did not differ between zh and en for Row 7"
+assert "已跳过" in e7_zh and "skipped" in e7_en, (e7_zh, e7_en)
+assert j7_zh["status"] == j7_en["status"] == "failed"
+assert {l["laneID"]: l["status"] for l in j7_zh["lanes"]} == {l["laneID"]: l["status"] for l in j7_en["lanes"]} == {"a": "failed", "b": "skipped", "c": "succeeded"}
+PY
+}
+
+row_25_decoy_cli_never_invoked() {
+    [[ ! -e "${DECOY_MARKER}" ]] || {
+        echo "decoy CLI marker exists:" >&2
+        cat "${DECOY_MARKER}" >&2 || true
+        return 1
+    }
+}
+
 run_full_suite() {
     echo "================================================================"
     echo "RelayIDE M1 Acceptance Suite"
@@ -1642,21 +2099,113 @@ run_full_suite() {
     run_row "15" "kill -9 RelayIDE -> 0 procs <=20s, status --run shows interrupted (no running), subsequent small run on same project exits 0" row_15_kill9_relayide_reconciles_interrupted_and_recovers
     run_row "16" "Concurrent second run on locked project -> exit 125, empty stdout, stderr names first runID, no new worktree/branch, first run exits 0 after gate" row_16_concurrent_same_project_locked_125
     run_row "17" "Two separate projects concurrently running on the same repository -> both exit 0 with distinct branches" row_17_two_projects_same_repo_concurrent_0
+    run_row "18" "Missing --relay-sh and RELAY_WORKER set -> exit 125, empty stdout, stderr reason, no worktree/branch/run/trace" row_18_relayide_own_errors_exit_125
+    run_row "19" "Each plan/argument error run separately -> exit 2, empty stdout, worktrees/branches unchanged, no run recorded" row_19_plan_and_argument_errors_exit_2
+    run_row "20" "Temp repo without configured git identity -> exit 2 explaining identity requirement, zero commits created" row_20_missing_git_identity_rejected_exit_2
+    run_row "21" "Same plan run twice -> second run creates distinct branch while first branch and commit OID stay unchanged" row_21_same_plan_twice_preserves_first_branch_and_commit
+    run_row "22" "Row 1 .pty transcripts exist and (with CRLF->LF) contain relay.sh status line and stub final message" row_22_row1_pty_transcripts_contain_relay_status_and_final_message
+    run_row "23" "run stdout JSON matches status --run JSON across status, exitCode, spend/tokens, and commitOID" row_23_run_stdout_matches_status_run_json
+    run_row "24" "Rows 2 and 7 replayed with --lang zh and --lang en -> stderr language differs, JSON status tokens identical" row_24_bilingual_zh_en_stderr_differs_while_json_status_identical
+    run_row "25" "Decoy CLI marker file does not exist after all rows" row_25_decoy_cli_never_invoked
 
-    local sha_sh_after sha_util_after
-    sha_sh_after="$(shasum -a 256 "${REAL_RELAY_SH}" | awk '{print $1}')"
-    sha_util_after="$(shasum -a 256 "${REAL_RELAY_UTIL}" | awk '{print $1}')"
-    echo ""
-    echo "relay.sh sha256 (end):        ${sha_sh_after}"
-    echo "relay_util.py sha256 (end):   ${sha_util_after}"
-    if [[ "${sha_sh_after}" != "${SHA256_RELAY_SH_BEFORE}" || "${sha_util_after}" != "${SHA256_RELAY_UTIL_BEFORE}" ]]; then
-        record_fail "sha256" "relay.sh or relay_util.py sha256 changed during run"
+    # Execute Row 30 (`m1-run.sh --quick`) into a scratch file before Row 29 tears down ${WORK_TMP},
+    # so Row 29 can verify real deletion of ${WORK_TMP} and rows still print in order 29, 30.
+    local r30_out="${WORK_TMP}/r30-quick.out"
+    local r30_ok=0
+    local r30_rc=0
+    set +e
+    /usr/bin/python3 - "${r30_out}" "${REAL_HOME}" "${ORIG_PATH}" "${ROOT_DIR}/Scripts/acceptance/m1-run.sh" <<'PY'
+import os, signal, subprocess, sys
+out_p, real_home, orig_path, script_p = sys.argv[1:5]
+env = dict(os.environ)
+env["HOME"] = real_home
+env["PATH"] = orig_path
+for k in ("RELAY_CLI_HOME", "RELAY_CLI_CHILD_PATH", "RELAY_CLAUDE_BIN", "RELAY_CODEX_BIN", "RELAY_AGY_BIN", "RELAY_VIBE_BIN"):
+    env.pop(k, None)
+with open(out_p, "wb") as fh:
+    p = subprocess.Popen([script_p, "--quick"], stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    try:
+        sys.exit(p.wait(timeout=120.0))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        sys.exit(124)
+PY
+    r30_rc=$?
+    set -e
+    if [[ "${r30_rc}" -eq 0 ]] \
+        && grep -Fq "[PASS] Row 2: (--quick, 1 lane)" "${r30_out}" \
+        && grep -Fq "[PASS] Row 3: (--quick, 1 lane)" "${r30_out}" \
+        && grep -Fq "[PASS] Row 4: (--quick, 1 lane)" "${r30_out}" \
+        && ! grep -Fq "[FAIL]" "${r30_out}"; then
+        r30_ok=1
     fi
 
     local fail_log_nonempty=0
     [[ -s "${FAIL_LOG}" ]] && fail_log_nonempty=1
 
-    [[ "${fail_log_nonempty}" -eq 0 && "${FAIL_COUNT}" -eq 0 ]]
+    # --- Row 29: Post-suite hygiene (0 processes, WORK_TMP removed, Preferences, relay.sh/relay_util.py sha256, working tree) ---
+    echo ""
+    echo "--- Row 29: Post-suite process, temp dir, Preferences, relay.sh sha256, and working tree check ---"
+    local row29_ok=1
+    if ! poll_until_no_procs "${WORK_TMP}" 10; then
+        row29_ok=0
+    fi
+    rm -rf "${WORK_TMP}"
+    if [[ -e "${WORK_TMP}" ]]; then
+        echo "WORK_TMP still exists after rm -rf" >&2
+        row29_ok=0
+    fi
+
+    local prefs_after sha_sh_after sha_util_after git_status_after
+    prefs_after="$(ls -1 "${PREFS_DIR}" 2>/dev/null | grep -i 'relayide' | sort || true)"
+    sha_sh_after="$(shasum -a 256 "${REAL_RELAY_SH}" | awk '{print $1}')"
+    sha_util_after="$(shasum -a 256 "${REAL_RELAY_UTIL}" | awk '{print $1}')"
+    if [[ "${prefs_after}" != "${PREFS_RELAY_BEFORE}" ]]; then
+        echo "Preferences RelayIDE files changed: before='${PREFS_RELAY_BEFORE}' after='${prefs_after}'" >&2
+        row29_ok=0
+    fi
+    if [[ "${sha_sh_after}" != "${SHA256_RELAY_SH_BEFORE}" || "${sha_util_after}" != "${SHA256_RELAY_UTIL_BEFORE}" ]]; then
+        echo "relay.sh or relay_util.py sha256 changed" >&2
+        row29_ok=0
+    fi
+    if [[ "${RECORD}" -eq 0 ]]; then
+        git_status_after="$(git status --porcelain)"
+        if [[ "${git_status_after}" != "${GIT_STATUS_BEFORE}" ]]; then
+            echo "git status --porcelain changed during run without --record" >&2
+            row29_ok=0
+        fi
+    fi
+
+    if [[ "${row29_ok}" -eq 1 ]]; then
+        record_pass "29" "zero processes with temp path, temp dir removed, Preferences unchanged, relay.sh & relay_util.py sha256 unchanged, working tree unchanged"
+    else
+        record_fail "29" "post-run process, temp dir, Preferences, sha256, or working tree check failed"
+    fi
+
+    echo ""
+    echo "--- Row 30: m1-run.sh --quick runs single-lane subset of rows 2..4 and exits 0 ---"
+    if [[ "${r30_ok}" -eq 1 ]]; then
+        record_pass "30" "m1-run.sh --quick ran 1-lane subset of rows 2..4 and exited 0"
+    else
+        record_fail "30" "m1-run.sh --quick failed (exit=${r30_rc})"
+    fi
+
+    echo ""
+    echo "relay.sh sha256 (end):        ${sha_sh_after}"
+    echo "relay_util.py sha256 (end):   ${sha_util_after}"
+    echo "================================================================"
+    if [[ "${fail_log_nonempty}" -eq 0 && "${FAIL_COUNT}" -eq 0 ]]; then
+        echo "ALL M1 ACCEPTANCE CHECKS PASSED (Rows 1..25, 29, 30)"
+        echo "================================================================"
+        return 0
+    else
+        echo "M1 ACCEPTANCE SUITE FAILED (failed_rows=${FAIL_COUNT})"
+        echo "================================================================"
+        return 1
+    fi
 }
 
 sanitize_stream() {
