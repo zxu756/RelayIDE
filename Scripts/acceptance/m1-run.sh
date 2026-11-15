@@ -71,28 +71,50 @@ if [[ -n "${RELAY_SWIFT_JOBS:-}" ]]; then
     SWIFT_JOBS_ARGS=(-j "${RELAY_SWIFT_JOBS}")
 fi
 
-RAW_WORK_TMP="$(mktemp -d "${TMPDIR:-/tmp}/relayide-m1-acc.XXXXXX")"
+TMP_BASE="${TMPDIR:-/tmp}"
+RAW_WORK_TMP="$(mktemp -d "${TMP_BASE%/}/relayide-m1-acc.XXXXXX")"
 WORK_TMP="$(cd "${RAW_WORK_TMP}" && pwd -P)"
+WORK_TMP_NAME="$(basename "${WORK_TMP}")"
 
-# Strictly match processes whose command line contains the target path (`ps -axo pid=,command=` + `grep -F`).
+# Normalize `${WORK_TMP}` (or a path inside it) to start at `${WORK_TMP_NAME}` (the unique mktemp directory
+# name for this run) so command lines using either `/private/var/...` (`pwd -P`) or `/var/...`
+# (`URL.standardizedFileURL`) both match without relaxing per-run or per-subpath specificity.
+work_tmp_match_token() {
+    local target="$1"
+    if [[ "${target}" == "${WORK_TMP}" || "${target}" == "${RAW_WORK_TMP}" ]]; then
+        printf '%s' "${WORK_TMP_NAME}"
+    elif [[ "${target}" == "${WORK_TMP}/"* ]]; then
+        printf '%s/%s' "${WORK_TMP_NAME}" "${target#"${WORK_TMP}/"}"
+    elif [[ "${target}" == "${RAW_WORK_TMP}/"* ]]; then
+        printf '%s/%s' "${WORK_TMP_NAME}" "${target#"${RAW_WORK_TMP}/"}"
+    else
+        printf '%s' "${target#/private}"
+    fi
+}
+
+# Strictly match processes whose command line contains this run's unique temp directory token
+# (`ps -axo pid=,command=` + `grep -F`), matching both `/private/var/...` and `/var/...` spellings.
 list_procs_for_dir() {
-    local needle="$1"
+    local target="${1:-${WORK_TMP}}"
+    [[ -n "${target}" ]] || return 0
+    local needle
+    needle="$(work_tmp_match_token "${target}")"
     [[ -n "${needle}" ]] || return 0
     ps -axo pid=,command= | grep -F -- "${needle}" | grep -v -F -- "grep -F -- ${needle}" | awk -v self="$$" '$1 != self { print }' || true
 }
 
 kill_procs_for_dir() {
-    local needle="$1"
-    [[ -n "${needle}" ]] || return 0
+    local target="${1:-${WORK_TMP}}"
+    [[ -n "${target}" ]] || return 0
     local lines pids
-    lines="$(list_procs_for_dir "${needle}")"
+    lines="$(list_procs_for_dir "${target}")"
     if [[ -n "${lines}" ]]; then
         pids="$(printf '%s\n' "${lines}" | awk '{print $1}')"
         if [[ -n "${pids}" ]]; then
             # shellcheck disable=SC2086
             kill -TERM ${pids} 2>/dev/null || true
             /usr/bin/perl -e 'select(undef, undef, undef, 0.15)' </dev/null
-            lines="$(list_procs_for_dir "${needle}")"
+            lines="$(list_procs_for_dir "${target}")"
             pids="$(printf '%s\n' "${lines}" | awk '{print $1}')"
             if [[ -n "${pids}" ]]; then
                 # shellcheck disable=SC2086
@@ -118,19 +140,21 @@ trap 'cleanup_work_tmp' EXIT
 trap 'on_interrupt_signal' INT TERM HUP
 
 poll_until_no_procs() {
-    local needle="$1"
+    local target="$1"
     local max_sec="${2:-20}"
+    local needle
+    needle="$(work_tmp_match_token "${target}")"
     local deadline_ticks=$(( max_sec * 20 ))
     local tick=0
     while (( tick <= deadline_ticks )); do
-        if [[ -z "$(list_procs_for_dir "${needle}")" ]]; then
+        if [[ -z "$(list_procs_for_dir "${target}")" ]]; then
             return 0
         fi
         /usr/bin/perl -e 'select(undef, undef, undef, 0.05)' </dev/null
         tick=$(( tick + 1 ))
     done
     echo "leftover processes matching '${needle}' after ${max_sec}s:" >&2
-    list_procs_for_dir "${needle}" >&2 || true
+    list_procs_for_dir "${target}" >&2 || true
     return 1
 }
 
@@ -1203,23 +1227,26 @@ EOF
 
     if ! wait_for_trace_start "${d}/traces/s.trace" "${bg_pid}" 60; then
         stop_pid_watchdog "${wpid}"
-        kill_procs_for_dir "${d}"
+        kill_procs_for_dir "${WORK_TMP}"
         return 1
     fi
     verify_pid_is_tested_binary "${bg_pid}" "${d}/Proj.relayproj"
 
-    local run_id wt_path relay_sh_pid
+    local run_id wt_path wt_token rsh_token relay_sh_pid
     run_id="$(read_lock_run_id "${d}/Proj.relayproj")"
     wt_path="${d}/Proj.relayproj/runs/${run_id}/worktrees/s"
+    wt_token="$(work_tmp_match_token "${wt_path}")"
+    rsh_token="${REAL_RELAY_SH#/private}"
 
-    # Match the session/process-group leader (`pid == pgid`) for this lane's `relay.sh` (not its subshell).
-    relay_sh_pid="$(ps -axo pid=,pgid=,command= | awk -v wt="${wt_path}" -v rsh="${REAL_RELAY_SH}" '
+    # Match the session/process-group leader (`pid == pgid`) for this lane's `relay.sh` (not its subshell),
+    # matching via `${WORK_TMP_NAME}/...` so both `/private/var/...` and `/var/...` worktree paths match.
+    relay_sh_pid="$(ps -axo pid=,pgid=,command= | awk -v wt="${wt_token}" -v rsh="${rsh_token}" '
         $1 == $2 && index($0, rsh) > 0 && index($0, wt) > 0 { print $1; exit }
     ')"
     if [[ ! "${relay_sh_pid}" =~ ^[0-9]+$ ]]; then
-        echo "failed to locate top-level relay.sh PID for worktree ${wt_path}" >&2
+        echo "failed to locate top-level relay.sh PID for worktree ${wt_path} (token ${wt_token})" >&2
         stop_pid_watchdog "${wpid}"
-        kill_procs_for_dir "${d}"
+        kill_procs_for_dir "${WORK_TMP}"
         return 1
     fi
 
@@ -1230,9 +1257,9 @@ EOF
     set -e
     stop_pid_watchdog "${wpid}"
 
-    # Clean up the orphaned independent-process-group stub sleep left behind by external `kill -9 relay.sh`.
-    kill_procs_for_dir "${d}"
-    poll_until_no_procs "${d}" 10
+    # Clean up the orphaned independent-process-group stub/sleep left behind by external `kill -9 relay.sh`.
+    kill_procs_for_dir "${WORK_TMP}"
+    poll_until_no_procs "${WORK_TMP}" 10
 
     [[ "${rc}" -eq 1 ]] || { echo "expected run exit 1 after kill -9 relay.sh, got ${rc}" >&2; return 1; }
 
