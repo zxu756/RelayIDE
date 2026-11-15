@@ -1116,5 +1116,15 @@ struct WorkspaceStoreFTSAndUndoTests {
         let run1DuringRun2 = try #require(try db.fetchRun(runID: run1ID))
         #expect(run1DuringRun2.status == .interrupted)
         #expect(run1DuringRun2.lanes.allSatisfy { $0.status != .running })
+        #expect(run1DuringRun2.lanes.first { $0.laneID == "queued" }?.status == .skipped)
+        #expect(run1DuringRun2.lanes.allSatisfy { $0.status.isTerminal })
+
+        // Subsequent run holding run.lock persists orphaned running rows to interrupted/skipped in SQLite.
+        try db.persistOrphanedRunsAsInterrupted(activeRunID: run2ID)
+        let persistedRaw = try #require(try db.fetchRun(runID: run1ID, reconcileWithLock: false))
+        #expect(persistedRaw.status == .interrupted)
+        #expect(persistedRaw.lanes.first { $0.laneID == "active" }?.status == .interrupted)
+        #expect(persistedRaw.lanes.first { $0.laneID == "queued" }?.status == .skipped)
+        #expect(persistedRaw.lanes.allSatisfy { $0.status.isTerminal })
     }
 }

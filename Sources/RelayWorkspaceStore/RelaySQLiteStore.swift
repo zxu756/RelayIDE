@@ -517,6 +517,38 @@ public final class RelayProjectDatabase: @unchecked Sendable {
         return rawRuns.map { Self.reconcileWithActiveLock($0, activeLock: activeLock) }
     }
 
+    /// Persists any stale `running` runs (other than `activeRunID`, which currently owns `run.lock`) as `interrupted`
+    /// and reconciles their non-terminal lanes (`running -> interrupted`, `pending -> skipped`).
+    public func persistOrphanedRunsAsInterrupted(activeRunID: String) throws {
+        let rawRuns = try allRuns(reconcileWithLock: false)
+        let now = Date()
+        for run in rawRuns where run.status == .running && run.runID != activeRunID {
+            for var lane in run.lanes where !lane.status.isTerminal {
+                if lane.status == .running {
+                    lane.status = .interrupted
+                    if lane.reason == nil {
+                        lane.reason = "interrupted (owner process exited without releasing run)"
+                    }
+                } else {
+                    lane.status = .skipped
+                    if lane.reason == nil {
+                        lane.reason = "skipped (owner process exited before lane started)"
+                    }
+                }
+                if lane.finishedAt == nil {
+                    lane.finishedAt = now
+                }
+                try updateRunLane(lane)
+            }
+            try updateRunStatus(
+                runID: run.runID,
+                status: .interrupted,
+                reason: run.reason ?? "run.lock is no longer held by active RelayIDE process",
+                finishedAt: run.finishedAt ?? now
+            )
+        }
+    }
+
     private func fetchLanesUnlocked(db: OpaquePointer, runID: String) throws -> [RelayRunLaneRecord] {
         let sql = """
         SELECT run_id, lane_id, ordinal, agent, prompt_path, after_json,
@@ -602,7 +634,15 @@ public final class RelayProjectDatabase: @unchecked Sendable {
         guard record.status == .running else {
             return record
         }
-        let isOwnedByThisRun = activeLock.isHeld && (activeLock.holder == nil || activeLock.holder?.runID == record.runID)
+        let isOwnedByThisRun: Bool
+        if !activeLock.isHeld {
+            isOwnedByThisRun = false
+        } else if let holder = activeLock.holder {
+            isOwnedByThisRun = (holder.runID == record.runID)
+        } else {
+            isOwnedByThisRun = record.relayidePID > 0
+                && (Darwin.kill(record.relayidePID, 0) == 0 || errno == EPERM)
+        }
         guard !isOwnedByThisRun else {
             return record
         }
@@ -612,10 +652,17 @@ public final class RelayProjectDatabase: @unchecked Sendable {
         if reconciled.reason == nil {
             reconciled.reason = "run.lock is no longer held by active RelayIDE process"
         }
-        for idx in reconciled.lanes.indices where reconciled.lanes[idx].status == .running {
-            reconciled.lanes[idx].status = .interrupted
-            if reconciled.lanes[idx].reason == nil {
-                reconciled.lanes[idx].reason = "interrupted (owner process exited without releasing run)"
+        for idx in reconciled.lanes.indices where !reconciled.lanes[idx].status.isTerminal {
+            if reconciled.lanes[idx].status == .running {
+                reconciled.lanes[idx].status = .interrupted
+                if reconciled.lanes[idx].reason == nil {
+                    reconciled.lanes[idx].reason = "interrupted (owner process exited without releasing run)"
+                }
+            } else {
+                reconciled.lanes[idx].status = .skipped
+                if reconciled.lanes[idx].reason == nil {
+                    reconciled.lanes[idx].reason = "skipped (owner process exited before lane started)"
+                }
             }
         }
         return reconciled
