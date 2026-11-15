@@ -288,8 +288,8 @@ public struct RelayCLIRunner: Sendable {
 
             case "version", "--version":
                 let msg = lang.isChinese
-                    ? "RelayIDE 1.2.0 (macOS arm64 · M1：可用 run 经 agent-relay 在各自 git worktree 中运行智能体，需先安装 agent-relay；还不合并分支、不执行 verify、没有整单预算)"
-                    : "RelayIDE 1.2.0 (macOS arm64 · M1: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first]; does not merge branches, execute verify, or enforce whole-job budgets yet)"
+                    ? "RelayIDE 1.3.0 (macOS arm64 · M1：可用 run 经 agent-relay 在各自 git worktree 中运行智能体，需先安装 agent-relay；还不合并分支、不执行 verify、没有整单预算)"
+                    : "RelayIDE 1.3.0 (macOS arm64 · M1: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first]; does not merge branches, execute verify, or enforce whole-job budgets yet)"
                 return RelayCLIExecutionResult(stdout: msg, exitCode: 0)
 
             case "init":
@@ -753,7 +753,7 @@ public struct RelayCLIRunner: Sendable {
     public static func helpBanner(language: RelayLanguage) -> String {
         if language.isChinese {
             return """
-            RelayIDE 1.2.0 · 基于 agent-relay 的多智能体工作树运行器与工作区工具（M1：可用 run 经 agent-relay 在各自 git worktree 中运行智能体，需先安装 agent-relay；还不合并分支、不执行 verify、没有整单预算、未接入桌面界面）
+            RelayIDE 1.3.0 · 基于 agent-relay 的多智能体工作树运行器与工作区工具（M1：可用 run 经 agent-relay 在各自 git worktree 中运行智能体，需先安装 agent-relay；还不合并分支、不执行 verify、没有整单预算、未接入桌面界面）
             命令（可执行文件名：RelayIDE；Homebrew Cask 软链名：relayide）：
               init [--project <path.relayproj>] [--seed-demo]       新建 .relayproj SQLite WAL 工作区（--seed-demo 会写入带 [演示数据] 标记的合成样本）
               run <plan.json> --project <path.relayproj> [--relay-sh <path>]
@@ -778,7 +778,7 @@ public struct RelayCLIRunner: Sendable {
             """
         }
         return """
-        RelayIDE 1.2.0 · Multi-Agent Worktree Runner & Workspace Tool over agent-relay (M1: runs coding agents in isolated git worktrees via agent-relay with 'run', install agent-relay first; does not merge branches, execute verify, enforce whole-job budgets, or connect the desktop UI yet)
+        RelayIDE 1.3.0 · Multi-Agent Worktree Runner & Workspace Tool over agent-relay (M1: runs coding agents in isolated git worktrees via agent-relay with 'run', install agent-relay first; does not merge branches, execute verify, enforce whole-job budgets, or connect the desktop UI yet)
         Commands (built executable: RelayIDE; Homebrew Cask symlink: relayide):
           init [--project <path.relayproj>] [--seed-demo]       Initialize .relayproj SQLite WAL workspace (--seed-demo writes [DEMO] synthetic fixtures)
           run <plan.json> --project <path.relayproj> [--relay-sh <path>]
@@ -838,7 +838,7 @@ public struct RelayMCPServer: Sendable {
         case "initialize":
             var serverInfo: [String: Any] = [
                 "name": "relayide-mcp",
-                "version": "1.2.0"
+                "version": "1.3.0"
             ]
             if let boundPath = projectBundleURL?.path {
                 serverInfo["projectPath"] = boundPath
