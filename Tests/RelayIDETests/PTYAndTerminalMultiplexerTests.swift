@@ -1113,4 +1113,652 @@ struct PTYAndTerminalMultiplexerTests {
         #expect(combinedData.count == Int(metrics.bytesReadFromPTY + secondMetrics.bytesReadFromPTY))
         #expect(combinedData.starts(with: rawData))
     }
+
+    // MARK: - M1 Stage 02: Stub Agent Test Double (`Tests/Support/stub-agent.sh`)
+
+    private static var stubAgentPath: String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Support/stub-agent.sh")
+            .path
+    }
+
+    private struct StubInvocationResult {
+        let exitCode: Int32
+        let terminationReason: Process.TerminationReason
+        let stdout: String
+        let stderr: String
+        let pid: Int32
+    }
+
+    private static func makeIsolatedDecoyEnvironment(in rootDir: URL, extraEnv: [String: String] = [:]) throws -> (env: [String: String], decoyMarker: URL) {
+        let homeDir = rootDir.appendingPathComponent("isolated-home", isDirectory: true)
+        let decoyBinDir = rootDir.appendingPathComponent("decoy-bin", isDirectory: true)
+        let decoyMarker = rootDir.appendingPathComponent("decoy-invoked.marker")
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: decoyBinDir, withIntermediateDirectories: true)
+
+        for name in ["claude", "codex", "agy", "vibe"] {
+            let scriptURL = decoyBinDir.appendingPathComponent(name)
+            let script = """
+            #!/bin/sh
+            printf '%s\\n' "\(name)" >> "\(decoyMarker.path)"
+            exit 99
+            """
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        }
+
+        var env = ProcessInfo.processInfo.environment
+        env["HOME"] = homeDir.path
+        env["CFFIXED_USER_HOME"] = homeDir.path
+        let basePath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        env["PATH"] = "\(decoyBinDir.path):\(basePath)"
+        for (k, v) in extraEnv {
+            env[k] = v
+        }
+        return (env, decoyMarker)
+    }
+
+    private static func runStubProcess(
+        arguments: [String],
+        stdinString: String? = nil,
+        workingDirectory: URL,
+        environment: [String: String],
+        scratchDir: URL
+    ) throws -> StubInvocationResult {
+        let id = UUID().uuidString
+        let outURL = scratchDir.appendingPathComponent("stdout-\(id).txt")
+        let errURL = scratchDir.appendingPathComponent("stderr-\(id).txt")
+        FileManager.default.createFile(atPath: outURL.path, contents: nil)
+        FileManager.default.createFile(atPath: errURL.path, contents: nil)
+        let outHandle = try FileHandle(forWritingTo: outURL)
+        let errHandle = try FileHandle(forWritingTo: errURL)
+        defer {
+            try? outHandle.close()
+            try? errHandle.close()
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: Self.stubAgentPath)
+        proc.arguments = arguments
+        proc.currentDirectoryURL = workingDirectory
+        proc.environment = environment
+        proc.standardOutput = outHandle
+        proc.standardError = errHandle
+
+        var inPipe: Pipe?
+        if stdinString != nil {
+            let pipe = Pipe()
+            proc.standardInput = pipe
+            inPipe = pipe
+        } else {
+            proc.standardInput = FileHandle.nullDevice
+        }
+
+        try proc.run()
+        let childPID = proc.processIdentifier
+        if let stdinString, let pipe = inPipe {
+            try pipe.fileHandleForWriting.write(contentsOf: Data(stdinString.utf8))
+            try pipe.fileHandleForWriting.close()
+        }
+        proc.waitUntilExit()
+
+        let outText = try String(contentsOf: outURL, encoding: .utf8)
+        let errText = try String(contentsOf: errURL, encoding: .utf8)
+        return StubInvocationResult(
+            exitCode: proc.terminationStatus,
+            terminationReason: proc.terminationReason,
+            stdout: outText,
+            stderr: errText,
+            pid: childPID
+        )
+    }
+
+    @Test("stub-agent.sh recognizes all four vendor argv shapes and emits each vendor's expected structured output")
+    func stubAgentRecognizesFourVendorArgvShapesAndFormatsOutput() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relayide-stub-vendors-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        #expect(FileManager.default.isExecutableFile(atPath: Self.stubAgentPath) == true, "Missing executable stub-agent.sh")
+
+        let (env, decoyMarker) = try Self.makeIsolatedDecoyEnvironment(in: tmpDir)
+
+        // 1. claude: `-p --permission-mode acceptEdits --output-format json --model ...` with prompt on stdin
+        let claudeWorkdir = tmpDir.appendingPathComponent("worktrees/lane-claude", isDirectory: true)
+        try FileManager.default.createDirectory(at: claudeWorkdir, withIntermediateDirectories: true)
+        let claudeRes = try Self.runStubProcess(
+            arguments: ["-p", "--permission-mode", "acceptEdits", "--output-format", "json", "--model", "claude-opus-5-5"],
+            stdinString: "Implement API handler.\nSTUB COST 0.0123\n",
+            workingDirectory: claudeWorkdir,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(claudeRes.terminationReason == .exit)
+        #expect(claudeRes.exitCode == 0)
+        let claudeJSON = try #require(JSONSerialization.jsonObject(with: Data(claudeRes.stdout.utf8)) as? [String: Any])
+        let claudeResultText = try #require(claudeJSON["result"] as? String)
+        let claudeCost = try #require(claudeJSON["total_cost_usd"] as? Double)
+        #expect(claudeResultText.contains("STATUS: success"))
+        #expect(abs(claudeCost - 0.0123) < 0.000001)
+        #expect((claudeJSON["is_error"] as? Bool) == false)
+
+        // 2. codex: `exec -C <dir> -s workspace-write --skip-git-repo-check -o <out> -` with prompt on stdin
+        let codexWorkdir = tmpDir.appendingPathComponent("worktrees/lane-codex", isDirectory: true)
+        let callerCwd = tmpDir.appendingPathComponent("caller-cwd", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexWorkdir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: callerCwd, withIntermediateDirectories: true)
+        let codexOutFile = tmpDir.appendingPathComponent("codex-final.out.md")
+        let codexRes = try Self.runStubProcess(
+            arguments: [
+                "exec", "-C", codexWorkdir.path,
+                "-s", "workspace-write", "--skip-git-repo-check",
+                "-o", codexOutFile.path, "-"
+            ],
+            stdinString: "Implement codex step.\nSTUB TOKENS 2345\n",
+            workingDirectory: callerCwd,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(codexRes.terminationReason == .exit)
+        #expect(codexRes.exitCode == 0)
+        let codexFinalMsg = try String(contentsOf: codexOutFile, encoding: .utf8)
+        #expect(codexFinalMsg.contains("STATUS: success"))
+        #expect(codexRes.stdout.contains("session id: "))
+        #expect(codexRes.stdout.contains("tokens used\n2,345"))
+
+        // 3. agy: `-p <prompt-string> --mode accept-edits --output-format json --model ... --settings ...` (even if prompt begins with `-`)
+        let agyWorkdir = tmpDir.appendingPathComponent("worktrees/lane-agy", isDirectory: true)
+        try FileManager.default.createDirectory(at: agyWorkdir, withIntermediateDirectories: true)
+        let agyPrompt = "-- bullet heading prompt\nSTUB TOKENS 3456\n"
+        let agyRes = try Self.runStubProcess(
+            arguments: [
+                "-p", agyPrompt,
+                "--mode", "accept-edits",
+                "--output-format", "json",
+                "--model", "gemini-4-carbon-high",
+                "--settings", "{\"permissions\":{\"allow\":[\"command(ls)\"]}}"
+            ],
+            stdinString: nil,
+            workingDirectory: agyWorkdir,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(agyRes.terminationReason == .exit)
+        #expect(agyRes.exitCode == 0)
+        let agyJSON = try #require(JSONSerialization.jsonObject(with: Data(agyRes.stdout.utf8)) as? [String: Any])
+        #expect((agyJSON["status"] as? String) == "SUCCESS")
+        let agyResponse = try #require(agyJSON["response"] as? String)
+        #expect(agyResponse.contains("STATUS: success"))
+        let agyUsage = try #require(agyJSON["usage"] as? [String: Any])
+        #expect((agyUsage["total_tokens"] as? Int) == 3456)
+        #expect((agyJSON["denied_actions"] as? [Any])?.isEmpty == true)
+
+        // 4. vibe: `--workdir <dir> --trust --prompt-file <prompt> --output json --output-dir <vd> --max-price 2 --time-limit 1770`
+        let vibeWorkdir = tmpDir.appendingPathComponent("worktrees/lane-vibe", isDirectory: true)
+        let vibeOutputDir = tmpDir.appendingPathComponent("vibe-out", isDirectory: true)
+        try FileManager.default.createDirectory(at: vibeWorkdir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: vibeOutputDir, withIntermediateDirectories: true)
+        let vibePromptFile = tmpDir.appendingPathComponent("vibe-prompt.md")
+        try "Write unit tests.\nSTUB COST 0.0456\n".write(to: vibePromptFile, atomically: true, encoding: .utf8)
+        let vibeRes = try Self.runStubProcess(
+            arguments: [
+                "--workdir", vibeWorkdir.path,
+                "--trust",
+                "--prompt-file", vibePromptFile.path,
+                "--output", "json",
+                "--output-dir", vibeOutputDir.path,
+                "--max-price", "2",
+                "--time-limit", "1770"
+            ],
+            stdinString: nil,
+            workingDirectory: callerCwd,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(vibeRes.terminationReason == .exit)
+        #expect(vibeRes.exitCode == 0)
+        let vibeMessages = try #require(JSONSerialization.jsonObject(with: Data(vibeRes.stdout.utf8)) as? [[String: Any]])
+        let lastAssistant = try #require(vibeMessages.last { ($0["type"] as? String) == "message" && ($0["role"] as? String) == "assistant" })
+        let vibeContent = try #require(lastAssistant["content"] as? String)
+        #expect(vibeContent.contains("STATUS: success"))
+
+        let exportData = try Data(contentsOf: vibeOutputDir.appendingPathComponent("export.json"))
+        let exportJSON = try #require(JSONSerialization.jsonObject(with: exportData) as? [String: Any])
+        #expect((exportJSON["outcome"] as? String) == "finished")
+        let vibeCost = try #require(exportJSON["cost_usd"] as? Double)
+        #expect(abs(vibeCost - 0.0456) < 0.000001)
+        let vibeConfig = try #require(exportJSON["config"] as? [String: Any])
+        #expect(((vibeConfig["active_model"] as? String) ?? "").isEmpty == false)
+
+        #expect(FileManager.default.fileExists(atPath: decoyMarker.path) == false)
+    }
+
+    private static func listProcessesMatching(_ needle: String) throws -> [(pid: Int32, ppid: Int32, command: String)] {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-axo", "pid=,ppid=,command="]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try proc.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        let output = String(decoding: data, as: UTF8.self)
+        var results: [(pid: Int32, ppid: Int32, command: String)] = []
+        for rawLine in output.split(separator: "\n") {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            guard trimmed.contains(needle) else { continue }
+            let parts = trimmed.split(maxSplits: 2, omittingEmptySubsequences: true, whereSeparator: { $0 == " " || $0 == "\t" })
+            guard parts.count == 3,
+                  let pid = Int32(parts[0]),
+                  let ppid = Int32(parts[1]) else { continue }
+            results.append((pid: pid, ppid: ppid, command: String(parts[2])))
+        }
+        return results
+    }
+
+    @Test("stub-agent.sh executes WRITE, APPEND, WRITE_BLOCK, SLEEP, WAIT barrier, EXIT, KILL_SELF, COST, STATUS, and NO_JSON directives")
+    func stubAgentExecutesAllDirectivesAndTagsLongRunningChildren() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relayide-stub-directives-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let traceDir = tmpDir.appendingPathComponent("traces-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        let (env, decoyMarker) = try Self.makeIsolatedDecoyEnvironment(
+            in: tmpDir,
+            extraEnv: ["STUB_TRACE_DIR": traceDir.path]
+        )
+
+        // 1. WRITE / APPEND / WRITE_BLOCK + literal preservation + STATUS: partial & STATUS: failed
+        let workdirWrite = tmpDir.appendingPathComponent("worktrees/lane-write", isDirectory: true)
+        try FileManager.default.createDirectory(at: workdirWrite, withIntermediateDirectories: true)
+        let writePrompt = """
+        Regular prose line ignored by stub parser.
+        STUB WRITE nested/dir/single.txt hello $NOT_EXPANDED world
+        STUB WRITE nested/dir/multi.txt line-1
+        STUB APPEND nested/dir/multi.txt line-2
+        STUB WRITE_BLOCK Sources/Generated.swift END_SWIFT
+        public struct Generated {
+            public static let value = 42
+        }
+        END_SWIFT
+        STUB COST 0.0789
+        STUB STATUS partial
+        """
+        let partialRes = try Self.runStubProcess(
+            arguments: ["-p", "--permission-mode", "acceptEdits", "--output-format", "json"],
+            stdinString: writePrompt,
+            workingDirectory: workdirWrite,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(partialRes.exitCode == 0)
+        #expect(try String(contentsOf: workdirWrite.appendingPathComponent("nested/dir/single.txt"), encoding: .utf8) == "hello $NOT_EXPANDED world\n")
+        #expect(try String(contentsOf: workdirWrite.appendingPathComponent("nested/dir/multi.txt"), encoding: .utf8) == "line-1\nline-2\n")
+        let blockText = try String(contentsOf: workdirWrite.appendingPathComponent("Sources/Generated.swift"), encoding: .utf8)
+        #expect(blockText.contains("public static let value = 42"))
+        let partialJSON = try #require(JSONSerialization.jsonObject(with: Data(partialRes.stdout.utf8)) as? [String: Any])
+        #expect((partialJSON["result"] as? String)?.hasSuffix("STATUS: partial") == true)
+        #expect(abs(((partialJSON["total_cost_usd"] as? Double) ?? 0) - 0.0789) < 0.000001)
+
+        // Also verify `STUB STATUS: failed` (colon variant) on agy
+        let failedRes = try Self.runStubProcess(
+            arguments: ["-p", "STUB STATUS: failed\n", "--mode", "accept-edits", "--output-format", "json"],
+            stdinString: nil,
+            workingDirectory: workdirWrite,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(failedRes.exitCode == 0)
+        let failedJSON = try #require(JSONSerialization.jsonObject(with: Data(failedRes.stdout.utf8)) as? [String: Any])
+        #expect((failedJSON["response"] as? String)?.hasSuffix("STATUS: failed") == true)
+
+        // 2. NO_JSON across all 4 vendors: exits 0 without structured output / -o file / export.json
+        let noJsonCodexOut = tmpDir.appendingPathComponent("nojson-codex.out.md")
+        FileManager.default.createFile(atPath: noJsonCodexOut.path, contents: Data())
+        let noJsonVibeDir = tmpDir.appendingPathComponent("nojson-vibe", isDirectory: true)
+        try FileManager.default.createDirectory(at: noJsonVibeDir, withIntermediateDirectories: true)
+        let noJsonPromptFile = tmpDir.appendingPathComponent("nojson-prompt.md")
+        try "STUB NO_JSON\n".write(to: noJsonPromptFile, atomically: true, encoding: .utf8)
+
+        let noJsonClaude = try Self.runStubProcess(
+            arguments: ["-p", "--permission-mode", "acceptEdits", "--output-format", "json"],
+            stdinString: "STUB NO_JSON\n",
+            workingDirectory: workdirWrite,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(noJsonClaude.exitCode == 0)
+        #expect(noJsonClaude.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+        let noJsonCodex = try Self.runStubProcess(
+            arguments: ["exec", "-C", workdirWrite.path, "-s", "workspace-write", "--skip-git-repo-check", "-o", noJsonCodexOut.path, "-"],
+            stdinString: "STUB NO_JSON\n",
+            workingDirectory: tmpDir,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(noJsonCodex.exitCode == 0)
+        #expect((try Data(contentsOf: noJsonCodexOut)).isEmpty)
+
+        let noJsonAgy = try Self.runStubProcess(
+            arguments: ["-p", "STUB NO_JSON\n", "--mode", "accept-edits", "--output-format", "json"],
+            stdinString: nil,
+            workingDirectory: workdirWrite,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(noJsonAgy.exitCode == 0)
+        #expect(noJsonAgy.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+        let noJsonVibe = try Self.runStubProcess(
+            arguments: ["--workdir", workdirWrite.path, "--trust", "--prompt-file", noJsonPromptFile.path, "--output", "json", "--output-dir", noJsonVibeDir.path],
+            stdinString: nil,
+            workingDirectory: tmpDir,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(noJsonVibe.exitCode == 0)
+        #expect(noJsonVibe.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        #expect(FileManager.default.fileExists(atPath: noJsonVibeDir.appendingPathComponent("export.json").path) == false)
+
+        // 3. EXIT <code>: writes preceding files, stops before later directives, and exits with exact code
+        let workdirExit = tmpDir.appendingPathComponent("worktrees/lane-exit", isDirectory: true)
+        try FileManager.default.createDirectory(at: workdirExit, withIntermediateDirectories: true)
+        for code: Int32 in [3, 125, 2] {
+            let exitPrompt = """
+            STUB WRITE before-\(code).txt recorded
+            STUB EXIT \(code)
+            STUB WRITE after-\(code).txt unreachable
+            """
+            let exitRes = try Self.runStubProcess(
+                arguments: ["-p", exitPrompt, "--mode", "accept-edits", "--output-format", "json"],
+                stdinString: nil,
+                workingDirectory: workdirExit,
+                environment: env,
+                scratchDir: tmpDir
+            )
+            #expect(exitRes.terminationReason == .exit)
+            #expect(exitRes.exitCode == code)
+            #expect(FileManager.default.fileExists(atPath: workdirExit.appendingPathComponent("before-\(code).txt").path) == true)
+            #expect(FileManager.default.fileExists(atPath: workdirExit.appendingPathComponent("after-\(code).txt").path) == false)
+        }
+
+        // 4. KILL_SELF <signal>: genuinely dies from the requested signal when run inside POSIXPseudoTerminalSession
+        for (sigToken, expectedSig) in [("9", SIGKILL), ("TERM", SIGTERM)] {
+            let pty = POSIXPseudoTerminalSession(laneID: "lane-stub-sig-\(sigToken)")
+            defer { pty.terminate(signal: SIGKILL) }
+            try pty.spawn(
+                executablePath: Self.stubAgentPath,
+                arguments: ["-p", "STUB KILL_SELF \(sigToken)\n", "--mode", "accept-edits", "--output-format", "json"],
+                workingDirectory: workdirExit.path,
+                environmentOverrides: ["STUB_TRACE_DIR": traceDir.path]
+            )
+            #expect(pty.waitForExit(timeout: 5.0) == true)
+            let m = pty.metrics()
+            #expect(m.exitStatus == nil)
+            #expect(m.terminationSignal == expectedSig)
+        }
+
+        // 5. WAIT (barrier) + child command line carries $STUB_TRACE_DIR
+        let workdirBarrier = tmpDir.appendingPathComponent("worktrees/lane-barrier", isDirectory: true)
+        try FileManager.default.createDirectory(at: workdirBarrier, withIntermediateDirectories: true)
+        let armedFile = workdirBarrier.appendingPathComponent("armed.flag")
+        let gateFile = tmpDir.appendingPathComponent("release.barrier")
+        let afterGateFile = workdirBarrier.appendingPathComponent("after-gate.txt")
+        let waitPty = POSIXPseudoTerminalSession(laneID: "lane-barrier")
+        defer { waitPty.terminate(signal: SIGKILL) }
+        try waitPty.spawn(
+            executablePath: Self.stubAgentPath,
+            arguments: [
+                "-p",
+                """
+                STUB WRITE armed.flag ready
+                STUB WAIT \(gateFile.path)
+                STUB WRITE after-gate.txt passed-barrier
+                """,
+                "--mode", "accept-edits",
+                "--output-format", "json"
+            ],
+            workingDirectory: workdirBarrier.path,
+            environmentOverrides: ["STUB_TRACE_DIR": traceDir.path]
+        )
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: armedFile.path) { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: armedFile.path) == true)
+        // Give the WAIT child process a brief moment to spawn after writing armed.flag
+        var waitChildMatched = false
+        let waitLeaderPID = waitPty.metrics().pid
+        for _ in 0..<50 {
+            let procs = try Self.listProcessesMatching(traceDir.path)
+            if procs.contains(where: { $0.ppid == waitLeaderPID && $0.pid != waitLeaderPID }) {
+                waitChildMatched = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(waitChildMatched == true, "Expected long-running WAIT child process argv to include STUB_TRACE_DIR")
+        #expect(FileManager.default.fileExists(atPath: afterGateFile.path) == false)
+        #expect(waitPty.metrics().isRunning == true)
+
+        // Release the barrier and verify clean completion
+        try "go\n".write(to: gateFile, atomically: true, encoding: .utf8)
+        #expect(waitPty.waitForExit(timeout: 5.0) == true)
+        #expect(waitPty.metrics().exitStatus == 0)
+        #expect(try String(contentsOf: afterGateFile, encoding: .utf8) == "passed-barrier\n")
+
+        // 6. SLEEP: fractional sleep completes accurately, and long SLEEP child carries $STUB_TRACE_DIR & cleans up on terminate
+        let t0 = ContinuousClock.now
+        let shortSleepRes = try Self.runStubProcess(
+            arguments: ["-p", "STUB SLEEP 0.22\n", "--mode", "accept-edits", "--output-format", "json"],
+            stdinString: nil,
+            workingDirectory: workdirBarrier,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        let elapsed = t0.duration(to: ContinuousClock.now)
+        #expect(shortSleepRes.exitCode == 0)
+        #expect(elapsed >= .milliseconds(180))
+
+        let sleepArmedFile = workdirBarrier.appendingPathComponent("sleep-armed.flag")
+        let sleepPty = POSIXPseudoTerminalSession(laneID: "lane-sleep-tag")
+        defer { sleepPty.terminate(signal: SIGKILL) }
+        try sleepPty.spawn(
+            executablePath: Self.stubAgentPath,
+            arguments: [
+                "-p",
+                """
+                STUB WRITE sleep-armed.flag 1
+                STUB SLEEP 30
+                """,
+                "--mode", "accept-edits",
+                "--output-format", "json"
+            ],
+            workingDirectory: workdirBarrier.path,
+            environmentOverrides: ["STUB_TRACE_DIR": traceDir.path]
+        )
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: sleepArmedFile.path) { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        let sleepLeaderPID = sleepPty.metrics().pid
+        var sleepChildPID: Int32?
+        for _ in 0..<50 {
+            let procs = try Self.listProcessesMatching(traceDir.path)
+            if let hit = procs.first(where: { $0.ppid == sleepLeaderPID && $0.pid != sleepLeaderPID }) {
+                sleepChildPID = hit.pid
+                break
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(sleepChildPID != nil, "Expected long-running SLEEP child process argv to include STUB_TRACE_DIR")
+        sleepPty.terminate(signal: SIGTERM)
+        #expect(Darwin.kill(sleepLeaderPID, 0) != 0)
+        if let sleepChildPID {
+            #expect(Darwin.kill(sleepChildPID, 0) != 0)
+        }
+
+        #expect(FileManager.default.fileExists(atPath: decoyMarker.path) == false)
+    }
+
+    @Test("stub-agent.sh writes start/end timestamps and PIDs to STUB_TRACE_DIR/<lane>.trace with overlapping parallel intervals")
+    func stubAgentWritesTraceFilesWithLivePIDsAndOverlappingIntervals() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("relayide-stub-trace-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let traceDir = tmpDir.appendingPathComponent("trace-out", isDirectory: true)
+        let (env, decoyMarker) = try Self.makeIsolatedDecoyEnvironment(
+            in: tmpDir,
+            extraEnv: ["STUB_TRACE_DIR": traceDir.path]
+        )
+
+        let workdirA = tmpDir.appendingPathComponent("runs/r1/worktrees/a", isDirectory: true)
+        let workdirB = tmpDir.appendingPathComponent("runs/r1/worktrees/b", isDirectory: true)
+        try FileManager.default.createDirectory(at: workdirA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: workdirB, withIntermediateDirectories: true)
+
+        let gateURL = tmpDir.appendingPathComponent("parallel.barrier")
+        let vibePromptB = tmpDir.appendingPathComponent("prompt-b.md")
+        let vibeOutB = tmpDir.appendingPathComponent("vibe-b", isDirectory: true)
+        try FileManager.default.createDirectory(at: vibeOutB, withIntermediateDirectories: true)
+        try """
+        STUB WRITE file_b.txt from-b
+        STUB WAIT \(gateURL.path)
+        STUB COST 0.0200
+        """.write(to: vibePromptB, atomically: true, encoding: .utf8)
+
+        let ptyA = POSIXPseudoTerminalSession(laneID: "a")
+        let ptyB = POSIXPseudoTerminalSession(laneID: "b")
+        defer {
+            ptyA.terminate(signal: SIGKILL)
+            ptyB.terminate(signal: SIGKILL)
+        }
+
+        try ptyA.spawn(
+            executablePath: Self.stubAgentPath,
+            arguments: [
+                "-p",
+                """
+                STUB WRITE file_a.txt from-a
+                STUB WAIT \(gateURL.path)
+                STUB TOKENS 1800
+                """,
+                "--mode", "accept-edits",
+                "--output-format", "json"
+            ],
+            workingDirectory: workdirA.path,
+            environmentOverrides: env
+        )
+        try ptyB.spawn(
+            executablePath: Self.stubAgentPath,
+            arguments: [
+                "--workdir", workdirB.path,
+                "--trust",
+                "--prompt-file", vibePromptB.path,
+                "--output", "json",
+                "--output-dir", vibeOutB.path
+            ],
+            workingDirectory: tmpDir.path,
+            environmentOverrides: env
+        )
+
+        let traceA = traceDir.appendingPathComponent("a.trace")
+        let traceB = traceDir.appendingPathComponent("b.trace")
+        for _ in 0..<200 {
+            let aReady = (try? String(contentsOf: traceA, encoding: .utf8).contains("start ")) == true
+            let bReady = (try? String(contentsOf: traceB, encoding: .utf8).contains("start ")) == true
+            if aReady && bReady { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+
+        #expect(FileManager.default.fileExists(atPath: traceA.path) == true, "Expected a.trace to exist while paused on barrier")
+        #expect(FileManager.default.fileExists(atPath: traceB.path) == true, "Expected b.trace to exist while paused on barrier")
+
+        // Preceding WRITE files must already be materialized when start trace appears
+        #expect(FileManager.default.fileExists(atPath: workdirA.appendingPathComponent("file_a.txt").path) == true)
+        #expect(FileManager.default.fileExists(atPath: workdirB.appendingPathComponent("file_b.txt").path) == true)
+
+        let midLinesA = try String(contentsOf: traceA, encoding: .utf8).split(separator: "\n")
+        let midLinesB = try String(contentsOf: traceB, encoding: .utf8).split(separator: "\n")
+        #expect(midLinesA.count == 1)
+        #expect(midLinesB.count == 1)
+
+        let startColsA = midLinesA[0].split(separator: " ")
+        let startColsB = midLinesB[0].split(separator: " ")
+        #expect(startColsA.count >= 5)
+        #expect(startColsB.count >= 5)
+        let pidA = try #require(Int32(startColsA[2]))
+        let pidB = try #require(Int32(startColsB[2]))
+        #expect(pidA > 0 && pidB > 0 && pidA != pidB)
+        #expect(Darwin.kill(pidA, 0) == 0, "Expected recorded PID in a.trace to be alive while waiting on barrier")
+        #expect(Darwin.kill(pidB, 0) == 0, "Expected recorded PID in b.trace to be alive while waiting on barrier")
+
+        // Keep barrier held briefly so overlap window is unambiguous, then release
+        try await Task.sleep(nanoseconds: 50_000_000)
+        try "release\n".write(to: gateURL, atomically: true, encoding: .utf8)
+
+        #expect(ptyA.waitForExit(timeout: 5.0) == true)
+        #expect(ptyB.waitForExit(timeout: 5.0) == true)
+        #expect(ptyA.metrics().exitStatus == 0)
+        #expect(ptyB.metrics().exitStatus == 0)
+
+        let finalLinesA = try String(contentsOf: traceA, encoding: .utf8).split(separator: "\n")
+        let finalLinesB = try String(contentsOf: traceB, encoding: .utf8).split(separator: "\n")
+        #expect(finalLinesA.count == 2)
+        #expect(finalLinesB.count == 2)
+
+        let endColsA = finalLinesA[1].split(separator: " ")
+        let endColsB = finalLinesB[1].split(separator: " ")
+        #expect(endColsA[0] == "end")
+        #expect(endColsB[0] == "end")
+        #expect(Int32(endColsA[2]) == pidA)
+        #expect(Int32(endColsB[2]) == pidB)
+        #expect(endColsA[3] == "agy")
+        #expect(endColsB[3] == "vibe")
+        #expect(endColsA[4] == "a")
+        #expect(endColsB[4] == "b")
+        #expect(endColsA[5] == "0")
+        #expect(endColsB[5] == "0")
+
+        let startTsA = try #require(Double(startColsA[1]))
+        let endTsA = try #require(Double(endColsA[1]))
+        let startTsB = try #require(Double(startColsB[1]))
+        let endTsB = try #require(Double(endColsB[1]))
+        #expect(endTsA >= startTsA)
+        #expect(endTsB >= startTsB)
+        #expect(startTsA < endTsB && startTsB < endTsA, "Expected parallel lane trace intervals [\(startTsA), \(endTsA)] and [\(startTsB), \(endTsB)] to overlap")
+
+        // Explicit STUB LANE override + non-zero exit code recorded in trace
+        let failRes = try Self.runStubProcess(
+            arguments: ["-p", "--permission-mode", "acceptEdits", "--output-format", "json"],
+            stdinString: "STUB LANE custom-fail\nSTUB EXIT 3\n",
+            workingDirectory: workdirA,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(failRes.exitCode == 3)
+        let failTraceLines = try String(contentsOf: traceDir.appendingPathComponent("custom-fail.trace"), encoding: .utf8).split(separator: "\n")
+        #expect(failTraceLines.count == 2)
+        let failEndCols = failTraceLines[1].split(separator: " ")
+        #expect(failEndCols[0] == "end")
+        #expect(failEndCols[3] == "claude")
+        #expect(failEndCols[4] == "custom-fail")
+        #expect(failEndCols[5] == "3")
+
+        // Verify stub-agent.sh contains no forbidden skill directory references or home paths
+        let stubSource = try String(contentsOfFile: Self.stubAgentPath, encoding: .utf8)
+        let forbiddenSkillToken = "agents" + "/" + "skills"
+        #expect(!stubSource.contains(forbiddenSkillToken))
+        #expect(!stubSource.contains("/" + "Users" + "/"))
+        #expect(FileManager.default.fileExists(atPath: decoyMarker.path) == false)
+    }
 }
