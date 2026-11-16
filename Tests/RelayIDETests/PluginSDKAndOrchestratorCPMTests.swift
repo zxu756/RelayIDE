@@ -953,4 +953,106 @@ struct PluginSDKAndOrchestratorCPMTests {
             ])
         }
     }
+
+    // MARK: - 21. M2 `RelayIntegrationStderrFormatter` Bilingual Merge Progress Lines (§10)
+
+    @Test("RelayIntegrationStderrFormatter formats bilingual EN and ZH stderr lines for integration branch creation, per-lane merge steps, and integration summary (§10)")
+    func relayIntegrationStderrFormatterBilingualLines() {
+        let baseOID = "1111111111112222222222223333333333334444"
+        let mergeOID = "aaaaaaaaaaaabbbbbbbbbbbbccccccccccccdddd"
+        let wtPath = "/tmp/proj/runs/20261117-010000-abcd/worktrees/integration"
+        let branch = "relay/20261117-010000-abcd/integration"
+
+        // 1. Integration branch creation line
+        let branchEN = RelayIntegrationStderrFormatter.formatIntegrationBranchCreatedLine(
+            branchName: branch,
+            worktreePath: wtPath,
+            baseCommitOID: baseOID,
+            language: .en
+        )
+        let branchZH = RelayIntegrationStderrFormatter.formatIntegrationBranchCreatedLine(
+            branchName: branch,
+            worktreePath: wtPath,
+            baseCommitOID: baseOID,
+            language: .zhHans
+        )
+        #expect(branchEN != branchZH)
+        #expect(branchEN.contains(branch) && branchEN.contains("111111111111") && branchEN.contains(wtPath))
+        #expect(branchZH.contains("集成分支") && branchZH.contains(branch) && branchZH.contains("111111111111"))
+        #expect(!branchZH.contains("lane "))
+
+        // 2. Per-lane merge step lines: merged, no-changes, conflict
+        let mergedStep = RelayRunMergeRecord(
+            ordinal: 0,
+            laneID: "api",
+            laneCommitOID: "9999999999999999999999999999999999999999",
+            status: .merged,
+            mergeCommitOID: mergeOID
+        )
+        let mergedEN = RelayIntegrationStderrFormatter.formatMergeStepLine(step: mergedStep, agent: .claude, language: .en)
+        let mergedZH = RelayIntegrationStderrFormatter.formatMergeStepLine(step: mergedStep, agent: .claude, language: .zhHans)
+        #expect(mergedEN.contains("merge lane api (claude)") && mergedEN.contains("merged") && mergedEN.contains("aaaaaaaaaaaa"))
+        #expect(mergedZH.contains("合并通道 api (claude)") && mergedZH.contains("已合并") && mergedZH.contains("aaaaaaaaaaaa"))
+        #expect(!mergedZH.contains("lane "))
+
+        let noChangesStep = RelayRunMergeRecord(
+            ordinal: 1,
+            laneID: "noop",
+            laneCommitOID: nil,
+            status: .noChanges,
+            mergeCommitOID: nil
+        )
+        let noChangesEN = RelayIntegrationStderrFormatter.formatMergeStepLine(step: noChangesStep, agent: .codex, language: .en)
+        let noChangesZH = RelayIntegrationStderrFormatter.formatMergeStepLine(step: noChangesStep, agent: .codex, language: .zhHans)
+        #expect(noChangesEN.contains("noop (codex)") && noChangesEN.contains("no changes") && noChangesEN.contains("commit none"))
+        #expect(noChangesZH.contains("noop (codex)") && noChangesZH.contains("无改动") && noChangesZH.contains("合并提交 无"))
+
+        let conflictStep = RelayRunMergeRecord(
+            ordinal: 2,
+            laneID: "ui",
+            laneCommitOID: "8888888888888888888888888888888888888888",
+            status: .conflict,
+            mergeCommitOID: nil,
+            conflicts: [
+                RelayMergeConflictItem(path: "src/app.swift", code: "UU"),
+                RelayMergeConflictItem(path: "src/new.swift", code: "AA")
+            ]
+        )
+        let conflictEN = RelayIntegrationStderrFormatter.formatMergeStepLine(step: conflictStep, agent: .agy, language: .en)
+        let conflictZH = RelayIntegrationStderrFormatter.formatMergeStepLine(step: conflictStep, agent: .agy, language: .zhHans)
+        #expect(conflictEN.contains("ui (agy)") && conflictEN.contains("conflict") && conflictEN.contains("src/app.swift (UU), src/new.swift (AA)"))
+        #expect(conflictZH.contains("ui (agy)") && conflictZH.contains("冲突") && conflictZH.contains("src/app.swift (UU), src/new.swift (AA)"))
+
+        // 3. Final integration summary line (status + ready yes/no)
+        let mergedIntegration = RelayRunIntegrationRecord(
+            branch: branch,
+            worktreePath: wtPath,
+            baseCommitOID: baseOID,
+            headCommitOID: mergeOID,
+            status: .merged,
+            reason: nil,
+            ready: false,
+            merges: [mergedStep]
+        )
+        let sumMergedEN = RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(integration: mergedIntegration, language: .en)
+        let sumMergedZH = RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(integration: mergedIntegration, language: .zhHans)
+        #expect(sumMergedEN.contains("status merged") && sumMergedEN.contains("ready no") && sumMergedEN.contains("aaaaaaaaaaaa"))
+        #expect(sumMergedZH.contains("状态 已合并") && sumMergedZH.contains("可合入 否") && sumMergedZH.contains("aaaaaaaaaaaa"))
+        #expect(!sumMergedZH.contains("lane "))
+
+        let verifiedIntegration = RelayRunIntegrationRecord(
+            branch: branch,
+            worktreePath: wtPath,
+            baseCommitOID: baseOID,
+            headCommitOID: mergeOID,
+            status: .verified,
+            reason: nil,
+            ready: true,
+            merges: [mergedStep]
+        )
+        let sumVerifiedEN = RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(integration: verifiedIntegration, language: .en)
+        let sumVerifiedZH = RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(integration: verifiedIntegration, language: .zhHans)
+        #expect(sumVerifiedEN.contains("status verified") && sumVerifiedEN.contains("ready yes"))
+        #expect(sumVerifiedZH.contains("状态 已验证") && sumVerifiedZH.contains("可合入 是"))
+    }
 }

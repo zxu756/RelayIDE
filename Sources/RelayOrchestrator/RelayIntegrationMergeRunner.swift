@@ -109,3 +109,79 @@ public enum RelayIntegrationMergeOrder {
         return ordered
     }
 }
+
+// MARK: - Localized Stderr Integration & Merge Progress Lines (`03-relayide.md` M2 §10)
+
+public enum RelayIntegrationStderrFormatter {
+    public static func formatIntegrationBranchCreatedLine(
+        branchName: String,
+        worktreePath: String,
+        baseCommitOID: String,
+        language: RelayLanguage
+    ) -> String {
+        let shortBase = String(baseCommitOID.prefix(12))
+        if language.isChinese {
+            return "[relay] 已创建集成分支 \(branchName) · 基线 \(shortBase) · 工作树 \(worktreePath)"
+        } else {
+            return "[relay] created integration branch \(branchName) · base \(shortBase) · worktree \(worktreePath)"
+        }
+    }
+
+    public static func formatMergeStepLine(
+        step: RelayRunMergeRecord,
+        agent: RelayPlanAgent?,
+        language: RelayLanguage
+    ) -> String {
+        let isZh = language.isChinese
+        let agentSuffix = agent.map { " (\($0.rawValue))" } ?? ""
+        let statusLabel = step.status.localizedLabel(in: language)
+
+        switch step.status {
+        case .merged:
+            let shortOID = step.mergeCommitOID.map { String($0.prefix(12)) } ?? "-"
+            if isZh {
+                return "[relay] 合并通道 \(step.laneID)\(agentSuffix) · 结果 \(statusLabel) · 合并提交 \(shortOID)"
+            } else {
+                return "[relay] merge lane \(step.laneID)\(agentSuffix) · result \(statusLabel) · commit \(shortOID)"
+            }
+        case .noChanges:
+            if isZh {
+                return "[relay] 合并通道 \(step.laneID)\(agentSuffix) · 结果 \(statusLabel) · 合并提交 无"
+            } else {
+                return "[relay] merge lane \(step.laneID)\(agentSuffix) · result \(statusLabel) · commit none"
+            }
+        case .conflict:
+            let conflictDesc = step.conflicts.isEmpty
+                ? "-"
+                : step.conflicts.map { "\($0.path) (\($0.code))" }.joined(separator: ", ")
+            if isZh {
+                return "[relay] 合并通道 \(step.laneID)\(agentSuffix) · 结果 \(statusLabel) · 冲突文件 \(conflictDesc)"
+            } else {
+                return "[relay] merge lane \(step.laneID)\(agentSuffix) · result \(statusLabel) · conflicts \(conflictDesc)"
+            }
+        case .notAttempted:
+            if isZh {
+                return "[relay] 合并通道 \(step.laneID)\(agentSuffix) · 结果 \(statusLabel)"
+            } else {
+                return "[relay] merge lane \(step.laneID)\(agentSuffix) · result \(statusLabel)"
+            }
+        }
+    }
+
+    public static func formatIntegrationSummaryLine(
+        integration: RelayRunIntegrationRecord,
+        language: RelayLanguage
+    ) -> String {
+        let isZh = language.isChinese
+        let statusLabel = integration.status.localizedLabel(in: language)
+        if isZh {
+            let readyLabel = integration.ready ? "可合入 是" : "可合入 否"
+            let headSuffix = integration.headCommitOID.map { " · 分支头 \(String($0.prefix(12)))" } ?? ""
+            return "[relay] 集成结果 · 状态 \(statusLabel) · \(readyLabel)\(headSuffix)"
+        } else {
+            let readyLabel = integration.ready ? "ready yes" : "ready no"
+            let headSuffix = integration.headCommitOID.map { " · head \(String($0.prefix(12)))" } ?? ""
+            return "[relay] integration finished · status \(statusLabel) · \(readyLabel)\(headSuffix)"
+        }
+    }
+}
