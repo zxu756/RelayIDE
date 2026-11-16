@@ -34,6 +34,104 @@ public struct GitWorktreePlumbingEngine: Sendable {
         case noChanges(headCommitOID: String)
     }
 
+    public struct IntegrationWorktreeHandle: Sendable, Hashable, Equatable {
+        public let runID: String
+        public let branchName: String
+        public let worktreePath: String
+        public let baseCommitOID: String
+
+        public init(runID: String, branchName: String, worktreePath: String, baseCommitOID: String) {
+            self.runID = runID
+            self.branchName = branchName
+            self.worktreePath = worktreePath
+            self.baseCommitOID = baseCommitOID
+        }
+    }
+
+    public func createIntegrationWorktree(
+        repositoryPath: String,
+        projectBundlePath: String,
+        runID: String,
+        baseCommitOID: String,
+        environment: [String: String]? = nil
+    ) throws -> IntegrationWorktreeHandle {
+        guard RelayPlanLaneSpec.isValidRunID(runID) else {
+            throw RelayIDEError.relayEnvironmentFailure(
+                "Invalid run id '\(runID)' for integration worktree"
+            )
+        }
+        let trimmedBaseOID = baseCommitOID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isHexObjectID(trimmedBaseOID) else {
+            throw RelayIDEError.relayEnvironmentFailure(
+                "Integration worktree requires a resolved commit OID (not a ref name), got '\(baseCommitOID)'"
+            )
+        }
+
+        let worktreesRootDirectory = URL(fileURLWithPath: projectBundlePath, isDirectory: true)
+            .standardizedFileURL
+            .appendingPathComponent("runs", isDirectory: true)
+            .appendingPathComponent(runID, isDirectory: true)
+            .appendingPathComponent("worktrees", isDirectory: true)
+            .path
+        let worktreePath = (worktreesRootDirectory as NSString).appendingPathComponent("integration")
+        let branchName = "relay/\(runID)/integration"
+
+        return try withExclusiveRepositoryWorktreeLock(repositoryPath: repositoryPath, environment: environment) {
+            if FileManager.default.fileExists(atPath: worktreePath)
+                || (try? FileManager.default.attributesOfItem(atPath: worktreePath)) != nil {
+                throw RelayIDEError.worktreeAlreadyExists(worktreePath)
+            }
+
+            let branchExistsCheck = try runGitCommand(
+                ["show-ref", "--verify", "--quiet", "refs/heads/\(branchName)"],
+                cwd: repositoryPath,
+                environment: environment
+            )
+            if branchExistsCheck.exitCode == 0 {
+                throw RelayIDEError.gitPlumbingFailure(
+                    command: "git -c core.hooksPath=/dev/null worktree add -b \(branchName) \(worktreePath) \(trimmedBaseOID)",
+                    exitCode: 128,
+                    stderr: "fatal: a branch named '\(branchName)' already exists"
+                )
+            }
+
+            do {
+                try FileManager.default.createDirectory(
+                    atPath: worktreesRootDirectory,
+                    withIntermediateDirectories: true
+                )
+            } catch {
+                throw RelayIDEError.relayEnvironmentFailure(
+                    "Failed to create integration worktrees directory '\(worktreesRootDirectory)': \(error.localizedDescription)"
+                )
+            }
+
+            _ = try runGit(
+                ["-c", "core.hooksPath=/dev/null", "worktree", "add", "-b", branchName, worktreePath, trimmedBaseOID],
+                cwd: repositoryPath,
+                environment: environment
+            )
+            return IntegrationWorktreeHandle(
+                runID: runID,
+                branchName: branchName,
+                worktreePath: worktreePath,
+                baseCommitOID: trimmedBaseOID
+            )
+        }
+    }
+
+    public static func isHexObjectID(_ candidate: String) -> Bool {
+        let bytes = Array(candidate.utf8)
+        guard bytes.count == 40 || bytes.count == 64 else { return false }
+        for b in bytes {
+            let isDigit = (b >= 0x30 && b <= 0x39)
+            let isLowerHex = (b >= 0x61 && b <= 0x66)
+            let isUpperHex = (b >= 0x41 && b <= 0x46)
+            guard isDigit || isLowerHex || isUpperHex else { return false }
+        }
+        return true
+    }
+
     public func createLaneWorktree(
         repositoryPath: String,
         runID: String = "manual",

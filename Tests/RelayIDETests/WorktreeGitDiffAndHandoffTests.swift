@@ -1260,4 +1260,149 @@ struct WorktreeGitDiffAndHandoffTests {
         """
         #expect(fullMessage == expectedMessage)
     }
+
+    // MARK: - 22. M2 `createIntegrationWorktree` (`relay/<runID>/integration`, Commit OID Only, 125 on Collision, R62)
+
+    @Test("GitWorktreePlumbingEngine.createIntegrationWorktree creates relay/<runID>/integration at <project>/runs/<runID>/worktrees/integration from commit OID without relaxing laneID validation or resetting existing branches (R62)")
+    func createIntegrationWorktreeEnforcesCommitOIDBranchCollisionAndFileObstruction() throws {
+        let tempRoot = try makeMktempDirectory(prefix: "relay-m2-r62")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let homeDir = tempRoot.appendingPathComponent("home", isDirectory: true)
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        let projectDir = tempRoot.appendingPathComponent("Proj.relayproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let gitEnv = makeIsolatedGitEnvironment(homeDir: homeDir)
+
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "Integration Tester"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "int@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+        try "base-v1\n".write(to: repoDir.appendingPathComponent("base.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "base.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "base"], cwd: repoDir.path, environment: gitEnv)
+        let baseOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Advance `main` beyond `baseOID` so we also prove `createIntegrationWorktree` uses `baseOID` directly, not `main`
+        try "main-v2\n".write(to: repoDir.appendingPathComponent("base.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "base.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "advance main"], cwd: repoDir.path, environment: gitEnv)
+        let mainHeadOID = try engine.runGit(["rev-parse", "main"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(mainHeadOID != baseOID)
+
+        // Install failing post-checkout hook to prove integration worktree creation skips hooks
+        let hookMarkerURL = tempRoot.appendingPathComponent("post-checkout.marker")
+        let postCheckoutURL = repoDir.appendingPathComponent(".git/hooks/post-checkout")
+        try FileManager.default.createDirectory(at: postCheckoutURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/sh\necho fired >> \"\(hookMarkerURL.path)\"\nexit 1\n".write(to: postCheckoutURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: postCheckoutURL.path)
+
+        // 1. Lane name validation is NOT relaxed: `"integration"` still fails with exit 2 in `createLaneWorktree`
+        #expect(RelayPlanLaneSpec.isValidLaneID("integration") == false)
+        do {
+            _ = try engine.createLaneWorktree(
+                repositoryPath: repoDir.path,
+                runID: "20261117-020000-0001",
+                laneID: "integration",
+                displayName: "integration",
+                vendor: .claudeCode,
+                baseRef: baseOID,
+                worktreesRootDirectory: projectDir.appendingPathComponent("runs/20261117-020000-0001/worktrees").path,
+                environment: gitEnv
+            )
+            Issue.record("Expected createLaneWorktree to continue rejecting laneID 'integration'")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 2)
+        }
+
+        // 2. Passing a branch ref name ("main") instead of a commit OID must fail with 125 without resolving it
+        let refNameRunID = "20261117-020000-badref"
+        do {
+            _ = try engine.createIntegrationWorktree(
+                repositoryPath: repoDir.path,
+                projectBundlePath: projectDir.path,
+                runID: refNameRunID,
+                baseCommitOID: "main",
+                environment: gitEnv
+            )
+            Issue.record("Expected createIntegrationWorktree to reject non-OID ref name 'main'")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+        let refNameBranchCheck = try engine.runGitCommand(
+            ["show-ref", "--verify", "--quiet", "refs/heads/relay/\(refNameRunID)/integration"],
+            cwd: repoDir.path,
+            environment: gitEnv
+        )
+        #expect(refNameBranchCheck.exitCode != 0)
+
+        // 3. Valid creation at `<project>/runs/<runID>/worktrees/integration` on branch `relay/<runID>/integration` at `baseOID`
+        let run1ID = "20261117-020000-aaaa"
+        let handle = try engine.createIntegrationWorktree(
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            runID: run1ID,
+            baseCommitOID: baseOID,
+            environment: gitEnv
+        )
+        let expectedWTPath = projectDir
+            .standardizedFileURL
+            .appendingPathComponent("runs/\(run1ID)/worktrees/integration")
+            .path
+        #expect(handle.branchName == "relay/\(run1ID)/integration")
+        #expect(handle.worktreePath == expectedWTPath)
+        #expect(handle.baseCommitOID == baseOID)
+        #expect(!FileManager.default.fileExists(atPath: hookMarkerURL.path))
+        let wtHead = try engine.runGit(["rev-parse", "HEAD"], cwd: handle.worktreePath, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(wtHead == baseOID)
+
+        // 4. Pre-existing branch `relay/<run2ID>/integration` fails with 125 and is NEVER reset
+        let run2ID = "20261117-020001-bbbb"
+        let existingBranch = "relay/\(run2ID)/integration"
+        _ = try engine.runGit(["branch", existingBranch, mainHeadOID], cwd: repoDir.path, environment: gitEnv)
+        do {
+            _ = try engine.createIntegrationWorktree(
+                repositoryPath: repoDir.path,
+                projectBundlePath: projectDir.path,
+                runID: run2ID,
+                baseCommitOID: baseOID,
+                environment: gitEnv
+            )
+            Issue.record("Expected createIntegrationWorktree to fail when branch already exists")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+        let preservedOID = try engine.runGit(["rev-parse", "refs/heads/\(existingBranch)"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(preservedOID == mainHeadOID)
+
+        // 5. Regular file blocking `<project>/runs/<run3ID>/worktrees/integration` fails with 125 and creates no branch
+        let run3ID = "20261117-020002-cccc"
+        let blockingFileURL = projectDir.appendingPathComponent("runs/\(run3ID)/worktrees/integration")
+        try FileManager.default.createDirectory(at: blockingFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "obstruction\n".write(to: blockingFileURL, atomically: true, encoding: .utf8)
+        do {
+            _ = try engine.createIntegrationWorktree(
+                repositoryPath: repoDir.path,
+                projectBundlePath: projectDir.path,
+                runID: run3ID,
+                baseCommitOID: baseOID,
+                environment: gitEnv
+            )
+            Issue.record("Expected createIntegrationWorktree to fail when worktree path is an existing file")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+        let run3BranchCheck = try engine.runGitCommand(
+            ["show-ref", "--verify", "--quiet", "refs/heads/relay/\(run3ID)/integration"],
+            cwd: repoDir.path,
+            environment: gitEnv
+        )
+        #expect(run3BranchCheck.exitCode != 0)
+    }
 }
