@@ -3763,4 +3763,207 @@ struct CLIMCPAndWorkbenchShellTests {
         let decodedFull = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: statusEN.stdout)
         #expect(decodedFull.integration == expectedIntegration)
     }
+
+    // MARK: - 36. M2 `plan.json` `verify_timeout` & Unknown Field Validation (Exit 2, Names Offending Field, §2, R66)
+
+    @Test("RelayPlanValidator and RelayCLIRunner run enforce verify_timeout (integer 1..86400, default 1800, requires verify) and reject unknown fields with exit 2 naming the field")
+    func cliRunValidatesVerifyTimeoutAndUnknownPlanFields() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-m2-plan-validation")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        let promptsDir = plansDir.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "STUB WRITE out.txt ok\n".write(to: promptsDir.appendingPathComponent("task.md"), atomically: true, encoding: .utf8)
+
+        func writePlan(_ name: String, rawJSON: String) throws -> URL {
+            let url = plansDir.appendingPathComponent(name)
+            try rawJSON.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        }
+
+        // 1. Valid plans: default 1800s when verify present, 1s, 86400s, and nil when verify omitted
+        let defaultTimeoutURL = try writePlan(
+            "valid-default-timeout.json",
+            rawJSON: """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "main",
+              "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md", "after": []}],
+              "verify": "swift test"
+            }
+            """
+        )
+        let validatedDefault = try RelayPlanValidator.validate(
+            planFileURL: defaultTimeoutURL,
+            projectBundleURL: fx.projectURL,
+            environment: fx.baseEnvironment,
+            language: .en
+        )
+        #expect(validatedDefault.verifyCommand == "swift test")
+        #expect(validatedDefault.verifyTimeoutSec == 1800)
+
+        for validSec in [1, 86400] {
+            let boundaryURL = try writePlan(
+                "valid-\(validSec).json",
+                rawJSON: """
+                {
+                  "repo": "\(fx.repoURL.path)",
+                  "base": "main",
+                  "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md", "after": []}],
+                  "verify": "swift test",
+                  "verify_timeout": \(validSec)
+                }
+                """
+            )
+            let v = try RelayPlanValidator.validate(
+                planFileURL: boundaryURL,
+                projectBundleURL: fx.projectURL,
+                environment: fx.baseEnvironment,
+                language: .zhHans
+            )
+            #expect(v.verifyTimeoutSec == validSec)
+        }
+
+        let noVerifyURL = try writePlan(
+            "valid-no-verify.json",
+            rawJSON: """
+            {
+              "repo": "\(fx.repoURL.path)",
+              "base": "main",
+              "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md", "after": []}]
+            }
+            """
+        )
+        let validatedNoVerify = try RelayPlanValidator.validate(
+            planFileURL: noVerifyURL,
+            projectBundleURL: fx.projectURL,
+            environment: fx.baseEnvironment,
+            language: .en
+        )
+        #expect(validatedNoVerify.verifyCommand == nil)
+        #expect(validatedNoVerify.verifyTimeoutSec == nil)
+
+        // 2. Invalid plans: every case must exit 2 with empty stdout, stderr naming the field (in both EN & ZH), and 0 runs recorded
+        let invalidCases: [(label: String, expectedField: String, rawJSON: String)] = [
+            (
+                "verify is array",
+                "verify",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": ["swift", "test"]}
+                """
+            ),
+            (
+                "verify is number",
+                "verify",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": 123}
+                """
+            ),
+            (
+                "verify_timeout is 0",
+                "verify_timeout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": "true", "verify_timeout": 0}
+                """
+            ),
+            (
+                "verify_timeout is negative",
+                "verify_timeout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": "true", "verify_timeout": -5}
+                """
+            ),
+            (
+                "verify_timeout is 86401",
+                "verify_timeout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": "true", "verify_timeout": 86401}
+                """
+            ),
+            (
+                "verify_timeout is float 1.5",
+                "verify_timeout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": "true", "verify_timeout": 1.5}
+                """
+            ),
+            (
+                "verify_timeout is float 1.0",
+                "verify_timeout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": "true", "verify_timeout": 1.0}
+                """
+            ),
+            (
+                "verify_timeout is string \"60\"",
+                "verify_timeout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": "true", "verify_timeout": "60"}
+                """
+            ),
+            (
+                "verify_timeout is bool",
+                "verify_timeout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": "true", "verify_timeout": true}
+                """
+            ),
+            (
+                "verify_timeout is null",
+                "verify_timeout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": "true", "verify_timeout": null}
+                """
+            ),
+            (
+                "verify_timeout without verify",
+                "verify_timeout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify_timeout": 60}
+                """
+            ),
+            (
+                "verify_timeout with whitespace-only verify",
+                "verify_timeout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify": "   ", "verify_timeout": 60}
+                """
+            ),
+            (
+                "unknown top-level verify_timout",
+                "verify_timout",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md"}], "verify_timout": 60}
+                """
+            ),
+            (
+                "unknown lane field befor",
+                "befor",
+                """
+                {"repo": "\(fx.repoURL.path)", "base": "main", "lanes": [{"id": "api", "agent": "claude", "prompt": "prompts/task.md", "befor": []}]}
+                """
+            ),
+        ]
+
+        let cli = RelayCLIRunner()
+        for (idx, tc) in invalidCases.enumerated() {
+            let planURL = try writePlan("invalid-\(idx).json", rawJSON: tc.rawJSON)
+            for lang in ["en", "zh"] {
+                let res = await cli.executeCommand(
+                    arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", lang],
+                    environment: fx.baseEnvironment
+                )
+                #expect(res.exitCode == 2, "\(tc.label) (\(lang)): expected exit 2, got \(res.exitCode) (stderr=\(res.stderr))")
+                #expect(res.stdout.isEmpty, "\(tc.label) (\(lang)): stdout must be empty on exit 2")
+                #expect(
+                    res.stderr.contains(tc.expectedField),
+                    "\(tc.label) (\(lang)): stderr must name field '\(tc.expectedField)', got '\(res.stderr)'"
+                )
+            }
+        }
+
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
+        #expect(try db.allRuns().isEmpty)
+    }
 }

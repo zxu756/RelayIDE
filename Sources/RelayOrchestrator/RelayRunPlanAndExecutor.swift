@@ -93,9 +93,24 @@ public enum RelayPlanValidator {
             )
         }
 
+        if hasNonIntegerTopLevelVerifyTimeoutLiteral(in: rawPlanData) {
+            let schemaErr = RelayPlanSchemaError.invalidFieldType(
+                field: "verify_timeout",
+                expectedEN: "an integer (1...86400)",
+                expectedZH: "1 到 86400 的整数"
+            )
+            throw RelayIDEError.invalidRunPlan(schemaErr.localizedDescription(in: language))
+        }
+
         let plan: RelayRunPlan
         do {
             plan = try JSONDecoder().decode(RelayRunPlan.self, from: rawPlanData)
+        } catch let schemaErr as RelayPlanSchemaError {
+            throw RelayIDEError.invalidRunPlan(schemaErr.localizedDescription(in: language))
+        } catch let decodingErr as DecodingError {
+            throw RelayIDEError.invalidRunPlan(
+                describePlanDecodingError(decodingErr, planPath: standardizedPlanURL.path, isZh: isZh)
+            )
         } catch {
             throw RelayIDEError.invalidRunPlan(
                 isZh
@@ -351,6 +366,22 @@ public enum RelayPlanValidator {
             normalizedVerify = nil
         }
 
+        if let explicitTimeout = plan.verifyTimeout {
+            guard RelayRunPlan.validVerifyTimeoutRange.contains(explicitTimeout) else {
+                throw RelayIDEError.invalidRunPlan(
+                    RelayPlanSchemaError.verifyTimeoutOutOfRange(explicitTimeout).localizedDescription(in: language)
+                )
+            }
+            guard normalizedVerify != nil else {
+                throw RelayIDEError.invalidRunPlan(
+                    RelayPlanSchemaError.verifyTimeoutWithoutVerify.localizedDescription(in: language)
+                )
+            }
+        }
+        let effectiveVerifyTimeoutSec: Int? = normalizedVerify != nil
+            ? (plan.verifyTimeout ?? RelayRunPlan.defaultVerifyTimeoutSeconds)
+            : nil
+
         return RelayValidatedRunPlan(
             planFileURL: standardizedPlanURL,
             rawPlanData: rawPlanData,
@@ -359,8 +390,123 @@ public enum RelayPlanValidator {
             baseRef: baseRef,
             baseCommitOID: baseCommitOID,
             lanes: validatedLanes,
-            verifyCommand: normalizedVerify
+            verifyCommand: normalizedVerify,
+            verifyTimeoutSec: effectiveVerifyTimeoutSec
         )
+    }
+
+    /// Detects top-level `"verify_timeout": <number>` literals containing `.`, `e`, or `E` (e.g. `1.0`),
+    /// which `JSONDecoder.decode(Int.self)` may coerce to `Int` even though the JSON token is floating-point.
+    private static func hasNonIntegerTopLevelVerifyTimeoutLiteral(in data: Data) -> Bool {
+        let bytes = Array(data)
+        var i = 0
+        let n = bytes.count
+
+        func skipWhitespace() {
+            while i < n {
+                let b = bytes[i]
+                if b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D {
+                    i += 1
+                } else {
+                    break
+                }
+            }
+        }
+
+        func readJSONString() -> String? {
+            guard i < n, bytes[i] == 0x22 else { return nil }
+            let start = i
+            i += 1
+            while i < n {
+                let b = bytes[i]
+                if b == 0x5C {
+                    i += 2
+                    continue
+                }
+                if b == 0x22 {
+                    i += 1
+                    let slice = Data(bytes[start..<i])
+                    return try? JSONDecoder().decode(String.self, from: slice)
+                }
+                i += 1
+            }
+            return nil
+        }
+
+        skipWhitespace()
+        guard i < n, bytes[i] == 0x7B else { return false }
+        var depth = 0
+        while i < n {
+            let b = bytes[i]
+            if b == 0x22 {
+                let keyCandidate = readJSONString()
+                if depth == 1, keyCandidate == "verify_timeout" {
+                    skipWhitespace()
+                    if i < n, bytes[i] == 0x3A {
+                        i += 1
+                        skipWhitespace()
+                        if i < n {
+                            let vb = bytes[i]
+                            if vb == 0x2D || (vb >= 0x30 && vb <= 0x39) {
+                                var hasFloatMarker = false
+                                while i < n {
+                                    let nb = bytes[i]
+                                    if nb == 0x2E || nb == 0x65 || nb == 0x45 {
+                                        hasFloatMarker = true
+                                        i += 1
+                                    } else if (nb >= 0x30 && nb <= 0x39) || nb == 0x2B || nb == 0x2D {
+                                        i += 1
+                                    } else {
+                                        break
+                                    }
+                                }
+                                if hasFloatMarker {
+                                    return true
+                                }
+                            }
+                        }
+                    }
+                }
+                continue
+            }
+            if b == 0x7B || b == 0x5B {
+                depth += 1
+            } else if b == 0x7D || b == 0x5D {
+                depth -= 1
+                if depth <= 0 {
+                    break
+                }
+            }
+            i += 1
+        }
+        return false
+    }
+
+    private static func describePlanDecodingError(
+        _ error: DecodingError,
+        planPath: String,
+        isZh: Bool
+    ) -> String {
+        let codingPath: [CodingKey]
+        switch error {
+        case .keyNotFound(let key, let ctx):
+            codingPath = ctx.codingPath + [key]
+        case .typeMismatch(_, let ctx),
+             .valueNotFound(_, let ctx),
+             .dataCorrupted(let ctx):
+            codingPath = ctx.codingPath
+        @unknown default:
+            codingPath = []
+        }
+        let fieldPath = codingPath.map(\.stringValue).filter { !$0.isEmpty }.joined(separator: ".")
+        if !fieldPath.isEmpty {
+            return isZh
+                ? "计划文件 '\(planPath)' 字段 '\(fieldPath)' 不合法：\(error.localizedDescription)"
+                : "Plan file '\(planPath)' has invalid field '\(fieldPath)': \(error.localizedDescription)"
+        }
+        return isZh
+            ? "计划文件 '\(planPath)' 不是合法的 JSON 或顶层不是对象：\(error.localizedDescription)"
+            : "Plan file '\(planPath)' is not valid JSON or top-level value is not an object: \(error.localizedDescription)"
     }
 
     private static func resolvePath(_ rawPath: String, relativeToDirectory baseDir: URL) -> URL {

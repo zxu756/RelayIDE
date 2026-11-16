@@ -77,7 +77,72 @@ public enum RelayPlanAgent: String, Sendable, Codable, Hashable, CaseIterable {
 
 // MARK: - Raw & Validated `plan.json` Models
 
+private struct DynamicPlanCodingKey: CodingKey {
+    var stringValue: String
+    var intValue: Int?
+
+    init(stringValue: String) {
+        self.stringValue = stringValue
+        self.intValue = nil
+    }
+
+    init?(intValue: Int) {
+        self.stringValue = "\(intValue)"
+        self.intValue = intValue
+    }
+}
+
+public enum RelayPlanSchemaError: Error, LocalizedError, Sendable, Equatable {
+    case unknownTopLevelField(String)
+    case unknownLaneField(field: String, laneID: String?)
+    case missingRequiredField(String)
+    case invalidFieldType(field: String, expectedEN: String, expectedZH: String)
+    case verifyTimeoutOutOfRange(Int)
+    case verifyTimeoutWithoutVerify
+
+    public var errorDescription: String? {
+        localizedDescription(in: .en)
+    }
+
+    public func localizedDescription(in language: RelayLanguage) -> String {
+        let isZh = language.isChinese
+        switch self {
+        case .unknownTopLevelField(let field):
+            return isZh
+                ? "计划文件顶层包含不认识的字段 '\(field)'"
+                : "Unknown top-level field '\(field)' in plan.json"
+        case .unknownLaneField(let field, let laneID):
+            if let laneID, !laneID.isEmpty {
+                return isZh
+                    ? "通道 '\(laneID)' 包含不认识的字段 '\(field)'"
+                    : "Unknown field '\(field)' in lane '\(laneID)'"
+            }
+            return isZh
+                ? "通道定义包含不认识的字段 '\(field)'"
+                : "Unknown field '\(field)' in lane definition"
+        case .missingRequiredField(let field):
+            return isZh
+                ? "计划文件缺少必填字段 '\(field)'"
+                : "Missing required field '\(field)' in plan.json"
+        case .invalidFieldType(let field, let expectedEN, let expectedZH):
+            return isZh
+                ? "计划字段 '\(field)' 类型不合法：必须是\(expectedZH)"
+                : "Invalid field '\(field)': expected \(expectedEN)"
+        case .verifyTimeoutOutOfRange(let value):
+            return isZh
+                ? "计划字段 'verify_timeout' 越界（\(value)）：必须是 1 到 86400 之间的整数秒"
+                : "Invalid field 'verify_timeout' (\(value)): must be an integer between 1 and 86400 seconds"
+        case .verifyTimeoutWithoutVerify:
+            return isZh
+                ? "计划文件未提供有效的 'verify' 命令，不能单独指定字段 'verify_timeout'"
+                : "Field 'verify_timeout' cannot be specified without a non-empty 'verify' command"
+        }
+    }
+}
+
 public struct RelayPlanLaneSpec: Sendable, Codable, Hashable, Equatable {
+    public static let allowedJSONKeys: Set<String> = ["id", "agent", "prompt", "after"]
+
     public let id: String
     public let agent: String
     public let prompt: String
@@ -127,15 +192,54 @@ public struct RelayPlanLaneSpec: Sendable, Codable, Hashable, Equatable {
     }
 
     public init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: DynamicPlanCodingKey.self)
+        let unknownKeys = dynamic.allKeys.map(\.stringValue).filter { !Self.allowedJSONKeys.contains($0) }.sorted()
+        if let firstUnknown = unknownKeys.first {
+            let laneHint = try? dynamic.decode(String.self, forKey: DynamicPlanCodingKey(stringValue: "id"))
+            throw RelayPlanSchemaError.unknownLaneField(field: firstUnknown, laneID: laneHint)
+        }
+
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try container.decode(String.self, forKey: .id)
-        self.agent = try container.decode(String.self, forKey: .agent)
-        self.prompt = try container.decode(String.self, forKey: .prompt)
+        guard container.contains(.id) else {
+            throw RelayPlanSchemaError.missingRequiredField("id")
+        }
+        do {
+            self.id = try container.decode(String.self, forKey: .id)
+        } catch {
+            throw RelayPlanSchemaError.invalidFieldType(field: "id", expectedEN: "a string", expectedZH: "字符串")
+        }
+
+        guard container.contains(.agent) else {
+            throw RelayPlanSchemaError.missingRequiredField("agent")
+        }
+        do {
+            self.agent = try container.decode(String.self, forKey: .agent)
+        } catch {
+            throw RelayPlanSchemaError.invalidFieldType(field: "agent", expectedEN: "a string", expectedZH: "字符串")
+        }
+
+        guard container.contains(.prompt) else {
+            throw RelayPlanSchemaError.missingRequiredField("prompt")
+        }
+        do {
+            self.prompt = try container.decode(String.self, forKey: .prompt)
+        } catch {
+            throw RelayPlanSchemaError.invalidFieldType(field: "prompt", expectedEN: "a string", expectedZH: "字符串")
+        }
+
         if container.contains(.after) {
             if try container.decodeNil(forKey: .after) {
                 self.after = []
             } else {
-                self.after = try container.decode([String].self, forKey: .after)
+                do {
+                    self.after = try container.decode([String].self, forKey: .after)
+                } catch {
+                    throw RelayPlanSchemaError.invalidFieldType(
+                        field: "after",
+                        expectedEN: "an array of strings",
+                        expectedZH: "字符串数组"
+                    )
+                }
             }
         } else {
             self.after = []
@@ -144,38 +248,121 @@ public struct RelayPlanLaneSpec: Sendable, Codable, Hashable, Equatable {
 }
 
 public struct RelayRunPlan: Sendable, Codable, Hashable, Equatable {
+    public static let defaultVerifyTimeoutSeconds = 1800
+    public static let validVerifyTimeoutRange = 1...86400
+    public static let allowedJSONKeys: Set<String> = ["repo", "base", "lanes", "verify", "verify_timeout"]
+
     public let repo: String
     public let base: String
     public let lanes: [RelayPlanLaneSpec]
     public let verify: String?
+    public let verifyTimeout: Int?
 
     private enum CodingKeys: String, CodingKey {
         case repo
         case base
         case lanes
         case verify
+        case verifyTimeout = "verify_timeout"
     }
 
-    public init(repo: String, base: String, lanes: [RelayPlanLaneSpec], verify: String? = nil) {
+    public init(
+        repo: String,
+        base: String,
+        lanes: [RelayPlanLaneSpec],
+        verify: String? = nil,
+        verifyTimeout: Int? = nil
+    ) {
         self.repo = repo
         self.base = base
         self.lanes = lanes
         self.verify = verify
+        self.verifyTimeout = verifyTimeout
     }
 
     public init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: DynamicPlanCodingKey.self)
+        let unknownKeys = dynamic.allKeys.map(\.stringValue).filter { !Self.allowedJSONKeys.contains($0) }.sorted()
+        if let firstUnknown = unknownKeys.first {
+            throw RelayPlanSchemaError.unknownTopLevelField(firstUnknown)
+        }
+
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.repo = try container.decode(String.self, forKey: .repo)
-        self.base = try container.decode(String.self, forKey: .base)
-        self.lanes = try container.decode([RelayPlanLaneSpec].self, forKey: .lanes)
+        guard container.contains(.repo) else {
+            throw RelayPlanSchemaError.missingRequiredField("repo")
+        }
+        do {
+            self.repo = try container.decode(String.self, forKey: .repo)
+        } catch {
+            throw RelayPlanSchemaError.invalidFieldType(field: "repo", expectedEN: "a string", expectedZH: "字符串")
+        }
+
+        guard container.contains(.base) else {
+            throw RelayPlanSchemaError.missingRequiredField("base")
+        }
+        do {
+            self.base = try container.decode(String.self, forKey: .base)
+        } catch {
+            throw RelayPlanSchemaError.invalidFieldType(field: "base", expectedEN: "a string", expectedZH: "字符串")
+        }
+
+        guard container.contains(.lanes) else {
+            throw RelayPlanSchemaError.missingRequiredField("lanes")
+        }
+        do {
+            self.lanes = try container.decode([RelayPlanLaneSpec].self, forKey: .lanes)
+        } catch let schemaErr as RelayPlanSchemaError {
+            throw schemaErr
+        } catch {
+            throw RelayPlanSchemaError.invalidFieldType(
+                field: "lanes",
+                expectedEN: "an array of lane objects",
+                expectedZH: "通道对象数组"
+            )
+        }
+
         if container.contains(.verify) {
             if try container.decodeNil(forKey: .verify) {
                 self.verify = nil
             } else {
-                self.verify = try container.decode(String.self, forKey: .verify)
+                do {
+                    self.verify = try container.decode(String.self, forKey: .verify)
+                } catch {
+                    throw RelayPlanSchemaError.invalidFieldType(field: "verify", expectedEN: "a string", expectedZH: "字符串")
+                }
             }
         } else {
             self.verify = nil
+        }
+
+        if container.contains(.verifyTimeout) {
+            if try container.decodeNil(forKey: .verifyTimeout) {
+                throw RelayPlanSchemaError.invalidFieldType(
+                    field: "verify_timeout",
+                    expectedEN: "an integer (1...86400)",
+                    expectedZH: "1 到 86400 的整数"
+                )
+            }
+            let parsedTimeout: Int
+            do {
+                parsedTimeout = try container.decode(Int.self, forKey: .verifyTimeout)
+            } catch {
+                throw RelayPlanSchemaError.invalidFieldType(
+                    field: "verify_timeout",
+                    expectedEN: "an integer (1...86400)",
+                    expectedZH: "1 到 86400 的整数"
+                )
+            }
+            guard Self.validVerifyTimeoutRange.contains(parsedTimeout) else {
+                throw RelayPlanSchemaError.verifyTimeoutOutOfRange(parsedTimeout)
+            }
+            let hasNonEmptyVerify = !(self.verify?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            guard hasNonEmptyVerify else {
+                throw RelayPlanSchemaError.verifyTimeoutWithoutVerify
+            }
+            self.verifyTimeout = parsedTimeout
+        } else {
+            self.verifyTimeout = nil
         }
     }
 }
@@ -214,6 +401,7 @@ public struct RelayValidatedRunPlan: Sendable, Hashable, Equatable {
     public let baseCommitOID: String
     public let lanes: [RelayValidatedLaneSpec]
     public let verifyCommand: String?
+    public let verifyTimeoutSec: Int?
 
     public init(
         planFileURL: URL,
@@ -223,7 +411,8 @@ public struct RelayValidatedRunPlan: Sendable, Hashable, Equatable {
         baseRef: String,
         baseCommitOID: String,
         lanes: [RelayValidatedLaneSpec],
-        verifyCommand: String?
+        verifyCommand: String?,
+        verifyTimeoutSec: Int? = nil
     ) {
         self.planFileURL = planFileURL
         self.rawPlanData = rawPlanData
@@ -233,6 +422,7 @@ public struct RelayValidatedRunPlan: Sendable, Hashable, Equatable {
         self.baseCommitOID = baseCommitOID
         self.lanes = lanes
         self.verifyCommand = verifyCommand
+        self.verifyTimeoutSec = verifyTimeoutSec
     }
 }
 
