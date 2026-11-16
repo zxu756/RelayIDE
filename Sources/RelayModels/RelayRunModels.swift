@@ -747,6 +747,7 @@ public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codab
         case reason
         case relayidePID
         case lanes
+        case integration
     }
 
     public init(
@@ -799,6 +800,7 @@ public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codab
         try encodeNullable(reason, into: &c, forKey: .reason)
         try c.encode(relayidePID, forKey: .relayidePID)
         try c.encode(lanes, forKey: .lanes)
+        try encodeNullable(integration, into: &c, forKey: .integration)
     }
 }
 

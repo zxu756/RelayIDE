@@ -3663,4 +3663,104 @@ struct CLIMCPAndWorkbenchShellTests {
         )
         #expect(recoveryRes.exitCode == 0)
     }
+
+    // MARK: - 35. M2 `status --run <id>` JSON Emits `integration` (`null` in M1/Stage-1 Runs, Object When Persisted, §10)
+
+    @Test("RelayCLIRunner status --run emits explicit null integration for runs without integration rows and full integration object when persisted")
+    func cliStatusRunJSONIncludesIntegrationFieldNullOrPopulated() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-m2-status-integration")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+        try "STUB WRITE out.txt ok\n".write(to: plansDir.appendingPathComponent("api.md"), atomically: true, encoding: .utf8)
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "api", "agent": "claude", "prompt": "api.md", "after": []}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        let cli = RelayCLIRunner(runIDProvider: { "20261117-020000-0001" })
+        let runRes = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+            environment: fx.baseEnvironment
+        )
+        #expect(runRes.exitCode == 0)
+        #expect(runRes.stdout.contains("\"integration\" : null"))
+
+        let statusNullRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", "20261117-020000-0001"],
+            environment: fx.baseEnvironment
+        )
+        #expect(statusNullRes.exitCode == 0)
+        #expect(statusNullRes.stdout == runRes.stdout)
+        let decodedNull = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: statusNullRes.stdout)
+        #expect(decodedNull.integration == nil)
+
+        // Persist an M2 integration + merge + verify record and verify `status --run` JSON under EN and ZH.
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
+        let t0 = Date(timeIntervalSince1970: 1_763_310_000)
+        let t1 = Date(timeIntervalSince1970: 1_763_310_012)
+        let expectedIntegration = RelayRunIntegrationRecord(
+            branch: "relay/20261117-020000-0001/integration",
+            worktreePath: fx.projectURL.appendingPathComponent("runs/20261117-020000-0001/worktrees/integration").path,
+            baseCommitOID: fx.baseCommitOID,
+            headCommitOID: "4444444444444444444444444444444444444444",
+            status: .verified,
+            reason: nil,
+            ready: true,
+            merges: [
+                RelayRunMergeRecord(
+                    ordinal: 0,
+                    laneID: "api",
+                    laneCommitOID: decodedNull.lanes.first?.commitOID,
+                    status: .merged,
+                    mergeCommitOID: "4444444444444444444444444444444444444444",
+                    conflicts: [],
+                    conflictLines: [],
+                    startedAt: t0,
+                    finishedAt: t1
+                )
+            ],
+            verify: RelayRunVerifyRecord(
+                command: "swift test",
+                timeoutSec: 1800,
+                status: .passed,
+                exitCode: 0,
+                signal: nil,
+                pid: 4321,
+                startedAt: t0,
+                finishedAt: t1,
+                logPath: fx.projectURL.appendingPathComponent("runs/20261117-020000-0001/verify.pty").path,
+                logBytes: 4096,
+                logTruncated: false,
+                modifiedTrackedFiles: []
+            )
+        )
+        try db.upsertRunIntegration(runID: "20261117-020000-0001", expectedIntegration)
+
+        let statusEN = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", "20261117-020000-0001", "--lang", "en"],
+            environment: fx.baseEnvironment
+        )
+        let statusZH = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", "20261117-020000-0001", "--lang", "zh"],
+            environment: fx.baseEnvironment
+        )
+        #expect(statusEN.exitCode == 0)
+        #expect(statusZH.exitCode == 0)
+        #expect(statusEN.stdout == statusZH.stdout)
+        #expect(statusEN.stdout.contains("\"integration\" : {"))
+        #expect(statusEN.stdout.contains("\"status\" : \"verified\""))
+        #expect(statusEN.stdout.contains("\"ready\" : true"))
+        #expect(statusEN.stdout.contains("\"modifiedTrackedFiles\" : ["))
+
+        let decodedFull = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: statusEN.stdout)
+        #expect(decodedFull.integration == expectedIntegration)
+    }
 }
