@@ -791,8 +791,11 @@ public struct GitWorktreePlumbingEngine: Sendable {
             atomically: true,
             encoding: .utf8
         )
-        _ = try runGit(["add", "."], cwd: directoryPath)
-        _ = try runGit(["commit", "-m", "Initial commit"], cwd: directoryPath)
+        _ = try runGit(["-c", "core.hooksPath=/dev/null", "add", "."], cwd: directoryPath)
+        _ = try runGit(
+            ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "--no-gpg-sign", "-m", "Initial commit"],
+            cwd: directoryPath
+        )
         return try headCommitOID(at: directoryPath)
     }
 
