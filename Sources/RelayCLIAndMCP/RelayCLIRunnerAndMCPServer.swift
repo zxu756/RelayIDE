@@ -367,38 +367,14 @@ public struct RelayCLIRunner: Sendable {
                 }
 
             case "status":
-                let bundlePath = optionValue("--project", in: rest) ?? optionValue("-p", in: rest) ?? "PaymentsCore.relayproj"
-                let wantsRunsList = rest.contains("--runs")
-                let explicitRunOption = extractRunFlagValue(in: rest)
-                if wantsRunsList && explicitRunOption.present {
-                    let conflictErr = RelayIDEError.invalidCLIUsage(
-                        lang.isChinese
-                            ? "不能同时指定 --run 与 --runs"
-                            : "Cannot specify both --run and --runs"
-                    )
-                    return RelayCLIExecutionResult(
-                        stderr: conflictErr.localizedDescription(in: lang),
-                        exitCode: conflictErr.cliExitCode,
-                        error: conflictErr
-                    )
-                }
-                if explicitRunOption.present {
-                    guard let runID = explicitRunOption.value, !runID.isEmpty, !runID.hasPrefix("-") else {
-                        let missingID = RelayIDEError.invalidCLIUsage(
-                            lang.isChinese ? "--run 需要提供运行编号" : "--run requires a run ID"
-                        )
-                        return RelayCLIExecutionResult(
-                            stderr: missingID.localizedDescription(in: lang),
-                            exitCode: missingID.cliExitCode,
-                            error: missingID
-                        )
-                    }
-                    let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: URL(fileURLWithPath: bundlePath))
+                let parsedStatus = try parseStatusCLIArguments(rest, language: lang)
+                if let runID = parsedStatus.runID {
+                    let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: URL(fileURLWithPath: parsedStatus.bundlePath))
                     guard let run = try db.fetchRun(runID: runID, reconcileWithLock: true) else {
                         let notFound = RelayIDEError.invalidCLIUsage(
                             lang.isChinese
-                                ? "在工程 '\(bundlePath)' 中未找到运行编号 '\(runID)'"
-                                : "Run '\(runID)' not found in project '\(bundlePath)'"
+                                ? "在工程 '\(parsedStatus.bundlePath)' 中未找到运行编号 '\(runID)'"
+                                : "Run '\(runID)' not found in project '\(parsedStatus.bundlePath)'"
                         )
                         return RelayCLIExecutionResult(
                             stderr: notFound.localizedDescription(in: lang),
@@ -409,13 +385,13 @@ public struct RelayCLIRunner: Sendable {
                     let json = try RelayRunJSONCodec.encode(run)
                     return RelayCLIExecutionResult(stdout: json, exitCode: 0)
                 }
-                if wantsRunsList {
-                    let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: URL(fileURLWithPath: bundlePath))
+                if parsedStatus.wantsRunsList {
+                    let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: URL(fileURLWithPath: parsedStatus.bundlePath))
                     let runs = try db.allRuns(reconcileWithLock: true)
                     let json = try RelayRunJSONCodec.encode(runs)
                     return RelayCLIExecutionResult(stdout: json, exitCode: 0)
                 }
-                let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: URL(fileURLWithPath: bundlePath))
+                let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: URL(fileURLWithPath: parsedStatus.bundlePath))
                 let stats = try db.computeStats()
                 let data = try JSONEncoder().encode(stats)
                 return RelayCLIExecutionResult(stdout: String(decoding: data, as: UTF8.self), exitCode: 0)
@@ -684,15 +660,95 @@ public struct RelayCLIRunner: Sendable {
         return (planPath: planPath, projectPath: resolvedProject, relayShPath: relayShPath)
     }
 
-    private func extractRunFlagValue(in args: [String]) -> (present: Bool, value: String?) {
-        if let idx = args.firstIndex(of: "--run") {
-            let val = (idx + 1 < args.count) ? args[idx + 1] : nil
-            return (true, val)
+    private func parseStatusCLIArguments(
+        _ args: [String],
+        language: RelayLanguage
+    ) throws -> (bundlePath: String, runID: String?, wantsRunsList: Bool) {
+        let isZh = language.isChinese
+        var bundlePath: String?
+        var runID: String?
+        var sawRunFlag = false
+        var wantsRunsList = false
+        var idx = 0
+
+        while idx < args.count {
+            let tok = args[idx]
+            if tok == "--project" || tok == "-p" {
+                guard idx + 1 < args.count, !args[idx + 1].isEmpty, !args[idx + 1].hasPrefix("-") else {
+                    throw RelayIDEError.invalidCLIUsage(
+                        isZh ? "'--project' 需要提供工程路径" : "'--project' requires a project path"
+                    )
+                }
+                bundlePath = args[idx + 1]
+                idx += 2
+                continue
+            }
+            if tok.hasPrefix("--project=") {
+                let val = String(tok.dropFirst("--project=".count))
+                guard !val.isEmpty else {
+                    throw RelayIDEError.invalidCLIUsage(
+                        isZh ? "'--project=' 不能为空" : "'--project=' must not be empty"
+                    )
+                }
+                bundlePath = val
+                idx += 1
+                continue
+            }
+            if tok == "--run" {
+                sawRunFlag = true
+                guard idx + 1 < args.count, !args[idx + 1].isEmpty, !args[idx + 1].hasPrefix("-") else {
+                    throw RelayIDEError.invalidCLIUsage(
+                        isZh ? "--run 需要提供运行编号" : "--run requires a run ID"
+                    )
+                }
+                runID = args[idx + 1]
+                idx += 2
+                continue
+            }
+            if tok.hasPrefix("--run=") {
+                sawRunFlag = true
+                let val = String(tok.dropFirst("--run=".count))
+                guard !val.isEmpty, !val.hasPrefix("-") else {
+                    throw RelayIDEError.invalidCLIUsage(
+                        isZh ? "--run 需要提供运行编号" : "--run requires a run ID"
+                    )
+                }
+                runID = val
+                idx += 1
+                continue
+            }
+            if tok == "--runs" {
+                wantsRunsList = true
+                idx += 1
+                continue
+            }
+            if tok == "--json" {
+                idx += 1
+                continue
+            }
+            if tok.hasPrefix("-") {
+                throw RelayIDEError.invalidCLIUsage(
+                    isZh
+                        ? "status 不支持的选项 '\(tok)'（用法：RelayIDE status [--project <工程>] [--run <运行编号> | --runs]）"
+                        : "Unsupported option '\(tok)' for status (usage: RelayIDE status [--project <project.relayproj>] [--run <run-id> | --runs])"
+                )
+            }
+            throw RelayIDEError.invalidCLIUsage(
+                isZh
+                    ? "status 不接受位置参数 '\(tok)'；查询指定运行请使用 '--run <运行编号>'（用法：RelayIDE status [--project <工程>] [--run <运行编号> | --runs]）"
+                    : "status does not accept positional argument '\(tok)'; use '--run <run-id>' instead (usage: RelayIDE status [--project <project.relayproj>] [--run <run-id> | --runs])"
+            )
         }
-        for tok in args where tok.hasPrefix("--run=") {
-            return (true, String(tok.dropFirst("--run=".count)))
+
+        if wantsRunsList && sawRunFlag {
+            throw RelayIDEError.invalidCLIUsage(
+                isZh
+                    ? "不能同时指定 --run 与 --runs"
+                    : "Cannot specify both --run and --runs"
+            )
         }
-        return (false, nil)
+
+        return (bundlePath: bundlePath ?? "PaymentsCore.relayproj", runID: runID, wantsRunsList: wantsRunsList)
     }
 
     private func optionValue(_ flag: String, in args: [String]) -> String? {

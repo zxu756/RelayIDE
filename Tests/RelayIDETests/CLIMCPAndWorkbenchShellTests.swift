@@ -3966,4 +3966,32 @@ struct CLIMCPAndWorkbenchShellTests {
         let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
         #expect(try db.allRuns().isEmpty)
     }
+
+    // MARK: - 37. M2 `status` Rejects Extra Positional Arguments (`exit 2`, `--run` Hint, R60)
+
+    @Test("RelayCLIRunner status rejects extra positional arguments with exit 2, empty stdout, and a hint to use --run")
+    func cliStatusRejectsExtraPositionalArgumentsWithExit2AndRunHint() async throws {
+        let tempDir = try makeIsolatedTempDirectory(prefix: "relay-status-r60")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let bundleURL = tempDir.appendingPathComponent("Proj.relayproj", isDirectory: true)
+        _ = try RelayProjectDatabase(bundleDirectoryURL: bundleURL)
+        let cli = RelayCLIRunner()
+
+        let positionalForms: [[String]] = [
+            ["status", "20261117-010203-a1b2", "--project", bundleURL.path],
+            ["status", "--project", bundleURL.path, "20261117-010203-a1b2"],
+            ["status", "20261117-010203-a1b2"],
+            ["status", "--project", bundleURL.path, "--run", "20261117-010203-a1b2", "extra"],
+        ]
+
+        for form in positionalForms {
+            for lang in ["en", "zh"] {
+                let res = await cli.executeCommand(arguments: form + ["--lang", lang])
+                #expect(res.exitCode == 2, "\(form) (\(lang)): expected exit 2, got \(res.exitCode)")
+                #expect(res.stdout.isEmpty, "\(form) (\(lang)): stdout must be empty on exit 2, got '\(res.stdout)'")
+                #expect(res.stderr.contains("--run"), "\(form) (\(lang)): stderr must hint '--run', got '\(res.stderr)'")
+            }
+        }
+    }
 }
