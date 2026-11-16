@@ -190,6 +190,274 @@ public enum RelayIntegrationStderrFormatter {
 
 public enum RelayIntegrationMergeRunner {
     @discardableResult
+    public static func runIntegrationMergePhase(
+        runID: String,
+        repositoryPath: String,
+        projectBundlePath: String,
+        baseCommitOID: String,
+        lanes: [RelayRunLaneRecord],
+        planOrder: [String],
+        database: RelayProjectDatabase,
+        gitEngine: GitWorktreePlumbingEngine = GitWorktreePlumbingEngine(),
+        language: RelayLanguage = .en,
+        environment: [String: String]? = nil,
+        isCancelled: @Sendable () -> Bool = { false },
+        emitSummaryLineOnMerged: Bool = true,
+        onStderrLine: @Sendable (String) -> Void = { _ in }
+    ) throws -> RelayRunIntegrationRecord {
+        var laneByID: [String: RelayRunLaneRecord] = [:]
+        laneByID.reserveCapacity(lanes.count)
+        for lane in lanes {
+            if laneByID.updateValue(lane, forKey: lane.laneID) != nil {
+                throw RelayIDEError.relayEnvironmentFailure(
+                    "Duplicate lane record '\(lane.laneID)' in run '\(runID)'"
+                )
+            }
+        }
+
+        let mergeOrderIDs: [String]
+        do {
+            mergeOrderIDs = try RelayIntegrationMergeOrder.computeMergeOrder(
+                lanes: lanes,
+                planOrder: planOrder
+            )
+        } catch let relayErr as RelayIDEError {
+            throw RelayIDEError.relayEnvironmentFailure(relayErr.localizedDescription(in: .en))
+        }
+
+        // 1. D1 check (`03-relayide.md` M2 §1 & D1): merge ONLY when every lane finished `succeeded` or `succeeded-no-changes`.
+        let nonSucceeded = planOrder
+            .compactMap { laneByID[$0] }
+            .filter { $0.status != .succeeded && $0.status != .succeededNoChanges }
+        if !nonSucceeded.isEmpty {
+            let details = nonSucceeded
+                .map { "\($0.laneID) (\($0.status.rawValue))" }
+                .joined(separator: ", ")
+            let skipped = RelayRunIntegrationRecord(
+                branch: nil,
+                worktreePath: nil,
+                baseCommitOID: baseCommitOID,
+                headCommitOID: nil,
+                status: .skipped,
+                reason: "skipped: non-succeeded lanes: \(details)",
+                ready: false,
+                merges: [],
+                verify: nil
+            )
+            try database.upsertRunIntegration(runID: runID, skipped)
+            onStderrLine(
+                RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
+                    integration: skipped,
+                    language: language
+                )
+            )
+            return skipped
+        }
+
+        // 2. Entry cancellation check (`03-relayide.md` M2 §7): before creating integration worktree / branch.
+        if isCancelled() {
+            let cancelled = RelayRunIntegrationRecord(
+                branch: nil,
+                worktreePath: nil,
+                baseCommitOID: baseCommitOID,
+                headCommitOID: nil,
+                status: .cancelled,
+                reason: "cancelled",
+                ready: false,
+                merges: [],
+                verify: nil
+            )
+            try database.upsertRunIntegration(runID: runID, cancelled)
+            onStderrLine(
+                RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
+                    integration: cancelled,
+                    language: language
+                )
+            )
+            return cancelled
+        }
+
+        // 3. `nothing-to-merge` (`03-relayide.md` M2 §1): all lanes finished without commits (`succeeded-no-changes`).
+        let allNoChanges = lanes.allSatisfy { $0.status == .succeededNoChanges || $0.commitOID == nil }
+        if allNoChanges {
+            let nothingToMerge = RelayRunIntegrationRecord(
+                branch: nil,
+                worktreePath: nil,
+                baseCommitOID: baseCommitOID,
+                headCommitOID: nil,
+                status: .nothingToMerge,
+                reason: nil,
+                ready: false,
+                merges: [],
+                verify: nil
+            )
+            try database.upsertRunIntegration(runID: runID, nothingToMerge)
+            onStderrLine(
+                RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
+                    integration: nothingToMerge,
+                    language: language
+                )
+            )
+            return nothingToMerge
+        }
+
+        // 4. Create `relay/<runID>/integration` worktree at `<project>/runs/<runID>/worktrees/integration` (`03-relayide.md` M2 §3, Row 22).
+        let initialMerges = mergeOrderIDs.enumerated().map { ordinal, laneID in
+            RelayRunMergeRecord(
+                ordinal: ordinal,
+                laneID: laneID,
+                laneCommitOID: laneByID[laneID]?.commitOID,
+                status: .notAttempted,
+                mergeCommitOID: nil,
+                conflicts: [],
+                conflictLines: [],
+                startedAt: nil,
+                finishedAt: nil
+            )
+        }
+
+        let worktreeHandle: GitWorktreePlumbingEngine.IntegrationWorktreeHandle
+        do {
+            worktreeHandle = try gitEngine.createIntegrationWorktree(
+                repositoryPath: repositoryPath,
+                projectBundlePath: projectBundlePath,
+                runID: runID,
+                baseCommitOID: baseCommitOID,
+                environment: environment
+            )
+        } catch let relayErr as RelayIDEError {
+            let failedIntegration = RelayRunIntegrationRecord(
+                branch: nil,
+                worktreePath: nil,
+                baseCommitOID: baseCommitOID,
+                headCommitOID: nil,
+                status: .error,
+                reason: Self.extractIntegrationErrorReason(from: relayErr),
+                ready: false,
+                merges: [],
+                verify: nil
+            )
+            try? database.upsertRunIntegration(runID: runID, failedIntegration)
+            throw relayErr
+        } catch {
+            let wrapped = RelayIDEError.relayEnvironmentFailure(error.localizedDescription)
+            let failedIntegration = RelayRunIntegrationRecord(
+                branch: nil,
+                worktreePath: nil,
+                baseCommitOID: baseCommitOID,
+                headCommitOID: nil,
+                status: .error,
+                reason: error.localizedDescription,
+                ready: false,
+                merges: [],
+                verify: nil
+            )
+            try? database.upsertRunIntegration(runID: runID, failedIntegration)
+            throw wrapped
+        }
+
+        var integration = RelayRunIntegrationRecord(
+            branch: worktreeHandle.branchName,
+            worktreePath: worktreeHandle.worktreePath,
+            baseCommitOID: baseCommitOID,
+            headCommitOID: baseCommitOID,
+            status: .merging,
+            reason: nil,
+            ready: false,
+            merges: initialMerges,
+            verify: nil
+        )
+        try database.upsertRunIntegration(runID: runID, integration)
+        onStderrLine(
+            RelayIntegrationStderrFormatter.formatIntegrationBranchCreatedLine(
+                branchName: worktreeHandle.branchName,
+                worktreePath: worktreeHandle.worktreePath,
+                baseCommitOID: baseCommitOID,
+                language: language
+            )
+        )
+
+        // 5. Sequentially merge each lane in `mergeOrderIDs`, checking `isCancelled()` before every step (D3, §5, §7).
+        for (stepIndex, laneID) in mergeOrderIDs.enumerated() {
+            if isCancelled() {
+                integration.status = .cancelled
+                integration.reason = "cancelled"
+                integration.ready = false
+                try database.upsertRunIntegration(runID: runID, integration)
+                onStderrLine(
+                    RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
+                        integration: integration,
+                        language: language
+                    )
+                )
+                return integration
+            }
+
+            guard let lane = laneByID[laneID] else {
+                throw RelayIDEError.relayEnvironmentFailure(
+                    "Missing lane record '\(laneID)' during integration merge of run '\(runID)'"
+                )
+            }
+
+            let stepOutcome = try mergeSingleLaneStep(
+                runID: runID,
+                stepIndex: stepIndex,
+                lane: lane,
+                integration: &integration,
+                database: database,
+                gitEngine: gitEngine,
+                language: language,
+                environment: environment,
+                onStderrLine: onStderrLine
+            )
+
+            if case .conflict = stepOutcome {
+                if isCancelled() {
+                    integration.status = .cancelled
+                    integration.reason = "cancelled"
+                    integration.ready = false
+                    try database.upsertRunIntegration(runID: runID, integration)
+                }
+                onStderrLine(
+                    RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
+                        integration: integration,
+                        language: language
+                    )
+                )
+                return integration
+            }
+        }
+
+        if isCancelled() {
+            integration.status = .cancelled
+            integration.reason = "cancelled"
+            integration.ready = false
+            try database.upsertRunIntegration(runID: runID, integration)
+            onStderrLine(
+                RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
+                    integration: integration,
+                    language: language
+                )
+            )
+            return integration
+        }
+
+        // 6. All lane merges succeeded: stop at `merged` with `ready = false` (`verify` connects in Stages 3 & 4).
+        integration.status = .merged
+        integration.reason = nil
+        integration.ready = false
+        try database.upsertRunIntegration(runID: runID, integration)
+        if emitSummaryLineOnMerged {
+            onStderrLine(
+                RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
+                    integration: integration,
+                    language: language
+                )
+            )
+        }
+        return integration
+    }
+    @discardableResult
     public static func mergeSingleLaneStep(
         runID: String,
         stepIndex: Int,

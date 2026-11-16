@@ -1460,4 +1460,280 @@ struct PluginSDKAndOrchestratorCPMTests {
         let persisted3 = try #require(try db.fetchRun(runID: run3, reconcileWithLock: false)?.integration)
         #expect(persisted3.status == .error)
     }
+
+    // MARK: - 23. M2 Overall `runIntegrationMergePhase` (`skipped`, `nothing-to-merge`, Topological Merge, Conflict Stop, `cancelled`, 125 `error`, §1, §7, D1, D3)
+
+    @Test("RelayIntegrationMergeRunner.runIntegrationMergePhase enforces D1 skipped, nothing-to-merge, topological merge to merged (ready=false), conflict stop (D3), pre/between-step cancellation, and 125 obstruction error persistence (§1, §7)")
+    func runIntegrationMergePhaseCoversAllBranchesAndCancellation() throws {
+        let tempRoot = try makeMktempDirectory(prefix: "relay-m2-phase")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let homeDir = tempRoot.appendingPathComponent("home", isDirectory: true)
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        let projectDir = tempRoot.appendingPathComponent("Proj.relayproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        let gitEnv = makeIsolatedGitEnvironment(homeDir: homeDir)
+
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "Phase Tester"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "phase@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+        try "line1\nline2\nline3\n".write(to: repoDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "f.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "base"], cwd: repoDir.path, environment: gitEnv)
+        let baseOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Prepare commits for c, a, b (where b is on top of a), plus bConflict (conflicts with a on f.txt)
+        _ = try engine.runGit(["checkout", "-b", "src-c", baseOID], cwd: repoDir.path, environment: gitEnv)
+        try "c-data\n".write(to: repoDir.appendingPathComponent("c.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "c.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "c"], cwd: repoDir.path, environment: gitEnv)
+        let cOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        _ = try engine.runGit(["checkout", "-b", "src-a", baseOID], cwd: repoDir.path, environment: gitEnv)
+        try "line1\nA-edit\nline3\n".write(to: repoDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+        try "a-data\n".write(to: repoDir.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "-A"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "a"], cwd: repoDir.path, environment: gitEnv)
+        let aOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        _ = try engine.runGit(["checkout", "-b", "src-b", aOID], cwd: repoDir.path, environment: gitEnv)
+        try "b-data\n".write(to: repoDir.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "b.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "b"], cwd: repoDir.path, environment: gitEnv)
+        let bOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        _ = try engine.runGit(["checkout", "-b", "src-b-conflict", baseOID], cwd: repoDir.path, environment: gitEnv)
+        try "line1\nB-CONFLICT\nline3\n".write(to: repoDir.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "f.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "b-conflict"], cwd: repoDir.path, environment: gitEnv)
+        let bConflictOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        _ = try engine.runGit(["checkout", "main"], cwd: repoDir.path, environment: gitEnv)
+
+        let db = try RelayProjectDatabase(bundleDirectoryURL: projectDir)
+        func seedRun(_ runID: String, lanes: [RelayRunLaneRecord]) throws {
+            try db.createRun(
+                RelayRunRecord(
+                    runID: runID,
+                    repoPath: repoDir.path,
+                    planCopyPath: tempRoot.appendingPathComponent("plan.json").path,
+                    baseRef: "main",
+                    baseCommitOID: baseOID,
+                    verifyCommand: nil,
+                    relayShPath: "/usr/bin/true",
+                    relayShSHA256: String(repeating: "0", count: 64),
+                    startedAt: Date(),
+                    status: .running,
+                    relayidePID: getpid(),
+                    lanes: lanes
+                )
+            )
+        }
+
+        // Case 1: D1 `skipped` when a lane is `failed` or `partial` -> no branch, no worktree, reason names lane + status
+        for (idx, badStatus) in [RelayRunStatus.failed, RelayRunStatus.partial].enumerated() {
+            let rID = "20261117-040000-skip\(idx)"
+            let lanes = [
+                RelayRunLaneRecord(runID: rID, laneID: "a", ordinal: 0, agent: .claude, promptPath: "p.md", status: badStatus, commitOID: badStatus == .partial ? aOID : nil),
+                RelayRunLaneRecord(runID: rID, laneID: "c", ordinal: 1, agent: .codex, promptPath: "p.md", status: .succeeded, commitOID: cOID)
+            ]
+            try seedRun(rID, lanes: lanes)
+            let res = try RelayIntegrationMergeRunner.runIntegrationMergePhase(
+                runID: rID,
+                repositoryPath: repoDir.path,
+                projectBundlePath: projectDir.path,
+                baseCommitOID: baseOID,
+                lanes: lanes,
+                planOrder: ["a", "c"],
+                database: db,
+                gitEngine: engine,
+                language: .zhHans,
+                environment: gitEnv
+            )
+            #expect(res.status == .skipped)
+            #expect(res.ready == false)
+            #expect(res.branch == nil && res.worktreePath == nil)
+            #expect(res.reason?.contains("a") == true && res.reason?.contains(badStatus.rawValue) == true)
+            #expect(!FileManager.default.fileExists(atPath: projectDir.appendingPathComponent("runs/\(rID)/worktrees/integration").path))
+            let branchProbe = try engine.runGitCommand(["show-ref", "--verify", "--quiet", "refs/heads/relay/\(rID)/integration"], cwd: repoDir.path, environment: gitEnv)
+            #expect(branchProbe.exitCode != 0)
+        }
+
+        // Case 2: `nothing-to-merge` when all lanes are `succeeded-no-changes`
+        let rNoop = "20261117-040001-noop"
+        let noopLanes = [
+            RelayRunLaneRecord(runID: rNoop, laneID: "x", ordinal: 0, agent: .claude, promptPath: "p.md", status: .succeededNoChanges, commitOID: nil),
+            RelayRunLaneRecord(runID: rNoop, laneID: "y", ordinal: 1, agent: .codex, promptPath: "p.md", status: .succeededNoChanges, commitOID: nil)
+        ]
+        try seedRun(rNoop, lanes: noopLanes)
+        let noopRes = try RelayIntegrationMergeRunner.runIntegrationMergePhase(
+            runID: rNoop,
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            baseCommitOID: baseOID,
+            lanes: noopLanes,
+            planOrder: ["x", "y"],
+            database: db,
+            gitEngine: engine,
+            language: .en,
+            environment: gitEnv
+        )
+        #expect(noopRes.status == .nothingToMerge)
+        #expect(noopRes.ready == false)
+        #expect(noopRes.branch == nil && noopRes.worktreePath == nil)
+        #expect(!FileManager.default.fileExists(atPath: projectDir.appendingPathComponent("runs/\(rNoop)/worktrees/integration").path))
+
+        // Case 3: Full topological + plan-order merge `[b (after a), c, a]` -> `c, a, b`, stops at `merged` with `ready == false`
+        let rTopo = "20261117-040002-topo"
+        let topoLanes = [
+            RelayRunLaneRecord(runID: rTopo, laneID: "b", ordinal: 0, agent: .codex, promptPath: "p.md", after: ["a"], status: .succeeded, branch: "relay/\(rTopo)/b", commitOID: bOID),
+            RelayRunLaneRecord(runID: rTopo, laneID: "c", ordinal: 1, agent: .agy, promptPath: "p.md", after: [], status: .succeeded, branch: "relay/\(rTopo)/c", commitOID: cOID),
+            RelayRunLaneRecord(runID: rTopo, laneID: "a", ordinal: 2, agent: .claude, promptPath: "p.md", after: [], status: .succeeded, branch: "relay/\(rTopo)/a", commitOID: aOID)
+        ]
+        try seedRun(rTopo, lanes: topoLanes)
+        final class LineBox: @unchecked Sendable { var lines: [String] = [] }
+        let stderrBox = LineBox()
+        let topoRes = try RelayIntegrationMergeRunner.runIntegrationMergePhase(
+            runID: rTopo,
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            baseCommitOID: baseOID,
+            lanes: topoLanes,
+            planOrder: ["b", "c", "a"],
+            database: db,
+            gitEngine: engine,
+            language: .en,
+            environment: gitEnv,
+            onStderrLine: { stderrBox.lines.append($0) }
+        )
+        #expect(topoRes.status == .merged)
+        #expect(topoRes.ready == false)
+        #expect(topoRes.merges.map(\.laneID) == ["c", "a", "b"])
+        #expect(topoRes.merges.map(\.status) == [.merged, .merged, .merged])
+        // 1 branch created line + 3 merge lines + 1 summary line = 5 stderr lines
+        #expect(stderrBox.lines.count == 5)
+        let firstParentCommits = try engine.runGit(
+            ["rev-list", "--reverse", "--first-parent", "\(baseOID)..refs/heads/relay/\(rTopo)/integration"],
+            cwd: repoDir.path,
+            environment: gitEnv
+        ).split(whereSeparator: \.isNewline).map(String.init)
+        #expect(firstParentCommits.count == 3)
+        let secondParents = try firstParentCommits.map {
+            try engine.runGit(["rev-parse", "\($0)^2"], cwd: repoDir.path, environment: gitEnv).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        #expect(secondParents == [cOID, aOID, bOID])
+        let mainAfterTopo = try engine.runGit(["rev-parse", "main"], cwd: repoDir.path, environment: gitEnv).trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(mainAfterTopo == baseOID)
+
+        // Case 4: Conflict stop (D3: a merges, b conflicts, c is not-attempted)
+        let rConf = "20261117-040003-conf"
+        let confLanes = [
+            RelayRunLaneRecord(runID: rConf, laneID: "a", ordinal: 0, agent: .claude, promptPath: "p.md", status: .succeeded, branch: "relay/\(rConf)/a", commitOID: aOID),
+            RelayRunLaneRecord(runID: rConf, laneID: "b", ordinal: 1, agent: .codex, promptPath: "p.md", status: .succeeded, branch: "relay/\(rConf)/b", commitOID: bConflictOID),
+            RelayRunLaneRecord(runID: rConf, laneID: "c", ordinal: 2, agent: .vibe, promptPath: "p.md", status: .succeeded, branch: "relay/\(rConf)/c", commitOID: cOID)
+        ]
+        try seedRun(rConf, lanes: confLanes)
+        let confRes = try RelayIntegrationMergeRunner.runIntegrationMergePhase(
+            runID: rConf,
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            baseCommitOID: baseOID,
+            lanes: confLanes,
+            planOrder: ["a", "b", "c"],
+            database: db,
+            gitEngine: engine,
+            language: .en,
+            environment: gitEnv
+        )
+        #expect(confRes.status == .conflict)
+        #expect(confRes.ready == false)
+        #expect(confRes.merges.map(\.status) == [.merged, .conflict, .notAttempted])
+
+        // Case 5: Pre-merge cancellation (`isCancelled` true at entry) -> `cancelled`, no branch/worktree
+        let rPreCancel = "20261117-040004-precancel"
+        let preCancelLanes = [
+            RelayRunLaneRecord(runID: rPreCancel, laneID: "a", ordinal: 0, agent: .claude, promptPath: "p.md", status: .succeeded, branch: "relay/\(rPreCancel)/a", commitOID: aOID)
+        ]
+        try seedRun(rPreCancel, lanes: preCancelLanes)
+        let preCancelRes = try RelayIntegrationMergeRunner.runIntegrationMergePhase(
+            runID: rPreCancel,
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            baseCommitOID: baseOID,
+            lanes: preCancelLanes,
+            planOrder: ["a"],
+            database: db,
+            gitEngine: engine,
+            language: .en,
+            environment: gitEnv,
+            isCancelled: { true }
+        )
+        #expect(preCancelRes.status == .cancelled)
+        #expect(preCancelRes.branch == nil && preCancelRes.worktreePath == nil)
+
+        // Case 6: Between-step cancellation (`isCancelled` turns true after first lane `a` merges, before `c` starts)
+        let rMidCancel = "20261117-040005-midcancel"
+        let midCancelLanes = [
+            RelayRunLaneRecord(runID: rMidCancel, laneID: "a", ordinal: 0, agent: .claude, promptPath: "p.md", status: .succeeded, branch: "relay/\(rMidCancel)/a", commitOID: aOID),
+            RelayRunLaneRecord(runID: rMidCancel, laneID: "c", ordinal: 1, agent: .vibe, promptPath: "p.md", status: .succeeded, branch: "relay/\(rMidCancel)/c", commitOID: cOID)
+        ]
+        try seedRun(rMidCancel, lanes: midCancelLanes)
+        final class CancelToggle: @unchecked Sendable { var cancelled = false }
+        let toggle = CancelToggle()
+        let midCancelRes = try RelayIntegrationMergeRunner.runIntegrationMergePhase(
+            runID: rMidCancel,
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            baseCommitOID: baseOID,
+            lanes: midCancelLanes,
+            planOrder: ["a", "c"],
+            database: db,
+            gitEngine: engine,
+            language: .en,
+            environment: gitEnv,
+            isCancelled: { toggle.cancelled },
+            onStderrLine: { line in
+                if line.contains("merge lane a") {
+                    toggle.cancelled = true
+                }
+            }
+        )
+        #expect(midCancelRes.status == .cancelled)
+        #expect(midCancelRes.ready == false)
+        #expect(midCancelRes.merges.map(\.status) == [.merged, .notAttempted])
+        #expect(midCancelRes.headCommitOID == midCancelRes.merges[0].mergeCommitOID)
+
+        // Case 7: 125 error when integration worktree path is obstructed by a regular file (Row 22) -> persists `.error` in SQLite
+        let rErr125 = "20261117-040006-err125"
+        let errLanes = [
+            RelayRunLaneRecord(runID: rErr125, laneID: "a", ordinal: 0, agent: .claude, promptPath: "p.md", status: .succeeded, branch: "relay/\(rErr125)/a", commitOID: aOID)
+        ]
+        try seedRun(rErr125, lanes: errLanes)
+        let obstructedURL = projectDir.appendingPathComponent("runs/\(rErr125)/worktrees/integration")
+        try FileManager.default.createDirectory(at: obstructedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "blocker-file\n".write(to: obstructedURL, atomically: true, encoding: .utf8)
+        do {
+            _ = try RelayIntegrationMergeRunner.runIntegrationMergePhase(
+                runID: rErr125,
+                repositoryPath: repoDir.path,
+                projectBundlePath: projectDir.path,
+                baseCommitOID: baseOID,
+                lanes: errLanes,
+                planOrder: ["a"],
+                database: db,
+                gitEngine: engine,
+                language: .en,
+                environment: gitEnv
+            )
+            Issue.record("Expected 125 error when integration worktree path is obstructed")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+        let persistedErr = try #require(try db.fetchRun(runID: rErr125, reconcileWithLock: false)?.integration)
+        #expect(persistedErr.status == .error)
+        #expect(persistedErr.ready == false)
+    }
 }
