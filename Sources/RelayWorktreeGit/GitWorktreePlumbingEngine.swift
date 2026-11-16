@@ -48,6 +48,313 @@ public struct GitWorktreePlumbingEngine: Sendable {
         }
     }
 
+    public enum SingleLaneGitMergeOutcome: Sendable, Equatable {
+        case noChanges
+        case merged(mergeCommitOID: String)
+        case conflict(
+            conflicts: [RelayMergeConflictItem],
+            conflictLines: [String],
+            headCommitOID: String
+        )
+        case nonConflictError(
+            exitCode: Int32,
+            lastStderrLine: String,
+            command: String
+        )
+    }
+
+    public static let unmergedPorcelainStatusCodes: Set<String> = [
+        "DD", "AU", "UD", "UA", "DU", "AA", "UU"
+    ]
+
+    public func mergeLaneCommitInIntegrationWorktree(
+        integrationWorktreePath: String,
+        runID: String,
+        laneID: String,
+        agent: RelayPlanAgent,
+        laneBranchName: String? = nil,
+        laneCommitOID: String?,
+        environment: [String: String]? = nil
+    ) throws -> SingleLaneGitMergeOutcome {
+        var mergeEnv = environment ?? ProcessInfo.processInfo.environment
+        mergeEnv["GIT_TERMINAL_PROMPT"] = "0"
+        mergeEnv["GIT_MERGE_AUTOEDIT"] = "no"
+
+        guard let rawCommitOID = laneCommitOID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawCommitOID.isEmpty else {
+            return .noChanges
+        }
+        guard Self.isHexObjectID(rawCommitOID) else {
+            throw RelayIDEError.relayEnvironmentFailure(
+                "Merge target commitOID for lane '\(laneID)' must be a hex object ID, got '\(rawCommitOID)'"
+            )
+        }
+
+        let preMergeHead = try runGit(["rev-parse", "--verify", "HEAD"], cwd: integrationWorktreePath, environment: mergeEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let ancestorCheck = try runGitCommand(
+            ["merge-base", "--is-ancestor", rawCommitOID, "HEAD"],
+            cwd: integrationWorktreePath,
+            environment: mergeEnv
+        )
+        if ancestorCheck.exitCode == 0 {
+            return .noChanges
+        } else if ancestorCheck.exitCode != 1 {
+            let lastLine = Self.lastNonEmptyLine(of: ancestorCheck.stderr)
+                ?? Self.lastNonEmptyLine(of: ancestorCheck.stdout)
+                ?? "git merge-base --is-ancestor exited with \(ancestorCheck.exitCode)"
+            return .nonConflictError(
+                exitCode: ancestorCheck.exitCode,
+                lastStderrLine: lastLine,
+                command: "git merge-base --is-ancestor \(rawCommitOID) HEAD"
+            )
+        }
+
+        let subject = "relay \(runID) merge \(laneID) (\(agent.rawValue))"
+        let effectiveLaneBranch = laneBranchName ?? "relay/\(runID)/\(laneID)"
+        let body = """
+        Lane branch: \(effectiveLaneBranch)
+        Lane commit: \(rawCommitOID)
+        Merged by RelayIDE; repository hooks skipped.
+        """
+
+        let mergeArgs: [String] = [
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "rerere.enabled=false",
+            "-c", "gc.auto=0",
+            "-c", "maintenance.auto=false",
+            "-c", "user.useConfigOnly=true",
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "--no-log",
+            "--no-stat",
+            "--no-squash",
+            "--no-autostash",
+            "--no-verify-signatures",
+            "--no-gpg-sign",
+            "-m", subject,
+            "-m", body,
+            rawCommitOID
+        ]
+
+        let mergeResult = try runGitCommand(
+            mergeArgs,
+            cwd: integrationWorktreePath,
+            environment: mergeEnv
+        )
+
+        if mergeResult.exitCode == 0 {
+            let newHead = try runGit(["rev-parse", "--verify", "HEAD"], cwd: integrationWorktreePath, environment: mergeEnv)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let p1Res = try runGitCommand(
+                ["rev-parse", "--verify", "--quiet", "HEAD^1"],
+                cwd: integrationWorktreePath,
+                environment: mergeEnv
+            )
+            let p2Res = try runGitCommand(
+                ["rev-parse", "--verify", "--quiet", "HEAD^2"],
+                cwd: integrationWorktreePath,
+                environment: mergeEnv
+            )
+            let p1 = p1Res.exitCode == 0 ? p1Res.stdout.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            let p2 = p2Res.exitCode == 0 ? p2Res.stdout.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            guard p1 == preMergeHead, p2 == rawCommitOID else {
+                throw RelayIDEError.relayEnvironmentFailure(
+                    "Merge commit parent check failed for lane '\(laneID)': expected HEAD^1=\(preMergeHead) HEAD^2=\(rawCommitOID), got HEAD^1='\(p1)' HEAD^2='\(p2)'"
+                )
+            }
+            return .merged(mergeCommitOID: newHead)
+        }
+
+        if try hasMergeHead(in: integrationWorktreePath, environment: mergeEnv) {
+            let conflicts = try listUnmergedConflictItems(in: integrationWorktreePath, environment: mergeEnv)
+            let conflictLines = Self.extractConflictLines(stdout: mergeResult.stdout, stderr: mergeResult.stderr)
+            try abortInProgressMergeAndVerifyClean(
+                in: integrationWorktreePath,
+                expectedHeadOID: preMergeHead,
+                environment: mergeEnv
+            )
+            return .conflict(
+                conflicts: conflicts,
+                conflictLines: conflictLines,
+                headCommitOID: preMergeHead
+            )
+        } else {
+            let lastStderr = Self.lastNonEmptyLine(of: mergeResult.stderr)
+                ?? Self.lastNonEmptyLine(of: mergeResult.stdout)
+                ?? "git merge exited with \(mergeResult.exitCode)"
+            return .nonConflictError(
+                exitCode: mergeResult.exitCode,
+                lastStderrLine: lastStderr,
+                command: "git " + mergeArgs.joined(separator: " ")
+            )
+        }
+    }
+
+    public func hasMergeHead(
+        in worktreePath: String,
+        environment: [String: String]? = nil
+    ) throws -> Bool {
+        let revCheck = try runGitCommand(
+            ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+            cwd: worktreePath,
+            environment: environment
+        )
+        if revCheck.exitCode == 0 {
+            return true
+        }
+        let pathCheck = try runGitCommand(
+            ["rev-parse", "--git-path", "MERGE_HEAD"],
+            cwd: worktreePath,
+            environment: environment
+        )
+        guard pathCheck.exitCode == 0 else {
+            return false
+        }
+        let rawPath = pathCheck.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawPath.isEmpty else {
+            return false
+        }
+        let resolvedPath: String
+        if (rawPath as NSString).isAbsolutePath {
+            resolvedPath = rawPath
+        } else {
+            resolvedPath = URL(fileURLWithPath: rawPath, relativeTo: URL(fileURLWithPath: worktreePath, isDirectory: true))
+                .standardizedFileURL
+                .path
+        }
+        return FileManager.default.fileExists(atPath: resolvedPath)
+    }
+
+    public func listUnmergedConflictItems(
+        in worktreePath: String,
+        environment: [String: String]? = nil
+    ) throws -> [RelayMergeConflictItem] {
+        let raw = try runGit(
+            ["status", "--porcelain=v1", "-z"],
+            cwd: worktreePath,
+            environment: environment
+        )
+        let bytes = Array(raw.utf8)
+        var slices: [ArraySlice<UInt8>] = []
+        var cursor = 0
+        while cursor < bytes.count {
+            var end = cursor
+            while end < bytes.count && bytes[end] != 0 {
+                end += 1
+            }
+            if end > cursor {
+                slices.append(bytes[cursor..<end])
+            }
+            cursor = end + 1
+        }
+
+        var conflicts: [RelayMergeConflictItem] = []
+        var idx = 0
+        while idx < slices.count {
+            let entry = Array(slices[idx])
+            idx += 1
+            guard entry.count >= 4, entry[2] == 0x20 else { continue }
+            let code = String(decoding: entry[0..<2], as: UTF8.self)
+            let path = String(decoding: entry[3...], as: UTF8.self)
+            if entry[0] == UInt8(ascii: "R") || entry[0] == UInt8(ascii: "C") {
+                if idx < slices.count {
+                    idx += 1
+                }
+            }
+            if Self.unmergedPorcelainStatusCodes.contains(code) {
+                conflicts.append(RelayMergeConflictItem(path: path, code: code))
+            }
+        }
+        return conflicts
+    }
+
+    public func abortInProgressMergeAndVerifyClean(
+        in worktreePath: String,
+        expectedHeadOID: String,
+        environment: [String: String]? = nil
+    ) throws {
+        var abortEnv = environment ?? ProcessInfo.processInfo.environment
+        abortEnv["GIT_TERMINAL_PROMPT"] = "0"
+        abortEnv["GIT_MERGE_AUTOEDIT"] = "no"
+
+        let abortArgs: [String] = [
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "rerere.enabled=false",
+            "-c", "gc.auto=0",
+            "-c", "maintenance.auto=false",
+            "-c", "user.useConfigOnly=true",
+            "merge",
+            "--abort"
+        ]
+        let abortRes = try runGitCommand(abortArgs, cwd: worktreePath, environment: abortEnv)
+        guard abortRes.exitCode == 0 else {
+            let detail = Self.lastNonEmptyLine(of: abortRes.stderr) ?? "exit \(abortRes.exitCode)"
+            throw RelayIDEError.gitPlumbingFailure(
+                command: "git " + abortArgs.joined(separator: " "),
+                exitCode: abortRes.exitCode,
+                stderr: detail
+            )
+        }
+
+        let postHead = try runGit(["rev-parse", "--verify", "HEAD"], cwd: worktreePath, environment: abortEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard postHead == expectedHeadOID else {
+            throw RelayIDEError.relayEnvironmentFailure(
+                "git merge --abort left HEAD at \(postHead), expected \(expectedHeadOID)"
+            )
+        }
+
+        if try hasMergeHead(in: worktreePath, environment: abortEnv) {
+            throw RelayIDEError.relayEnvironmentFailure(
+                "git merge --abort left MERGE_HEAD present in '\(worktreePath)'"
+            )
+        }
+
+        let statusRes = try runGitCommand(
+            ["status", "--porcelain=v1", "-uall", "--ignored"],
+            cwd: worktreePath,
+            environment: abortEnv
+        )
+        guard statusRes.exitCode == 0, statusRes.stdout.isEmpty else {
+            let dirtySummary = statusRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw RelayIDEError.relayEnvironmentFailure(
+                "git merge --abort left unclean integration worktree: \(dirtySummary)"
+            )
+        }
+    }
+
+    public static func extractConflictLines(stdout: String, stderr: String) -> [String] {
+        var lines: [String] = []
+        for source in [stdout, stderr] {
+            let normalized = source
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+            for rawLine in normalized.split(separator: "\n", omittingEmptySubsequences: true) {
+                let line = String(rawLine)
+                if line.hasPrefix("CONFLICT") {
+                    lines.append(line)
+                }
+            }
+        }
+        return lines
+    }
+
+    public static func lastNonEmptyLine(of text: String) -> String? {
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        for rawLine in normalized.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return nil
+    }
+
     public func createIntegrationWorktree(
         repositoryPath: String,
         projectBundlePath: String,

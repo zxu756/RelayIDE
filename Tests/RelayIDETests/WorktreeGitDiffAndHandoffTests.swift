@@ -1405,4 +1405,166 @@ struct WorktreeGitDiffAndHandoffTests {
         )
         #expect(run3BranchCheck.exitCode != 0)
     }
+
+    // MARK: - 23. M2 `mergeLaneCommitInIntegrationWorktree` Across All Conflict Varieties & Clean `--abort` (§5, R55, R57)
+
+    @Test("GitWorktreePlumbingEngine.mergeLaneCommitInIntegrationWorktree records porcelain -z codes and CONFLICT lines then cleanly aborts across content, add/add, modify/delete, delete/modify, file/directory, rename/rename, and binary conflicts (§5, R57)")
+    func mergeLaneCommitInIntegrationWorktreeHandlesAllConflictTypesAndAbortsCleanly() throws {
+        let tempRoot = try makeMktempDirectory(prefix: "relay-m2-conflicts")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let homeDir = tempRoot.appendingPathComponent("home", isDirectory: true)
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        let projectDir = tempRoot.appendingPathComponent("Proj.relayproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let gitEnv = makeIsolatedGitEnvironment(homeDir: homeDir)
+
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "Conflict Matrix"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "matrix@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+
+        try "l1\nl2\nl3\n".write(to: repoDir.appendingPathComponent("content.txt"), atomically: true, encoding: .utf8)
+        try "md-one\n".write(to: repoDir.appendingPathComponent("md1.txt"), atomically: true, encoding: .utf8)
+        try "md-two\n".write(to: repoDir.appendingPathComponent("md2.txt"), atomically: true, encoding: .utf8)
+        try "fd-base\n".write(to: repoDir.appendingPathComponent("fd"), atomically: true, encoding: .utf8)
+        try "rename-seed-1\nrename-seed-2\nrename-seed-3\n".write(to: repoDir.appendingPathComponent("ren.txt"), atomically: true, encoding: .utf8)
+        try Data([0x00, 0x01, 0x02, 0x42, 0x00, 0xFF]).write(to: repoDir.appendingPathComponent("bin.dat"))
+        _ = try engine.runGit(["add", "-A"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "base"], cwd: repoDir.path, environment: gitEnv)
+        let baseOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        struct ConflictScenario {
+            let id: String
+            let mutateA: (URL) throws -> Void
+            let mutateB: (URL) throws -> Void
+            let verifyConflicts: ([RelayMergeConflictItem], [String]) -> Void
+        }
+
+        let scenarios: [ConflictScenario] = [
+            ConflictScenario(
+                id: "c1-content",
+                mutateA: { try "l1\nA\nl3\n".write(to: $0.appendingPathComponent("content.txt"), atomically: true, encoding: .utf8) },
+                mutateB: { try "l1\nB\nl3\n".write(to: $0.appendingPathComponent("content.txt"), atomically: true, encoding: .utf8) },
+                verifyConflicts: { items, lines in
+                    #expect(items == [RelayMergeConflictItem(path: "content.txt", code: "UU")])
+                    #expect(!lines.isEmpty)
+                }
+            ),
+            ConflictScenario(
+                id: "c2-add-add",
+                mutateA: { try "add-A\n".write(to: $0.appendingPathComponent("added.txt"), atomically: true, encoding: .utf8) },
+                mutateB: { try "add-B\n".write(to: $0.appendingPathComponent("added.txt"), atomically: true, encoding: .utf8) },
+                verifyConflicts: { items, lines in
+                    #expect(items == [RelayMergeConflictItem(path: "added.txt", code: "AA")])
+                    #expect(!lines.isEmpty)
+                }
+            ),
+            ConflictScenario(
+                id: "c3-mod-del",
+                mutateA: { try "mod-A\n".write(to: $0.appendingPathComponent("md1.txt"), atomically: true, encoding: .utf8) },
+                mutateB: { try FileManager.default.removeItem(at: $0.appendingPathComponent("md1.txt")) },
+                verifyConflicts: { items, _ in
+                    #expect(items == [RelayMergeConflictItem(path: "md1.txt", code: "UD")])
+                }
+            ),
+            ConflictScenario(
+                id: "c4-del-mod",
+                mutateA: { try FileManager.default.removeItem(at: $0.appendingPathComponent("md2.txt")) },
+                mutateB: { try "mod-B\n".write(to: $0.appendingPathComponent("md2.txt"), atomically: true, encoding: .utf8) },
+                verifyConflicts: { items, _ in
+                    #expect(items == [RelayMergeConflictItem(path: "md2.txt", code: "DU")])
+                }
+            ),
+            ConflictScenario(
+                id: "c5-file-dir",
+                mutateA: {
+                    try FileManager.default.removeItem(at: $0.appendingPathComponent("fd"))
+                    try FileManager.default.createDirectory(at: $0.appendingPathComponent("fd"), withIntermediateDirectories: true)
+                    try "inner\n".write(to: $0.appendingPathComponent("fd/inner.txt"), atomically: true, encoding: .utf8)
+                },
+                mutateB: { try "fd-mod-B\n".write(to: $0.appendingPathComponent("fd"), atomically: true, encoding: .utf8) },
+                verifyConflicts: { items, _ in
+                    #expect(items.contains { $0.path.hasPrefix("fd~") })
+                }
+            ),
+            ConflictScenario(
+                id: "c6-ren-ren",
+                mutateA: {
+                    _ = try engine.runGit(["mv", "ren.txt", "ren-a.txt"], cwd: $0.path, environment: gitEnv)
+                },
+                mutateB: {
+                    _ = try engine.runGit(["mv", "ren.txt", "ren-b.txt"], cwd: $0.path, environment: gitEnv)
+                },
+                verifyConflicts: { items, _ in
+                    #expect(Set(items.map(\.code)) == Set(["DD", "AU", "UA"]))
+                }
+            ),
+            ConflictScenario(
+                id: "c7-binary",
+                mutateA: { try Data([0x00, 0xAA, 0xBB, 0x00]).write(to: $0.appendingPathComponent("bin.dat")) },
+                mutateB: { try Data([0x00, 0xCC, 0xDD, 0x00]).write(to: $0.appendingPathComponent("bin.dat")) },
+                verifyConflicts: { items, _ in
+                    #expect(items == [RelayMergeConflictItem(path: "bin.dat", code: "UU")])
+                }
+            )
+        ]
+
+        for sc in scenarios {
+            _ = try engine.runGit(["checkout", "-b", "a-\(sc.id)", baseOID], cwd: repoDir.path, environment: gitEnv)
+            try sc.mutateA(repoDir)
+            _ = try engine.runGit(["add", "-A"], cwd: repoDir.path, environment: gitEnv)
+            _ = try engine.runGit(["commit", "-m", "a-\(sc.id)"], cwd: repoDir.path, environment: gitEnv)
+            let aOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            _ = try engine.runGit(["checkout", "-b", "b-\(sc.id)", baseOID], cwd: repoDir.path, environment: gitEnv)
+            try sc.mutateB(repoDir)
+            _ = try engine.runGit(["add", "-A"], cwd: repoDir.path, environment: gitEnv)
+            _ = try engine.runGit(["commit", "-m", "b-\(sc.id)"], cwd: repoDir.path, environment: gitEnv)
+            let bOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            _ = try engine.runGit(["checkout", "main"], cwd: repoDir.path, environment: gitEnv)
+
+            let wt = try engine.createIntegrationWorktree(
+                repositoryPath: repoDir.path,
+                projectBundlePath: projectDir.path,
+                runID: "20261117-\(sc.id)",
+                baseCommitOID: baseOID,
+                environment: gitEnv
+            )
+            let mergeA = try engine.mergeLaneCommitInIntegrationWorktree(
+                integrationWorktreePath: wt.worktreePath,
+                runID: "20261117-\(sc.id)",
+                laneID: "a",
+                agent: .claude,
+                laneCommitOID: aOID,
+                environment: gitEnv
+            )
+            guard case .merged(let aMergeHead) = mergeA else {
+                Issue.record("Expected lane a to merge cleanly in \(sc.id), got \(mergeA)")
+                return
+            }
+
+            let mergeB = try engine.mergeLaneCommitInIntegrationWorktree(
+                integrationWorktreePath: wt.worktreePath,
+                runID: "20261117-\(sc.id)",
+                laneID: "b",
+                agent: .codex,
+                laneCommitOID: bOID,
+                environment: gitEnv
+            )
+            guard case .conflict(let conflicts, let conflictLines, let headAfter) = mergeB else {
+                Issue.record("Expected lane b conflict in \(sc.id), got \(mergeB)")
+                return
+            }
+            sc.verifyConflicts(conflicts, conflictLines)
+            #expect(headAfter == aMergeHead)
+            #expect(try engine.hasMergeHead(in: wt.worktreePath, environment: gitEnv) == false)
+            let statusAfter = try engine.runGit(["status", "--porcelain=v1", "-uall", "--ignored"], cwd: wt.worktreePath, environment: gitEnv)
+            #expect(statusAfter.isEmpty)
+        }
+    }
 }

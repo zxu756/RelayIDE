@@ -1,9 +1,11 @@
+import Darwin
 import Foundation
 import RelayModels
 import RelayOrchestrator
 import RelayPTYCore
 import RelayPluginSDK
 import RelayWorkspaceStore
+import RelayWorktreeGit
 import Testing
 
 @Suite("JavaScriptCore Guardrail Plugins, Scratchpad, Policy Packs, DAG Waves, CPM & Failover", .timeLimit(.minutes(1)))
@@ -1054,5 +1056,408 @@ struct PluginSDKAndOrchestratorCPMTests {
         let sumVerifiedZH = RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(integration: verifiedIntegration, language: .zhHans)
         #expect(sumVerifiedEN.contains("status verified") && sumVerifiedEN.contains("ready yes"))
         #expect(sumVerifiedZH.contains("状态 已验证") && sumVerifiedZH.contains("可合入 是"))
+    }
+
+    // MARK: - M2 Isolated `mktemp -d` + `GIT_CONFIG_NOSYSTEM=1` Merge Test Helpers
+
+    private func makeMktempDirectory(prefix: String = "relay-m2-merge") throws -> URL {
+        let base = FileManager.default.temporaryDirectory.path
+        let templateString = (base as NSString).appendingPathComponent("\(prefix)-XXXXXX")
+        var buffer = Array(templateString.utf8CString)
+        let createdPtr = buffer.withUnsafeMutableBufferPointer { buf -> UnsafeMutablePointer<CChar>? in
+            guard let baseAddress = buf.baseAddress else { return nil }
+            return Darwin.mkdtemp(baseAddress)
+        }
+        guard let createdPtr else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        return URL(fileURLWithPath: String(cString: createdPtr), isDirectory: true)
+    }
+
+    private func makeIsolatedGitEnvironment(homeDir: URL) -> [String: String] {
+        [
+            "HOME": homeDir.path,
+            "CFFIXED_USER_HOME": homeDir.path,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": "/usr/bin:/bin"
+        ]
+    }
+
+    // MARK: - 22. M2 Single-Lane Merge (`no-changes`, Hostile-Repo `--no-ff`, Conflict `--abort`, Non-Conflict No-Abort 125, §5, R55–R59)
+
+    @Test("RelayIntegrationMergeRunner.mergeSingleLaneStep handles no-changes without calling git merge, verifies --no-ff parents and exact 4-line message in hostile repos, records conflicts + aborts cleanly, and skips --abort on non-conflict 125 errors (§5, R55–R59)")
+    func mergeSingleLaneStepCoversNoChangesCleanMergeConflictAbortAndNonConflict125() throws {
+        let tempRoot = try makeMktempDirectory(prefix: "relay-m2-step")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let homeDir = tempRoot.appendingPathComponent("home", isDirectory: true)
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        let projectDir = tempRoot.appendingPathComponent("Proj.relayproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        let gitEnv = makeIsolatedGitEnvironment(homeDir: homeDir)
+
+        // Install a forwarding git wrapper that logs every git invocation so we can assert `merge` / `--abort` calls deterministically.
+        let gitLogURL = tempRoot.appendingPathComponent("git-calls.log")
+        let gitWrapperURL = tempRoot.appendingPathComponent("git-wrapper.sh")
+        let wrapperScript = """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> "\(gitLogURL.path)"
+        exec /usr/bin/git "$@"
+        """
+        try wrapperScript.write(to: gitWrapperURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: gitWrapperURL.path)
+
+        let engine = GitWorktreePlumbingEngine(gitExecutablePath: gitWrapperURL.path)
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "Merge Author"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "merge@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+
+        try "line1\nline2\nline3\n".write(to: repoDir.appendingPathComponent("shared.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "shared.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "base"], cwd: repoDir.path, environment: gitEnv)
+        let baseOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Create lane commits:
+        // - lane `a`: modifies line2 of shared.txt + adds a.txt
+        // - lane `b`: modifies line2 of shared.txt differently + adds new.txt (conflicts with `a` on shared.txt)
+        // - lane `c`: adds c.txt cleanly
+        _ = try engine.runGit(["checkout", "-b", "prep-a", baseOID], cwd: repoDir.path, environment: gitEnv)
+        try "line1\nA-line2\nline3\n".write(to: repoDir.appendingPathComponent("shared.txt"), atomically: true, encoding: .utf8)
+        try "from-a\n".write(to: repoDir.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "-A"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "lane a work"], cwd: repoDir.path, environment: gitEnv)
+        let aOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        _ = try engine.runGit(["checkout", "-b", "prep-b", baseOID], cwd: repoDir.path, environment: gitEnv)
+        try "line1\nB-line2\nline3\n".write(to: repoDir.appendingPathComponent("shared.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "-A"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "lane b work"], cwd: repoDir.path, environment: gitEnv)
+        let bOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        _ = try engine.runGit(["checkout", "-b", "prep-c", baseOID], cwd: repoDir.path, environment: gitEnv)
+        try "from-c\n".write(to: repoDir.appendingPathComponent("c.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "-A"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "lane c work"], cwd: repoDir.path, environment: gitEnv)
+        let cOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        _ = try engine.runGit(["checkout", "main"], cwd: repoDir.path, environment: gitEnv)
+
+        // Configure hostile repo settings + failing hooks (Row 23, R58, R59)
+        _ = try engine.runGit(["config", "merge.verifySignatures", "true"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "commit.gpgSign", "true"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "merge.log", "true"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "merge.ff", "only"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "rerere.enabled", "true"], cwd: repoDir.path, environment: gitEnv)
+
+        let hookMarkerURL = tempRoot.appendingPathComponent("hooks.marker")
+        let hooksDir = repoDir.appendingPathComponent(".git/hooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+        for h in ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "pre-merge-commit", "post-merge", "post-checkout"] {
+            let hURL = hooksDir.appendingPathComponent(h)
+            try "#!/bin/sh\necho \(h) >> \"\(hookMarkerURL.path)\"\nexit 1\n".write(to: hURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hURL.path)
+        }
+
+        // Open SQLite DB and create run1
+        let db = try RelayProjectDatabase(bundleDirectoryURL: projectDir)
+        let run1 = "20261117-030000-0001"
+        let laneNoopNil = RelayRunLaneRecord(runID: run1, laneID: "noop-nil", ordinal: 0, agent: .claude, promptPath: "p.md", status: .succeededNoChanges, commitOID: nil)
+        let laneNoopAnc = RelayRunLaneRecord(runID: run1, laneID: "noop-anc", ordinal: 1, agent: .codex, promptPath: "p.md", status: .succeeded, branch: "relay/\(run1)/noop-anc", commitOID: baseOID)
+        let laneA = RelayRunLaneRecord(runID: run1, laneID: "a", ordinal: 2, agent: .claude, promptPath: "p.md", status: .succeeded, branch: "relay/\(run1)/a", commitOID: aOID)
+        let laneB = RelayRunLaneRecord(runID: run1, laneID: "b", ordinal: 3, agent: .codex, promptPath: "p.md", status: .succeeded, branch: "relay/\(run1)/b", commitOID: bOID)
+        let laneC = RelayRunLaneRecord(runID: run1, laneID: "c", ordinal: 4, agent: .vibe, promptPath: "p.md", status: .succeeded, branch: "relay/\(run1)/c", commitOID: cOID)
+
+        try db.createRun(
+            RelayRunRecord(
+                runID: run1,
+                repoPath: repoDir.path,
+                planCopyPath: tempRoot.appendingPathComponent("plan.json").path,
+                baseRef: "main",
+                baseCommitOID: baseOID,
+                verifyCommand: nil,
+                relayShPath: "/usr/bin/true",
+                relayShSHA256: String(repeating: "0", count: 64),
+                startedAt: Date(),
+                status: .running,
+                relayidePID: getpid(),
+                lanes: [laneNoopNil, laneNoopAnc, laneA, laneB, laneC]
+            )
+        )
+
+        let wt1 = try engine.createIntegrationWorktree(
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            runID: run1,
+            baseCommitOID: baseOID,
+            environment: gitEnv
+        )
+        var integration1 = RelayRunIntegrationRecord(
+            branch: wt1.branchName,
+            worktreePath: wt1.worktreePath,
+            baseCommitOID: baseOID,
+            headCommitOID: baseOID,
+            status: .merging,
+            ready: false,
+            merges: [
+                RelayRunMergeRecord(ordinal: 0, laneID: "noop-nil", laneCommitOID: nil, status: .notAttempted),
+                RelayRunMergeRecord(ordinal: 1, laneID: "noop-anc", laneCommitOID: baseOID, status: .notAttempted),
+                RelayRunMergeRecord(ordinal: 2, laneID: "a", laneCommitOID: aOID, status: .notAttempted),
+                RelayRunMergeRecord(ordinal: 3, laneID: "b", laneCommitOID: bOID, status: .notAttempted),
+                RelayRunMergeRecord(ordinal: 4, laneID: "c", laneCommitOID: cOID, status: .notAttempted)
+            ]
+        )
+        try db.upsertRunIntegration(runID: run1, integration1)
+
+        // 1. `commitOID == nil` and `commitOID == ancestor(HEAD)` -> both `no-changes`, zero `merge --no-ff` calls!
+        try? FileManager.default.removeItem(at: gitLogURL)
+        let outNil = try RelayIntegrationMergeRunner.mergeSingleLaneStep(
+            runID: run1,
+            stepIndex: 0,
+            lane: laneNoopNil,
+            integration: &integration1,
+            database: db,
+            gitEngine: engine,
+            environment: gitEnv
+        )
+        let outAnc = try RelayIntegrationMergeRunner.mergeSingleLaneStep(
+            runID: run1,
+            stepIndex: 1,
+            lane: laneNoopAnc,
+            integration: &integration1,
+            database: db,
+            gitEngine: engine,
+            environment: gitEnv
+        )
+        #expect(outNil == .noChanges)
+        #expect(outAnc == .noChanges)
+        let logAfterNoop = (try? String(contentsOf: gitLogURL, encoding: .utf8)) ?? ""
+        #expect(!logAfterNoop.contains("merge --no-ff"))
+
+        // 2. Clean `--no-ff` merge of lane `a` in hostile repo -> 2 parents (`baseOID`, `aOID`), exact 4-line message, hooks skipped
+        let outA = try RelayIntegrationMergeRunner.mergeSingleLaneStep(
+            runID: run1,
+            stepIndex: 2,
+            lane: laneA,
+            integration: &integration1,
+            database: db,
+            gitEngine: engine,
+            environment: gitEnv
+        )
+        guard case .merged(let mergeAOID) = outA else {
+            Issue.record("Expected .merged for lane a, got \(outA)")
+            return
+        }
+        #expect(mergeAOID != baseOID && mergeAOID != aOID)
+        #expect(!FileManager.default.fileExists(atPath: hookMarkerURL.path))
+        let p1 = try engine.runGit(["rev-parse", "\(mergeAOID)^1"], cwd: repoDir.path, environment: gitEnv).trimmingCharacters(in: .whitespacesAndNewlines)
+        let p2 = try engine.runGit(["rev-parse", "\(mergeAOID)^2"], cwd: repoDir.path, environment: gitEnv).trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(p1 == baseOID)
+        #expect(p2 == aOID)
+        let mergeMsg = try engine.runGit(["log", "-1", "--format=%B", mergeAOID], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let expectedMergeMsg = """
+        relay \(run1) merge a (claude)
+
+        Lane branch: relay/\(run1)/a
+        Lane commit: \(aOID)
+        Merged by RelayIDE; repository hooks skipped.
+        """
+        #expect(mergeMsg == expectedMergeMsg)
+        let mergeAuthor = try engine.runGit(["log", "-1", "--format=%an <%ae>", mergeAOID], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(mergeAuthor == "Merge Author <merge@relay.invalid>")
+
+        // 3. Conflicting merge of lane `b` -> records UU on shared.txt + CONFLICT line, runs --abort, worktree 100% clean, `c` stays not-attempted
+        let outB = try RelayIntegrationMergeRunner.mergeSingleLaneStep(
+            runID: run1,
+            stepIndex: 3,
+            lane: laneB,
+            integration: &integration1,
+            database: db,
+            gitEngine: engine,
+            environment: gitEnv
+        )
+        guard case .conflict(let bConflicts, let bConflictLines, let headAfterAbort) = outB else {
+            Issue.record("Expected .conflict for lane b, got \(outB)")
+            return
+        }
+        #expect(bConflicts == [RelayMergeConflictItem(path: "shared.txt", code: "UU")])
+        #expect(bConflictLines.contains { $0.hasPrefix("CONFLICT") && $0.contains("shared.txt") })
+        #expect(headAfterAbort == mergeAOID)
+
+        // Verify 3 cleanliness invariants on disk + persisted SQLite state
+        let wtHeadAfterAbort = try engine.runGit(["rev-parse", "HEAD"], cwd: wt1.worktreePath, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(wtHeadAfterAbort == mergeAOID)
+        let mhCheck = try engine.runGitCommand(["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd: wt1.worktreePath, environment: gitEnv)
+        #expect(mhCheck.exitCode != 0)
+        let cleanPorcelain = try engine.runGit(["status", "--porcelain=v1", "-uall", "--ignored"], cwd: wt1.worktreePath, environment: gitEnv)
+        #expect(cleanPorcelain.isEmpty)
+
+        let persisted1 = try #require(try db.fetchRun(runID: run1, reconcileWithLock: false)?.integration)
+        #expect(persisted1.status == .conflict)
+        #expect(persisted1.ready == false)
+        #expect(persisted1.headCommitOID == mergeAOID)
+        #expect(persisted1.merges.map(\.status) == [.noChanges, .noChanges, .merged, .conflict, .notAttempted])
+        #expect(persisted1.merges[3].conflicts == [RelayMergeConflictItem(path: "shared.txt", code: "UU")])
+        #expect(!persisted1.merges[3].conflictLines.isEmpty)
+
+        // 4. Non-conflict `git merge` failure (untracked file in integration worktree blocking merge -> NO MERGE_HEAD):
+        // MUST NOT call `merge --abort`, MUST set `integration.status == .error` with last stderr line, and throw 125!
+        let run2 = "20261117-030001-0002"
+        let laneC2 = RelayRunLaneRecord(runID: run2, laneID: "c", ordinal: 0, agent: .vibe, promptPath: "p.md", status: .succeeded, branch: "relay/\(run2)/c", commitOID: cOID)
+        try db.createRun(
+            RelayRunRecord(
+                runID: run2,
+                repoPath: repoDir.path,
+                planCopyPath: tempRoot.appendingPathComponent("plan.json").path,
+                baseRef: "main",
+                baseCommitOID: baseOID,
+                verifyCommand: nil,
+                relayShPath: "/usr/bin/true",
+                relayShSHA256: String(repeating: "0", count: 64),
+                startedAt: Date(),
+                status: .running,
+                relayidePID: getpid(),
+                lanes: [laneC2]
+            )
+        )
+        let wt2 = try engine.createIntegrationWorktree(
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            runID: run2,
+            baseCommitOID: baseOID,
+            environment: gitEnv
+        )
+        // Place untracked `c.txt` inside integration worktree so merging `cOID` fails with exit != 0 and NO MERGE_HEAD
+        try "untracked-blocker\n".write(
+            to: URL(fileURLWithPath: wt2.worktreePath).appendingPathComponent("c.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        var integration2 = RelayRunIntegrationRecord(
+            branch: wt2.branchName,
+            worktreePath: wt2.worktreePath,
+            baseCommitOID: baseOID,
+            headCommitOID: baseOID,
+            status: .merging,
+            ready: false,
+            merges: [RelayRunMergeRecord(ordinal: 0, laneID: "c", laneCommitOID: cOID, status: .notAttempted)]
+        )
+        try db.upsertRunIntegration(runID: run2, integration2)
+
+        try? FileManager.default.removeItem(at: gitLogURL)
+        do {
+            _ = try RelayIntegrationMergeRunner.mergeSingleLaneStep(
+                runID: run2,
+                stepIndex: 0,
+                lane: laneC2,
+                integration: &integration2,
+                database: db,
+                gitEngine: engine,
+                environment: gitEnv
+            )
+            Issue.record("Expected non-conflict merge failure to throw 125 RelayIDEError")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+        let logRun2 = (try? String(contentsOf: gitLogURL, encoding: .utf8)) ?? ""
+        #expect(logRun2.contains("merge --no-ff"))
+        #expect(!logRun2.contains("--abort"))
+
+        let persisted2 = try #require(try db.fetchRun(runID: run2, reconcileWithLock: false)?.integration)
+        #expect(persisted2.status == .error)
+        #expect(persisted2.ready == false)
+        #expect(persisted2.reason == "Merge with strategy ort failed.")
+        #expect(persisted2.reason?.contains("\n") == false)
+
+        // 5. Post-abort cleanliness check failure -> throws 125 and marks integration `.error`
+        let dirtyAbortWrapperURL = tempRoot.appendingPathComponent("git-dirty-abort.sh")
+        let dirtyAbortScript = """
+        #!/bin/sh
+        /usr/bin/git "$@"
+        rc=$?
+        case "$*" in
+          *"merge --abort"*)
+            echo leftover > leftover-after-abort.tmp
+            ;;
+        esac
+        exit $rc
+        """
+        try dirtyAbortScript.write(to: dirtyAbortWrapperURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dirtyAbortWrapperURL.path)
+        let dirtyEngine = GitWorktreePlumbingEngine(gitExecutablePath: dirtyAbortWrapperURL.path)
+
+        let run3 = "20261117-030002-0003"
+        let laneA3 = RelayRunLaneRecord(runID: run3, laneID: "a", ordinal: 0, agent: .claude, promptPath: "p.md", status: .succeeded, branch: "relay/\(run3)/a", commitOID: aOID)
+        let laneB3 = RelayRunLaneRecord(runID: run3, laneID: "b", ordinal: 1, agent: .codex, promptPath: "p.md", status: .succeeded, branch: "relay/\(run3)/b", commitOID: bOID)
+        try db.createRun(
+            RelayRunRecord(
+                runID: run3,
+                repoPath: repoDir.path,
+                planCopyPath: tempRoot.appendingPathComponent("plan.json").path,
+                baseRef: "main",
+                baseCommitOID: baseOID,
+                verifyCommand: nil,
+                relayShPath: "/usr/bin/true",
+                relayShSHA256: String(repeating: "0", count: 64),
+                startedAt: Date(),
+                status: .running,
+                relayidePID: getpid(),
+                lanes: [laneA3, laneB3]
+            )
+        )
+        let wt3 = try dirtyEngine.createIntegrationWorktree(
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            runID: run3,
+            baseCommitOID: baseOID,
+            environment: gitEnv
+        )
+        var integration3 = RelayRunIntegrationRecord(
+            branch: wt3.branchName,
+            worktreePath: wt3.worktreePath,
+            baseCommitOID: baseOID,
+            headCommitOID: baseOID,
+            status: .merging,
+            ready: false,
+            merges: [
+                RelayRunMergeRecord(ordinal: 0, laneID: "a", laneCommitOID: aOID, status: .notAttempted),
+                RelayRunMergeRecord(ordinal: 1, laneID: "b", laneCommitOID: bOID, status: .notAttempted)
+            ]
+        )
+        try db.upsertRunIntegration(runID: run3, integration3)
+        _ = try RelayIntegrationMergeRunner.mergeSingleLaneStep(
+            runID: run3,
+            stepIndex: 0,
+            lane: laneA3,
+            integration: &integration3,
+            database: db,
+            gitEngine: dirtyEngine,
+            environment: gitEnv
+        )
+        do {
+            _ = try RelayIntegrationMergeRunner.mergeSingleLaneStep(
+                runID: run3,
+                stepIndex: 1,
+                lane: laneB3,
+                integration: &integration3,
+                database: db,
+                gitEngine: dirtyEngine,
+                environment: gitEnv
+            )
+            Issue.record("Expected dirty post-abort worktree to throw 125 RelayIDEError")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+        let persisted3 = try #require(try db.fetchRun(runID: run3, reconcileWithLock: false)?.integration)
+        #expect(persisted3.status == .error)
     }
 }

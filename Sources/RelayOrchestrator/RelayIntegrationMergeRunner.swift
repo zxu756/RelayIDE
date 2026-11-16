@@ -185,3 +185,157 @@ public enum RelayIntegrationStderrFormatter {
         }
     }
 }
+
+// MARK: - Per-Lane Git Merge & Overall Integration Merge Phase (`03-relayide.md` M2 §1, §5, §7; R55–R59)
+
+public enum RelayIntegrationMergeRunner {
+    @discardableResult
+    public static func mergeSingleLaneStep(
+        runID: String,
+        stepIndex: Int,
+        lane: RelayRunLaneRecord,
+        integration: inout RelayRunIntegrationRecord,
+        database: RelayProjectDatabase,
+        gitEngine: GitWorktreePlumbingEngine = GitWorktreePlumbingEngine(),
+        language: RelayLanguage = .en,
+        environment: [String: String]? = nil,
+        onStderrLine: @Sendable (String) -> Void = { _ in }
+    ) throws -> GitWorktreePlumbingEngine.SingleLaneGitMergeOutcome {
+        guard stepIndex >= 0, stepIndex < integration.merges.count else {
+            throw RelayIDEError.relayEnvironmentFailure(
+                "Invalid merge step index \(stepIndex) for run '\(runID)'"
+            )
+        }
+        guard let worktreePath = integration.worktreePath, !worktreePath.isEmpty else {
+            throw RelayIDEError.relayEnvironmentFailure(
+                "Integration worktree path missing when merging lane '\(lane.laneID)' in run '\(runID)'"
+            )
+        }
+
+        let startedAt = Date()
+        let outcome: GitWorktreePlumbingEngine.SingleLaneGitMergeOutcome
+        do {
+            outcome = try gitEngine.mergeLaneCommitInIntegrationWorktree(
+                integrationWorktreePath: worktreePath,
+                runID: runID,
+                laneID: lane.laneID,
+                agent: lane.agent,
+                laneBranchName: lane.branch,
+                laneCommitOID: lane.commitOID,
+                environment: environment
+            )
+        } catch let relayErr as RelayIDEError {
+            integration.status = .error
+            integration.ready = false
+            integration.reason = Self.extractIntegrationErrorReason(from: relayErr)
+            try? database.upsertRunIntegration(runID: runID, integration)
+            throw relayErr
+        } catch {
+            let wrapped = RelayIDEError.relayEnvironmentFailure(error.localizedDescription)
+            integration.status = .error
+            integration.ready = false
+            integration.reason = error.localizedDescription
+            try? database.upsertRunIntegration(runID: runID, integration)
+            throw wrapped
+        }
+
+        let finishedAt = Date()
+        switch outcome {
+        case .noChanges:
+            integration.merges[stepIndex].laneCommitOID = lane.commitOID
+            integration.merges[stepIndex].status = .noChanges
+            integration.merges[stepIndex].mergeCommitOID = nil
+            integration.merges[stepIndex].conflicts = []
+            integration.merges[stepIndex].conflictLines = []
+            integration.merges[stepIndex].startedAt = startedAt
+            integration.merges[stepIndex].finishedAt = finishedAt
+            try database.updateRunMerge(runID: runID, integration.merges[stepIndex])
+            try database.upsertRunIntegration(runID: runID, integration)
+            onStderrLine(
+                RelayIntegrationStderrFormatter.formatMergeStepLine(
+                    step: integration.merges[stepIndex],
+                    agent: lane.agent,
+                    language: language
+                )
+            )
+            return .noChanges
+
+        case .merged(let mergeCommitOID):
+            integration.merges[stepIndex].laneCommitOID = lane.commitOID
+            integration.merges[stepIndex].status = .merged
+            integration.merges[stepIndex].mergeCommitOID = mergeCommitOID
+            integration.merges[stepIndex].conflicts = []
+            integration.merges[stepIndex].conflictLines = []
+            integration.merges[stepIndex].startedAt = startedAt
+            integration.merges[stepIndex].finishedAt = finishedAt
+            integration.headCommitOID = mergeCommitOID
+            try database.updateRunMerge(runID: runID, integration.merges[stepIndex])
+            try database.upsertRunIntegration(runID: runID, integration)
+            onStderrLine(
+                RelayIntegrationStderrFormatter.formatMergeStepLine(
+                    step: integration.merges[stepIndex],
+                    agent: lane.agent,
+                    language: language
+                )
+            )
+            return .merged(mergeCommitOID: mergeCommitOID)
+
+        case .conflict(let conflicts, let conflictLines, let headCommitOID):
+            integration.merges[stepIndex].laneCommitOID = lane.commitOID
+            integration.merges[stepIndex].status = .conflict
+            integration.merges[stepIndex].mergeCommitOID = nil
+            integration.merges[stepIndex].conflicts = conflicts
+            integration.merges[stepIndex].conflictLines = conflictLines
+            integration.merges[stepIndex].startedAt = startedAt
+            integration.merges[stepIndex].finishedAt = finishedAt
+            for remainingIdx in (stepIndex + 1)..<integration.merges.count {
+                integration.merges[remainingIdx].status = .notAttempted
+                integration.merges[remainingIdx].mergeCommitOID = nil
+                integration.merges[remainingIdx].conflicts = []
+                integration.merges[remainingIdx].conflictLines = []
+                integration.merges[remainingIdx].startedAt = nil
+                integration.merges[remainingIdx].finishedAt = nil
+            }
+            integration.headCommitOID = headCommitOID
+            integration.status = .conflict
+            integration.reason = "merge conflict in lane '\(lane.laneID)'"
+            integration.ready = false
+            try database.updateRunMerge(runID: runID, integration.merges[stepIndex])
+            try database.upsertRunIntegration(runID: runID, integration)
+            onStderrLine(
+                RelayIntegrationStderrFormatter.formatMergeStepLine(
+                    step: integration.merges[stepIndex],
+                    agent: lane.agent,
+                    language: language
+                )
+            )
+            return .conflict(
+                conflicts: conflicts,
+                conflictLines: conflictLines,
+                headCommitOID: headCommitOID
+            )
+
+        case .nonConflictError(let exitCode, let lastStderrLine, let command):
+            integration.status = .error
+            integration.reason = lastStderrLine
+            integration.ready = false
+            try database.upsertRunIntegration(runID: runID, integration)
+            throw RelayIDEError.gitPlumbingFailure(
+                command: command,
+                exitCode: exitCode,
+                stderr: lastStderrLine
+            )
+        }
+    }
+
+    internal static func extractIntegrationErrorReason(from error: RelayIDEError) -> String {
+        switch error {
+        case .gitPlumbingFailure(_, _, let stderr):
+            return GitWorktreePlumbingEngine.lastNonEmptyLine(of: stderr) ?? error.localizedDescription(in: .en)
+        case .relayEnvironmentFailure(let message):
+            return message
+        default:
+            return error.localizedDescription(in: .en)
+        }
+    }
+}
