@@ -1396,4 +1396,174 @@ struct WorkspaceStoreFTSAndUndoTests {
         #expect(all[1].integration != nil)
         #expect(try db.runDetailedIntegrityAudit().isHealthy == true)
     }
+
+    // MARK: - 22. Orphaned `merging`, `verifying` + `verify.running`, and `pending` Integration States Reconcile to `interrupted` / `skipped` (§7, R61)
+
+    @Test("RelayProjectDatabase reconciles orphaned merging, verifying, verify.running, and pending integration states to interrupted/skipped and persists them")
+    func orphanedIntegrationAndVerifyReconcileToInterruptedAndPersist() throws {
+        let (rootDir, bundleDir) = try makeTempBundleURL(label: "m2-reconcile")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let db = try RelayProjectDatabase(bundleDirectoryURL: bundleDir)
+        let now = Date(timeIntervalSince1970: 1_763_320_000)
+        let baseOID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+        // Case 1: Crash during `merging` -> integration becomes `interrupted`, reason warns about unfinished merge in worktree
+        let mergingRunID = "20261117-030000-0001"
+        let lock1 = try RelayProjectRunLock.acquire(bundleDirectoryURL: bundleDir, runID: mergingRunID, pid: 9101)
+        try db.createRun(
+            RelayRunRecord(
+                runID: mergingRunID,
+                repoPath: "/tmp/repo",
+                planCopyPath: "/tmp/p1.json",
+                baseRef: "main",
+                baseCommitOID: baseOID,
+                verifyCommand: "swift test",
+                relayShPath: "/tmp/fake-relay.sh",
+                relayShSHA256: String(repeating: "1", count: 64),
+                startedAt: now,
+                finishedAt: nil,
+                status: .running,
+                reason: nil,
+                relayidePID: 9101,
+                lanes: [
+                    RelayRunLaneRecord(runID: mergingRunID, laneID: "a", ordinal: 0, agent: .claude, promptPath: "/tmp/a.md", after: [], status: .succeeded, exitCode: 0)
+                ],
+                integration: RelayRunIntegrationRecord(
+                    branch: "relay/\(mergingRunID)/integration",
+                    worktreePath: "/tmp/wt/integration",
+                    baseCommitOID: baseOID,
+                    headCommitOID: baseOID,
+                    status: .merging,
+                    reason: nil,
+                    ready: false,
+                    merges: [
+                        RelayRunMergeRecord(ordinal: 0, laneID: "a", laneCommitOID: String(repeating: "b", count: 40), status: .notAttempted)
+                    ],
+                    verify: nil
+                )
+            )
+        )
+
+        // While lock1 is held, merging state remains untouched
+        let aliveMerging = try #require(try db.fetchRun(runID: mergingRunID))
+        #expect(aliveMerging.status == .running)
+        #expect(aliveMerging.integration?.status == .merging)
+        lock1.closeDescriptorSimulatingCrash()
+
+        let crashedMerging = try #require(try db.fetchRun(runID: mergingRunID))
+        #expect(crashedMerging.status == .interrupted)
+        #expect(crashedMerging.integration?.status == .interrupted)
+        #expect(crashedMerging.integration?.ready == false)
+        let mergeReason = try #require(crashedMerging.integration?.reason)
+        #expect(mergeReason.localizedCaseInsensitiveContains("worktree"))
+        #expect(mergeReason.localizedCaseInsensitiveContains("merge"))
+
+        // Case 2: Crash during `verifying` (`verify.status == .running`), including R61 case where run.status had been marked .succeeded
+        let verifyingRunID = "20261117-030100-0002"
+        try db.createRun(
+            RelayRunRecord(
+                runID: verifyingRunID,
+                repoPath: "/tmp/repo",
+                planCopyPath: "/tmp/p2.json",
+                baseRef: "main",
+                baseCommitOID: baseOID,
+                verifyCommand: "swift test",
+                relayShPath: "/tmp/fake-relay.sh",
+                relayShSHA256: String(repeating: "2", count: 64),
+                startedAt: now,
+                finishedAt: nil,
+                status: .succeeded,
+                reason: nil,
+                relayidePID: 9102,
+                lanes: [
+                    RelayRunLaneRecord(runID: verifyingRunID, laneID: "a", ordinal: 0, agent: .claude, promptPath: "/tmp/a.md", after: [], status: .succeeded, exitCode: 0)
+                ],
+                integration: RelayRunIntegrationRecord(
+                    branch: "relay/\(verifyingRunID)/integration",
+                    worktreePath: "/tmp/wt2/integration",
+                    baseCommitOID: baseOID,
+                    headCommitOID: String(repeating: "c", count: 40),
+                    status: .verifying,
+                    reason: nil,
+                    ready: false,
+                    merges: [],
+                    verify: RelayRunVerifyRecord(
+                        command: "swift test",
+                        timeoutSec: 1800,
+                        status: .running,
+                        exitCode: nil,
+                        signal: nil,
+                        pid: 9199,
+                        startedAt: now,
+                        finishedAt: nil,
+                        logPath: "/tmp/wt2/verify.pty",
+                        logBytes: 128,
+                        logTruncated: false,
+                        modifiedTrackedFiles: []
+                    )
+                )
+            )
+        )
+
+        let crashedVerifying = try #require(try db.fetchRun(runID: verifyingRunID))
+        #expect(crashedVerifying.status == .interrupted)
+        #expect(crashedVerifying.integration?.status == .interrupted)
+        #expect(crashedVerifying.integration?.verify?.status == .interrupted)
+        #expect(crashedVerifying.integration?.ready == false)
+
+        // Case 3: Crash during lanes while `integration.status == .pending` -> integration becomes `skipped`
+        let pendingIntRunID = "20261117-030200-0003"
+        try db.createRun(
+            RelayRunRecord(
+                runID: pendingIntRunID,
+                repoPath: "/tmp/repo",
+                planCopyPath: "/tmp/p3.json",
+                baseRef: "main",
+                baseCommitOID: baseOID,
+                verifyCommand: nil,
+                relayShPath: "/tmp/fake-relay.sh",
+                relayShSHA256: String(repeating: "3", count: 64),
+                startedAt: now,
+                finishedAt: nil,
+                status: .running,
+                reason: nil,
+                relayidePID: 9103,
+                lanes: [
+                    RelayRunLaneRecord(runID: pendingIntRunID, laneID: "a", ordinal: 0, agent: .claude, promptPath: "/tmp/a.md", after: [], status: .running, pid: 9150)
+                ],
+                integration: RelayRunIntegrationRecord(
+                    baseCommitOID: baseOID,
+                    status: .pending
+                )
+            )
+        )
+
+        let crashedPendingInt = try #require(try db.fetchRun(runID: pendingIntRunID))
+        #expect(crashedPendingInt.status == .interrupted)
+        #expect(crashedPendingInt.lanes[0].status == .interrupted)
+        #expect(crashedPendingInt.integration?.status == .skipped)
+        #expect(crashedPendingInt.integration?.verify == nil)
+
+        // Case 4: Next run holding run.lock calls `persistOrphanedRunsAsInterrupted` -> writes all reconciled rows to SQLite
+        let activeRunID = "20261117-030300-0004"
+        let activeLock = try RelayProjectRunLock.acquire(bundleDirectoryURL: bundleDir, runID: activeRunID, pid: 9200)
+        defer { activeLock.release() }
+        try db.persistOrphanedRunsAsInterrupted(activeRunID: activeRunID)
+
+        let rawMerging = try #require(try db.fetchRun(runID: mergingRunID, reconcileWithLock: false))
+        #expect(rawMerging.status == .interrupted)
+        #expect(rawMerging.integration?.status == .interrupted)
+        #expect(rawMerging.integration?.reason?.localizedCaseInsensitiveContains("worktree") == true)
+
+        let rawVerifying = try #require(try db.fetchRun(runID: verifyingRunID, reconcileWithLock: false))
+        #expect(rawVerifying.status == .interrupted)
+        #expect(rawVerifying.integration?.status == .interrupted)
+        #expect(rawVerifying.integration?.verify?.status == .interrupted)
+        #expect(rawVerifying.integration?.verify?.finishedAt != nil)
+
+        let rawPending = try #require(try db.fetchRun(runID: pendingIntRunID, reconcileWithLock: false))
+        #expect(rawPending.status == .interrupted)
+        #expect(rawPending.integration?.status == .skipped)
+    }
 }

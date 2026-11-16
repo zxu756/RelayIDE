@@ -870,12 +870,12 @@ public final class RelayProjectDatabase: @unchecked Sendable {
         return rawRuns.map { Self.reconcileWithActiveLock($0, activeLock: activeLock) }
     }
 
-    /// Persists any stale `running` runs (other than `activeRunID`, which currently owns `run.lock`) as `interrupted`
-    /// and reconciles their non-terminal lanes (`running -> interrupted`, `pending -> skipped`).
+    /// Persists any stale `running` or mid-integration/mid-verify runs (other than `activeRunID`, which currently owns `run.lock`)
+    /// as `interrupted` and reconciles their non-terminal lanes, integration, and verify rows.
     public func persistOrphanedRunsAsInterrupted(activeRunID: String) throws {
         let rawRuns = try allRuns(reconcileWithLock: false)
         let now = Date()
-        for run in rawRuns where run.status == .running && run.runID != activeRunID {
+        for run in rawRuns where run.runID != activeRunID && Self.needsOrphanReconciliation(run) {
             for var lane in run.lanes where !lane.status.isTerminal {
                 if lane.status == .running {
                     lane.status = .interrupted
@@ -892,6 +892,15 @@ public final class RelayProjectDatabase: @unchecked Sendable {
                     lane.finishedAt = now
                 }
                 try updateRunLane(lane)
+            }
+            if let integration = run.integration {
+                let (reconciledInt, didMutateInt) = Self.reconcileOrphanedIntegration(
+                    integration,
+                    finishedAtIfPersisting: now
+                )
+                if didMutateInt {
+                    try upsertRunIntegration(runID: run.runID, reconciledInt)
+                }
             }
             try updateRunStatus(
                 runID: run.runID,
@@ -980,11 +989,72 @@ public final class RelayProjectDatabase: @unchecked Sendable {
         )
     }
 
+    private static func needsOrphanReconciliation(_ record: RelayRunRecord) -> Bool {
+        if !record.status.isTerminal {
+            return true
+        }
+        if let integration = record.integration {
+            if !integration.status.isTerminal {
+                return true
+            }
+            if let verify = integration.verify, !verify.status.isTerminal {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func reconcileOrphanedIntegration(
+        _ integration: RelayRunIntegrationRecord,
+        finishedAtIfPersisting: Date?
+    ) -> (reconciled: RelayRunIntegrationRecord, didMutate: Bool) {
+        var updated = integration
+        var mutated = false
+
+        switch updated.status {
+        case .merging:
+            updated.status = .interrupted
+            updated.ready = false
+            if updated.reason == nil {
+                updated.reason = "interrupted during merge; integration worktree may be stopped on an unfinished merge"
+            }
+            mutated = true
+        case .verifying:
+            updated.status = .interrupted
+            updated.ready = false
+            if updated.reason == nil {
+                updated.reason = "interrupted during verify (owner process exited without releasing run)"
+            }
+            mutated = true
+        case .pending:
+            updated.status = .skipped
+            updated.ready = false
+            if updated.reason == nil {
+                updated.reason = "skipped (owner process exited before integration started)"
+            }
+            mutated = true
+        default:
+            break
+        }
+
+        if var verify = updated.verify, !verify.status.isTerminal {
+            verify.status = .interrupted
+            if let finishedAt = finishedAtIfPersisting, verify.finishedAt == nil {
+                verify.finishedAt = finishedAt
+            }
+            updated.verify = verify
+            updated.ready = false
+            mutated = true
+        }
+
+        return (updated, mutated)
+    }
+
     private static func reconcileWithActiveLock(
         _ record: RelayRunRecord,
         activeLock: (isHeld: Bool, holder: RelayRunLockHolderInfo?)
     ) -> RelayRunRecord {
-        guard record.status == .running else {
+        guard needsOrphanReconciliation(record) else {
             return record
         }
         let isOwnedByThisRun: Bool
@@ -1017,6 +1087,12 @@ public final class RelayProjectDatabase: @unchecked Sendable {
                     reconciled.lanes[idx].reason = "skipped (owner process exited before lane started)"
                 }
             }
+        }
+        if let integration = reconciled.integration {
+            reconciled.integration = reconcileOrphanedIntegration(
+                integration,
+                finishedAtIfPersisting: nil
+            ).reconciled
         }
         return reconciled
     }
