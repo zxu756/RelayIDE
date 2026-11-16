@@ -74,18 +74,28 @@ public struct GitWorktreePlumbingEngine: Sendable {
             )
             if branchExistsCheck.exitCode == 0 {
                 throw RelayIDEError.gitPlumbingFailure(
-                    command: "git worktree add -b \(branchName) \(worktreePath) \(baseOID)",
+                    command: "git -c core.hooksPath=/dev/null worktree add -b \(branchName) \(worktreePath) \(baseOID)",
                     exitCode: 128,
                     stderr: "fatal: a branch named '\(branchName)' already exists"
                 )
             }
 
-            try FileManager.default.createDirectory(
-                atPath: worktreesRootDirectory,
-                withIntermediateDirectories: true
-            )
+            do {
+                try FileManager.default.createDirectory(
+                    atPath: worktreesRootDirectory,
+                    withIntermediateDirectories: true
+                )
+            } catch {
+                throw RelayIDEError.relayEnvironmentFailure(
+                    "Failed to create worktrees directory '\(worktreesRootDirectory)': \(error.localizedDescription)"
+                )
+            }
 
-            _ = try runGit(["worktree", "add", "-b", branchName, worktreePath, baseOID], cwd: repositoryPath, environment: environment)
+            _ = try runGit(
+                ["-c", "core.hooksPath=/dev/null", "worktree", "add", "-b", branchName, worktreePath, baseOID],
+                cwd: repositoryPath,
+                environment: environment
+            )
             return ManagedWorktreeLane(
                 id: laneID,
                 displayName: displayName,
@@ -154,12 +164,12 @@ public struct GitWorktreePlumbingEngine: Sendable {
         // has written `.relay/` into `.git/info/exclude`; `git add -A -- .` + `git reset -q HEAD -- .relay`
         // succeeds in both ignored and `!.relay`-negated (R47) repositories while keeping `.relay/` out of commits.
         _ = try runGit(
-            ["add", "-A", "--", "."],
+            ["-c", "core.hooksPath=/dev/null", "add", "-A", "--", "."],
             cwd: worktreePath,
             environment: environment
         )
         _ = try runGit(
-            ["reset", "-q", "HEAD", "--", ".relay"],
+            ["-c", "core.hooksPath=/dev/null", "reset", "-q", "HEAD", "--", ".relay"],
             cwd: worktreePath,
             environment: environment
         )
@@ -186,13 +196,17 @@ public struct GitWorktreePlumbingEngine: Sendable {
         }
 
         let subject = "relay \(runID) \(laneID) (\(agent.rawValue)): \(status.rawValue)"
-        let body = "Committed by RelayIDE with --no-verify (repository verify checks run in M2)."
+        let body = "Committed by RelayIDE; repository hooks skipped."
         _ = try runGit(
             [
+                "-c", "core.hooksPath=/dev/null",
                 "-c", "user.useConfigOnly=true",
                 "-c", "commit.gpgsign=false",
+                "-c", "gc.auto=0",
+                "-c", "maintenance.auto=false",
                 "commit",
                 "--no-verify",
+                "--no-gpg-sign",
                 "-m", subject,
                 "-m", body
             ],
@@ -233,9 +247,9 @@ public struct GitWorktreePlumbingEngine: Sendable {
     }
 
     public func removeLaneWorktree(repositoryPath: String, worktreePath: String, deleteBranch: String? = nil) throws {
-        _ = try runGit(["worktree", "remove", "--force", worktreePath], cwd: repositoryPath)
+        _ = try runGit(["-c", "core.hooksPath=/dev/null", "worktree", "remove", "--force", worktreePath], cwd: repositoryPath)
         if let branch = deleteBranch {
-            _ = try? runGit(["branch", "-D", branch], cwd: repositoryPath)
+            _ = try? runGit(["-c", "core.hooksPath=/dev/null", "branch", "-D", branch], cwd: repositoryPath)
         }
     }
 
@@ -341,7 +355,7 @@ public struct GitWorktreePlumbingEngine: Sendable {
         let fullURL = URL(fileURLWithPath: worktreePath).appendingPathComponent(relativePath)
         let trackedCheck = try? runGit(["ls-files", "--error-unmatch", relativePath], cwd: worktreePath)
         if trackedCheck != nil {
-            _ = try runGit(["checkout", "HEAD", "--", relativePath], cwd: worktreePath)
+            _ = try runGit(["-c", "core.hooksPath=/dev/null", "checkout", "HEAD", "--", relativePath], cwd: worktreePath)
         } else if FileManager.default.fileExists(atPath: fullURL.path) {
             try FileManager.default.removeItem(at: fullURL)
         }

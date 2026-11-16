@@ -1,4 +1,5 @@
 import Compression
+import Darwin
 import Foundation
 import RelayModels
 import RelayWorktreeGit
@@ -1145,5 +1146,118 @@ struct WorktreeGitDiffAndHandoffTests {
         let changed5 = try engine.runGit(["diff", "--name-only", "\(baseInfoOID)..\(commit5OID)"], cwd: repoInfoExcludeDir.path, environment: gitEnv)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         #expect(changed5 == "feature.txt")
+    }
+
+    // MARK: - M2 Isolated `mktemp -d` + `GIT_CONFIG_NOSYSTEM=1` Test Helpers
+
+    private func makeMktempDirectory(prefix: String = "relay-m2-git") throws -> URL {
+        let base = FileManager.default.temporaryDirectory.path
+        let templateString = (base as NSString).appendingPathComponent("\(prefix)-XXXXXX")
+        var buffer = Array(templateString.utf8CString)
+        let createdPtr = buffer.withUnsafeMutableBufferPointer { buf -> UnsafeMutablePointer<CChar>? in
+            guard let baseAddress = buf.baseAddress else { return nil }
+            return Darwin.mkdtemp(baseAddress)
+        }
+        guard let createdPtr else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        let path = String(cString: createdPtr)
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    private func makeIsolatedGitEnvironment(homeDir: URL) -> [String: String] {
+        [
+            "HOME": homeDir.path,
+            "CFFIXED_USER_HOME": homeDir.path,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": "/usr/bin:/bin"
+        ]
+    }
+
+    // MARK: - 21. M2 `core.hooksPath=/dev/null` on All Git Writes & Updated Lane Commit Body (D5, R58, §11)
+
+    @Test("GitWorktreePlumbingEngine skips all repository hooks via core.hooksPath=/dev/null on worktree add and lane commit and writes updated commit body (D5, R58)")
+    func laneWorktreeAndCommitSkipAllHooksWithCoreHooksPathDevNullAndUpdatedBody() throws {
+        let tempRoot = try makeMktempDirectory(prefix: "relay-m2-r58")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let homeDir = tempRoot.appendingPathComponent("home", isDirectory: true)
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        let gitEnv = makeIsolatedGitEnvironment(homeDir: homeDir)
+
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "Relay Hook Tester"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "hooks@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "commit.gpgSign", "true"], cwd: repoDir.path, environment: gitEnv)
+        try "initial\n".write(to: repoDir.appendingPathComponent("seed.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "seed.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(
+            ["-c", "commit.gpgSign=false", "commit", "-m", "seed"],
+            cwd: repoDir.path,
+            environment: gitEnv
+        )
+        let baseOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Install failing hooks (exit 1) that also write a marker file, including hooks `--no-verify` does NOT skip:
+        // prepare-commit-msg, post-commit, post-checkout, post-merge, plus pre-commit and commit-msg.
+        let hookMarkerURL = tempRoot.appendingPathComponent("hooks-triggered.log")
+        let hooksDir = repoDir.appendingPathComponent(".git/hooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+        for hookName in ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-checkout", "post-merge"] {
+            let hookURL = hooksDir.appendingPathComponent(hookName)
+            let script = """
+            #!/bin/sh
+            echo "\(hookName)" >> "\(hookMarkerURL.path)"
+            exit 1
+            """
+            try script.write(to: hookURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
+        }
+
+        let runID = "20261117-010000-d501"
+        let wtRoot = tempRoot.appendingPathComponent("runs/\(runID)/worktrees", isDirectory: true)
+        let lane = try engine.createLaneWorktree(
+            repositoryPath: repoDir.path,
+            runID: runID,
+            laneID: "api",
+            displayName: "api",
+            vendor: .claudeCode,
+            baseRef: baseOID,
+            worktreesRootDirectory: wtRoot.path,
+            environment: gitEnv
+        )
+        #expect(!FileManager.default.fileExists(atPath: hookMarkerURL.path))
+
+        let wtURL = URL(fileURLWithPath: lane.worktreePath)
+        try "updated\n".write(to: wtURL.appendingPathComponent("seed.txt"), atomically: true, encoding: .utf8)
+        let commitRes = try engine.commitLaneChangesIfNeeded(
+            worktreePath: lane.worktreePath,
+            startCommitOID: baseOID,
+            runID: runID,
+            laneID: "api",
+            agent: .claude,
+            status: .succeeded,
+            environment: gitEnv
+        )
+        #expect(!FileManager.default.fileExists(atPath: hookMarkerURL.path))
+
+        guard case .committed(let commitOID) = commitRes else {
+            Issue.record("Expected .committed, got \(commitRes)")
+            return
+        }
+        let fullMessage = try engine.runGit(["log", "-1", "--format=%B", commitOID], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let expectedMessage = """
+        relay \(runID) api (claude): succeeded
+
+        Committed by RelayIDE; repository hooks skipped.
+        """
+        #expect(fullMessage == expectedMessage)
     }
 }
