@@ -3994,4 +3994,66 @@ struct CLIMCPAndWorkbenchShellTests {
             }
         }
     }
+
+    // MARK: - 38. M2 `RELAY_BUDGET_USD` (M4) & Multiple-Predecessor Error Messages (R63 First Two, D4)
+
+    @Test("RelayPlanValidator reports M4 for RELAY_BUDGET_USD and omits M1/M2 promises for multiple predecessors in EN and ZH")
+    func cliRunBudgetAndMultiPredecessorErrorMessagesMatchM2Spec() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-r63-errors")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        let promptsDir = plansDir.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "STUB WRITE out.txt ok\n".write(to: promptsDir.appendingPathComponent("task.md"), atomically: true, encoding: .utf8)
+
+        let validPlanURL = plansDir.appendingPathComponent("valid.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [{"id": "a", "agent": "claude", "prompt": "prompts/task.md", "after": []}]
+        }
+        """.write(to: validPlanURL, atomically: true, encoding: .utf8)
+
+        let multiAfterURL = plansDir.appendingPathComponent("multi-after.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "a", "agent": "claude", "prompt": "prompts/task.md", "after": []},
+            {"id": "b", "agent": "codex", "prompt": "prompts/task.md", "after": []},
+            {"id": "c", "agent": "agy", "prompt": "prompts/task.md", "after": ["a", "b"]}
+          ]
+        }
+        """.write(to: multiAfterURL, atomically: true, encoding: .utf8)
+
+        let cli = RelayCLIRunner()
+        var budgetEnv = fx.baseEnvironment
+        budgetEnv["RELAY_BUDGET_USD"] = "10.00"
+
+        for lang in ["en", "zh"] {
+            let budgetRes = await cli.executeCommand(
+                arguments: ["run", validPlanURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", lang],
+                environment: budgetEnv
+            )
+            #expect(budgetRes.exitCode == 2)
+            #expect(budgetRes.stdout.isEmpty)
+            #expect(budgetRes.stderr.contains("RELAY_BUDGET_USD"))
+            #expect(budgetRes.stderr.contains("M4"), "(\(lang)): expected M4 in budget error, got '\(budgetRes.stderr)'")
+            #expect(!budgetRes.stderr.contains("M1"), "(\(lang)): stale M1 found in budget error: '\(budgetRes.stderr)'")
+            #expect(!budgetRes.stderr.contains("M2"), "(\(lang)): stale M2 found in budget error: '\(budgetRes.stderr)'")
+
+            let multiRes = await cli.executeCommand(
+                arguments: ["run", multiAfterURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", lang],
+                environment: fx.baseEnvironment
+            )
+            #expect(multiRes.exitCode == 2)
+            #expect(multiRes.stdout.isEmpty)
+            #expect(multiRes.stderr.contains("'c'"))
+            #expect(!multiRes.stderr.contains("M1"), "(\(lang)): stale M1 found in multi-after error: '\(multiRes.stderr)'")
+            #expect(!multiRes.stderr.contains("M2"), "(\(lang)): stale M2 promise found in multi-after error: '\(multiRes.stderr)'")
+        }
+    }
 }

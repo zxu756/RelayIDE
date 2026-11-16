@@ -59,13 +59,13 @@ public enum RelayPlanValidator {
     ) throws -> RelayValidatedRunPlan {
         let isZh = language.isChinese
 
-        // 1. Reject RELAY_BUDGET_USD in M1 (R44)
+        // 1. Reject RELAY_BUDGET_USD prior to M4 (R44, R63)
         if let rawBudget = environment["RELAY_BUDGET_USD"]?.trimmingCharacters(in: .whitespacesAndNewlines),
            !rawBudget.isEmpty {
             throw RelayIDEError.invalidRunPlan(
                 isZh
-                    ? "M1 不支持环境变量 RELAY_BUDGET_USD（codex 与 agy 不汇报美元花费，预算上限将在 M2 按计价方式重新设计）"
-                    : "RELAY_BUDGET_USD is not supported in M1 (codex and agy do not report USD spend; budget enforcement will be redesigned in M2)"
+                    ? "当前不支持环境变量 RELAY_BUDGET_USD（各通道在独立 worktree 中不累计整单预算，预算控制排在 M4）"
+                    : "RELAY_BUDGET_USD is not supported yet (spend does not accumulate across isolated lane worktrees; whole-job budget enforcement is scheduled for M4)"
             )
         }
 
@@ -236,8 +236,8 @@ public enum RelayPlanValidator {
             guard lane.after.count <= 1 else {
                 throw RelayIDEError.invalidRunPlan(
                     isZh
-                        ? "通道 '\(lane.id)' 指定了多个前置通道 \(lane.after)；M1 每条通道最多允许一个前置（多前置合并排在 M2）"
-                        : "Lane '\(lane.id)' specifies multiple predecessors \(lane.after); M1 supports at most one predecessor per lane"
+                        ? "通道 '\(lane.id)' 指定了多个前置通道 \(lane.after)；每条通道最多允许一个前置"
+                        : "Lane '\(lane.id)' specifies multiple predecessors \(lane.after); at most one predecessor per lane is supported"
                 )
             }
             inDegree[lane.id] = lane.after.count
