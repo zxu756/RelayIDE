@@ -890,4 +890,67 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(sig9.signal == 9)
         #expect(sig9.reason?.contains("9") == true)
     }
+
+    // MARK: - 20. M2 `RelayIntegrationMergeOrder` Pure Topological + Plan-Index Tie-Break (§4)
+
+    @Test("RelayIntegrationMergeOrder computes topological order breaking ties at every step by earliest plan position, including [b(after a), c, a] -> [c, a, b] (§4)")
+    func relayIntegrationMergeOrderTopologicalAndPlanPriority() throws {
+        // 1. Canonical spec example: [b (after a), c, a] -> [c, a, b]
+        let canonical = try RelayIntegrationMergeOrder.computeMergeOrder([
+            RelayMergeOrderItem(laneID: "b", after: ["a"]),
+            RelayMergeOrderItem(laneID: "c", after: []),
+            RelayMergeOrderItem(laneID: "a", after: [])
+        ])
+        #expect(canonical == ["c", "a", "b"])
+
+        // 2. Stepwise plan-position priority: [b (after a), a, c] -> `a` runs first (index 1 < index 2),
+        // unlocking `b` (index 0) which beats `c` (index 2) -> [a, b, c]
+        let stepwisePriority = try RelayIntegrationMergeOrder.computeMergeOrder([
+            RelayMergeOrderItem(laneID: "b", after: ["a"]),
+            RelayMergeOrderItem(laneID: "a", after: []),
+            RelayMergeOrderItem(laneID: "c", after: [])
+        ])
+        #expect(stepwisePriority == ["a", "b", "c"])
+
+        // 3. Deeper chain + siblings: [d(after c), b(after a), c(after a), a, e] -> [a, b, c, d, e]
+        let chainAndSiblings = try RelayIntegrationMergeOrder.computeMergeOrder([
+            RelayMergeOrderItem(laneID: "d", after: ["c"]),
+            RelayMergeOrderItem(laneID: "b", after: ["a"]),
+            RelayMergeOrderItem(laneID: "c", after: ["a"]),
+            RelayMergeOrderItem(laneID: "a", after: []),
+            RelayMergeOrderItem(laneID: "e", after: [])
+        ])
+        #expect(chainAndSiblings == ["a", "b", "c", "d", "e"])
+
+        // 4. Overload from RelayRunLaneRecord + planOrder
+        let laneRecords: [RelayRunLaneRecord] = [
+            RelayRunLaneRecord(runID: "r1", laneID: "a", ordinal: 2, agent: .claude, promptPath: "a.md", after: []),
+            RelayRunLaneRecord(runID: "r1", laneID: "b", ordinal: 0, agent: .codex, promptPath: "b.md", after: ["a"]),
+            RelayRunLaneRecord(runID: "r1", laneID: "c", ordinal: 1, agent: .agy, promptPath: "c.md", after: [])
+        ]
+        let fromRecords = try RelayIntegrationMergeOrder.computeMergeOrder(
+            lanes: laneRecords,
+            planOrder: ["b", "c", "a"]
+        )
+        #expect(fromRecords == ["c", "a", "b"])
+
+        // 5. Rejects cycles, unknown dependencies, and duplicate IDs
+        #expect(throws: RelayIDEError.self) {
+            _ = try RelayIntegrationMergeOrder.computeMergeOrder([
+                RelayMergeOrderItem(laneID: "a", after: ["b"]),
+                RelayMergeOrderItem(laneID: "b", after: ["a"])
+            ])
+        }
+        #expect(throws: RelayIDEError.self) {
+            _ = try RelayIntegrationMergeOrder.computeMergeOrder([
+                RelayMergeOrderItem(laneID: "a", after: ["nonexistent"])
+            ])
+        }
+        #expect(throws: RelayIDEError.self) {
+            _ = try RelayIntegrationMergeOrder.computeMergeOrder([
+                RelayMergeOrderItem(laneID: "a", after: []),
+                RelayMergeOrderItem(laneID: "a", after: [])
+            ])
+        }
+    }
 }
