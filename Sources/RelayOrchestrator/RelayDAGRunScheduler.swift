@@ -445,6 +445,25 @@ public struct RelayDAGRunSchedulerResult: Sendable {
     }
 }
 
+public struct RelayLanePhaseSummary: Sendable, Equatable {
+    public let orderedLanes: [RelayRunLaneRecord]
+    public let runStatus: RelayRunStatus
+    public let runReason: String?
+    public let cancellationSignal: Int32?
+
+    public init(
+        orderedLanes: [RelayRunLaneRecord],
+        runStatus: RelayRunStatus,
+        runReason: String?,
+        cancellationSignal: Int32?
+    ) {
+        self.orderedLanes = orderedLanes
+        self.runStatus = runStatus
+        self.runReason = runReason
+        self.cancellationSignal = cancellationSignal
+    }
+}
+
 /// Standalone M1 `run` scheduler. Intentionally never instantiates `MultiVendorDAGOrchestrator` (R49).
 public final class RelayDAGRunScheduler: @unchecked Sendable {
     public let runID: String
@@ -562,7 +581,29 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         self.rootLanes = roots
     }
 
-    public func run() async throws -> RelayDAGRunSchedulerResult {
+    public func run(
+        afterLanesPhase: ((RelayLanePhaseSummary) async throws -> Void)? = nil
+    ) async throws -> RelayDAGRunSchedulerResult {
+        do {
+            let laneSummary = try await executeLanesPhase()
+            if let afterLanesPhase {
+                try await afterLanesPhase(laneSummary)
+            }
+            return try persistTerminalRunStatus(afterIntegration: laneSummary)
+        } catch let relayErr as RelayIDEError {
+            persistFatalErrorRunStatus(relayErr)
+            throw relayErr
+        } catch {
+            let wrapped = RelayIDEError.relayEnvironmentFailure(error.localizedDescription)
+            persistFatalErrorRunStatus(wrapped)
+            throw wrapped
+        }
+    }
+
+    /// Executes all DAG lanes until every lane reaches a terminal state in `relay_run_lanes`,
+    /// intentionally keeping `relay_runs.status == .running` (`finished_at == NULL`) so M2 integration
+    /// and `verify` execute before terminal run status is persisted (`03-relayide.md` M2 §7, R61).
+    public func executeLanesPhase() async throws -> RelayLanePhaseSummary {
         let lanesDirURL = runDirectoryURL.appendingPathComponent("lanes", isDirectory: true)
         try FileManager.default.createDirectory(at: lanesDirURL, withIntermediateDirectories: true)
 
@@ -586,7 +627,7 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         await waitForAllOngoingEscalations()
 
         if let fatal = currentFatalError() {
-            reconcileAbortedRunOnFatalError(fatal)
+            reconcileNonTerminalLanesOnFatalError(fatal)
             throw fatal
         }
 
@@ -623,37 +664,60 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
                 emitStderrLine(skipLine)
             }
 
-            try database.updateRunStatus(
-                runID: runID,
-                status: .cancelled,
-                reason: runCancelReason,
-                finishedAt: Date()
+            return RelayLanePhaseSummary(
+                orderedLanes: snapshotOrderedLaneRecords(),
+                runStatus: .cancelled,
+                runReason: runCancelReason,
+                cancellationSignal: cancelSig
             )
-            guard let persisted = try database.fetchRun(runID: runID, reconcileWithLock: false) else {
-                throw RelayIDEError.relayEnvironmentFailure("Persisted run '\(runID)' missing after cancellation")
-            }
-            let exitCode: Int32 = (cancelSig == SIGTERM) ? 143 : 130
-            return RelayDAGRunSchedulerResult(runRecord: persisted, cliExitCode: exitCode)
         }
 
         let orderedLanes = snapshotOrderedLaneRecords()
         let overallStatus = Self.computeOverallRunStatus(from: orderedLanes)
-        let allSucceeded = orderedLanes.allSatisfy {
-            $0.status == .succeeded || $0.status == .succeededNoChanges
-        }
-        let cliExitCode: Int32 = allSucceeded ? 0 : 1
+        return RelayLanePhaseSummary(
+            orderedLanes: orderedLanes,
+            runStatus: overallStatus,
+            runReason: nil,
+            cancellationSignal: nil
+        )
+    }
 
+    /// Writes the terminal `relay_runs` status and `finished_at` AFTER the post-lane integration / `verify` phase (R61).
+    public func persistTerminalRunStatus(
+        afterIntegration laneSummary: RelayLanePhaseSummary,
+        overrideStatus: RelayRunStatus? = nil,
+        overrideReason: String? = nil,
+        cliExitCodeOverride: Int32? = nil
+    ) throws -> RelayDAGRunSchedulerResult {
+        let finalStatus = overrideStatus ?? laneSummary.runStatus
+        let finalReason = overrideReason ?? laneSummary.runReason
         try database.updateRunStatus(
             runID: runID,
-            status: overallStatus,
-            reason: nil,
+            status: finalStatus,
+            reason: finalReason,
             finishedAt: Date()
         )
 
         guard let persisted = try database.fetchRun(runID: runID, reconcileWithLock: false) else {
             throw RelayIDEError.relayEnvironmentFailure("Persisted run '\(runID)' missing after completion")
         }
+
+        let cliExitCode: Int32
+        if let explicitExit = cliExitCodeOverride {
+            cliExitCode = explicitExit
+        } else if let cancelSig = laneSummary.cancellationSignal {
+            cliExitCode = (cancelSig == SIGTERM) ? 143 : 130
+        } else {
+            let allSucceeded = laneSummary.orderedLanes.allSatisfy {
+                $0.status == .succeeded || $0.status == .succeededNoChanges
+            }
+            cliExitCode = allSucceeded ? 0 : 1
+        }
         return RelayDAGRunSchedulerResult(runRecord: persisted, cliExitCode: cliExitCode)
+    }
+
+    public func persistFatalErrorRunStatus(_ error: RelayIDEError) {
+        reconcileAbortedRunOnFatalError(error)
     }
 
     public static func computeOverallRunStatus(from lanes: [RelayRunLaneRecord]) -> RelayRunStatus {
@@ -1175,12 +1239,12 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         }
     }
 
-    private func reconcileAbortedRunOnFatalError(_ error: RelayIDEError) {
+    @discardableResult
+    private func reconcileNonTerminalLanesOnFatalError(_ error: RelayIDEError, now: Date = Date()) -> String {
         let isZh = language.isChinese
         let fatalReason = isZh
             ? "中断（RelayIDE 出错）：\(error.localizedDescription(in: language))"
             : "interrupted (RelayIDE error): \(error.localizedDescription(in: language))"
-        let now = Date()
 
         for record in snapshotOrderedLaneRecords() where !record.status.isTerminal {
             var updated = record
@@ -1204,7 +1268,12 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
             laneRecordsByID[updated.laneID] = updated
             stateLock.unlock()
         }
+        return fatalReason
+    }
 
+    private func reconcileAbortedRunOnFatalError(_ error: RelayIDEError) {
+        let now = Date()
+        let fatalReason = reconcileNonTerminalLanesOnFatalError(error, now: now)
         try? database.updateRunStatus(
             runID: runID,
             status: .interrupted,

@@ -879,7 +879,22 @@ public struct RelayRunExecutor: Sendable {
             cancellationPolicy: cancellationPolicy,
             emitStderrLine: emitStderrLine
         )
-        return try await scheduler.run()
+        do {
+            // 1. Execute all DAG lanes (`relay_runs.status` remains `.running` in SQLite, R61).
+            let laneSummary = try await scheduler.executeLanesPhase()
+
+            // 2. Post-lane integration & verify phase slot (M2 Stage 4 inserts `runIntegrationMergePhase` + `verify` here).
+
+            // 3. Persist terminal `relay_runs` status strictly AFTER the integration phase slot (R61).
+            return try scheduler.persistTerminalRunStatus(afterIntegration: laneSummary)
+        } catch let relayErr as RelayIDEError {
+            scheduler.persistFatalErrorRunStatus(relayErr)
+            throw relayErr
+        } catch {
+            let wrapped = RelayIDEError.relayEnvironmentFailure(error.localizedDescription)
+            scheduler.persistFatalErrorRunStatus(wrapped)
+            throw wrapped
+        }
     }
 
     private func generateUniqueRunID(

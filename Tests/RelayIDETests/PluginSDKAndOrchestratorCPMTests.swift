@@ -1736,4 +1736,152 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(persistedErr.status == .error)
         #expect(persistedErr.ready == false)
     }
+
+    // MARK: - 24. M2 Deferred Terminal Run Status Write After Post-Lane Integration Slot (R61)
+
+    @Test("RelayDAGRunScheduler keeps relay_runs.status == .running after all lanes complete so integration/verify execute before terminal run status is persisted (R61)")
+    func schedulerDefersTerminalRunStatusUntilAfterPostLaneIntegrationSlot() async throws {
+        let tempRoot = try makeMktempDirectory(prefix: "relay-m2-r61")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let homeDir = tempRoot.appendingPathComponent("home", isDirectory: true)
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        let projectDir = tempRoot.appendingPathComponent("Proj.relayproj", isDirectory: true)
+        let plansDir = tempRoot.appendingPathComponent("plans", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plansDir, withIntermediateDirectories: true)
+        let gitEnv = makeIsolatedGitEnvironment(homeDir: homeDir)
+
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "R61 Tester"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "r61@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+        try "seed\n".write(to: repoDir.appendingPathComponent("seed.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "seed.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "seed"], cwd: repoDir.path, environment: gitEnv)
+
+        // Minimal local runner script inside mktemp (never invokes relay.sh)
+        let stubRunnerURL = tempRoot.appendingPathComponent("mini-runner.sh")
+        let stubUtilURL = tempRoot.appendingPathComponent("relay_util.py")
+        try "#!/bin/sh\nprintf 'lane-output\\n' > \"$2/lane_out.txt\"\nexit 0\n".write(
+            to: stubRunnerURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        try "# stub\n".write(to: stubUtilURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stubRunnerURL.path)
+
+        let promptURL = plansDir.appendingPathComponent("api.md")
+        try "Write lane_out.txt\n".write(to: promptURL, atomically: true, encoding: .utf8)
+        let planURL = plansDir.appendingPathComponent("plan.json")
+        try """
+        {
+          "repo": "\(repoDir.path)",
+          "base": "main",
+          "lanes": [
+            {"id": "api", "agent": "claude", "prompt": "api.md", "after": []}
+          ]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        let db = try RelayProjectDatabase(bundleDirectoryURL: projectDir)
+        let validated = try RelayPlanValidator.validate(
+            planFileURL: planURL,
+            projectBundleURL: projectDir,
+            environment: gitEnv,
+            language: .en
+        )
+        let resolvedRunner = try RelayRunExecutor.resolveAndVerifyRelayScript(
+            explicitPath: stubRunnerURL.path,
+            environment: gitEnv,
+            language: .en
+        )
+
+        let runID = "20261117-050000-r61a"
+        let runDir = projectDir.appendingPathComponent("runs/\(runID)", isDirectory: true)
+        try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+        let planCopyURL = runDir.appendingPathComponent("plan.json")
+        try validated.rawPlanData.write(to: planCopyURL, options: .atomic)
+
+        try db.createRun(
+            RelayRunRecord(
+                runID: runID,
+                repoPath: validated.resolvedRepoURL.path,
+                planCopyPath: planCopyURL.path,
+                baseRef: validated.baseRef,
+                baseCommitOID: validated.baseCommitOID,
+                verifyCommand: nil,
+                relayShPath: resolvedRunner.url.path,
+                relayShSHA256: resolvedRunner.sha256Hex,
+                startedAt: Date(),
+                finishedAt: nil,
+                status: .running,
+                reason: nil,
+                relayidePID: getpid(),
+                lanes: validated.lanes.map {
+                    RelayRunLaneRecord(
+                        runID: runID,
+                        laneID: $0.id,
+                        ordinal: $0.ordinal,
+                        agent: $0.agent,
+                        promptPath: $0.resolvedPromptURL.path,
+                        after: $0.after,
+                        status: .pending
+                    )
+                }
+            )
+        )
+
+        let scheduler = RelayDAGRunScheduler(
+            runID: runID,
+            validatedPlan: validated,
+            relayScript: resolvedRunner,
+            runDirectoryURL: runDir,
+            projectBundleURL: projectDir,
+            database: db,
+            gitEngine: engine,
+            language: .en,
+            environment: gitEnv,
+            emitStderrLine: { _ in }
+        )
+
+        // 1. Execute lanes phase ONLY: all lanes MUST be committed & terminal in SQLite,
+        // while `relay_runs.status` MUST STILL BE `.running` (`finishedAt == nil`)!
+        let laneSummary = try await scheduler.executeLanesPhase()
+        #expect(laneSummary.runStatus == .succeeded)
+        #expect(laneSummary.orderedLanes.count == 1)
+        #expect(laneSummary.orderedLanes[0].status == .succeeded)
+        #expect(laneSummary.orderedLanes[0].commitOID != nil)
+
+        let midRunRecord = try #require(try db.fetchRun(runID: runID, reconcileWithLock: false))
+        #expect(midRunRecord.status == .running)
+        #expect(midRunRecord.finishedAt == nil)
+        #expect(midRunRecord.lanes[0].status == .succeeded)
+
+        // 2. Run `runIntegrationMergePhase` inside this post-lane slot while `relay_runs.status` is still `.running`
+        let integrationResult = try RelayIntegrationMergeRunner.runIntegrationMergePhase(
+            runID: runID,
+            repositoryPath: validated.resolvedRepoURL.path,
+            projectBundlePath: projectDir.path,
+            baseCommitOID: validated.baseCommitOID,
+            lanes: laneSummary.orderedLanes,
+            planOrder: validated.lanes.map(\.id),
+            database: db,
+            gitEngine: engine,
+            language: .en,
+            environment: gitEnv
+        )
+        #expect(integrationResult.status == .merged)
+        let stillRunningDuringIntegration = try #require(try db.fetchRun(runID: runID, reconcileWithLock: false))
+        #expect(stillRunningDuringIntegration.status == .running)
+        #expect(stillRunningDuringIntegration.integration?.status == .merged)
+
+        // 3. Persist terminal run status AFTER the integration slot -> now `relay_runs.status` transitions to `.succeeded`
+        let finalized = try scheduler.persistTerminalRunStatus(afterIntegration: laneSummary)
+        #expect(finalized.cliExitCode == 0)
+        #expect(finalized.runRecord.status == .succeeded)
+        #expect(finalized.runRecord.finishedAt != nil)
+        #expect(finalized.runRecord.integration?.status == .merged)
+    }
 }
