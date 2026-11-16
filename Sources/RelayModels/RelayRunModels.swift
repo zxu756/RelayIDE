@@ -353,6 +353,367 @@ public struct RelayRunLaneRecord: Sendable, Hashable, Equatable, Identifiable, C
     }
 }
 
+// MARK: - M2 Integration, Merge & Verify Fixed Status Vocabularies (`03-relayide.md` M2 §9, §10)
+
+/// Fixed English status tokens for `integration.status`, identical under `--lang en` and `--lang zh`.
+public enum RelayIntegrationStatus: String, Sendable, Codable, Hashable, CaseIterable {
+    case pending = "pending"
+    case skipped = "skipped"
+    case nothingToMerge = "nothing-to-merge"
+    case merging = "merging"
+    case conflict = "conflict"
+    case merged = "merged"
+    case verifying = "verifying"
+    case verifyFailed = "verify-failed"
+    case verifyTimeout = "verify-timeout"
+    case verified = "verified"
+    case cancelled = "cancelled"
+    case interrupted = "interrupted"
+    case error = "error"
+
+    public var isTerminal: Bool {
+        switch self {
+        case .pending, .merging, .verifying:
+            return false
+        default:
+            return true
+        }
+    }
+
+    public func localizedLabel(in language: RelayLanguage) -> String {
+        switch self {
+        case .pending:
+            return RelayLocalizer.select(language, "pending", "待命")
+        case .skipped:
+            return RelayLocalizer.select(language, "skipped", "已跳过")
+        case .nothingToMerge:
+            return RelayLocalizer.select(language, "nothing to merge", "无改动可合并")
+        case .merging:
+            return RelayLocalizer.select(language, "merging", "合并中")
+        case .conflict:
+            return RelayLocalizer.select(language, "conflict", "冲突")
+        case .merged:
+            return RelayLocalizer.select(language, "merged", "已合并")
+        case .verifying:
+            return RelayLocalizer.select(language, "verifying", "验证中")
+        case .verifyFailed:
+            return RelayLocalizer.select(language, "verify failed", "验证失败")
+        case .verifyTimeout:
+            return RelayLocalizer.select(language, "verify timeout", "验证超时")
+        case .verified:
+            return RelayLocalizer.select(language, "verified", "已验证")
+        case .cancelled:
+            return RelayLocalizer.select(language, "cancelled", "已取消")
+        case .interrupted:
+            return RelayLocalizer.select(language, "interrupted", "中断")
+        case .error:
+            return RelayLocalizer.select(language, "error", "出错")
+        }
+    }
+}
+
+/// Fixed English status tokens for per-lane `relay_run_merges` / `integration.merges[*].status`.
+public enum RelayMergeStepStatus: String, Sendable, Codable, Hashable, CaseIterable {
+    case merged = "merged"
+    case noChanges = "no-changes"
+    case conflict = "conflict"
+    case notAttempted = "not-attempted"
+
+    public func localizedLabel(in language: RelayLanguage) -> String {
+        switch self {
+        case .merged:
+            return RelayLocalizer.select(language, "merged", "已合并")
+        case .noChanges:
+            return RelayLocalizer.select(language, "no changes", "无改动")
+        case .conflict:
+            return RelayLocalizer.select(language, "conflict", "冲突")
+        case .notAttempted:
+            return RelayLocalizer.select(language, "not attempted", "未尝试")
+        }
+    }
+}
+
+/// Fixed English status tokens for `integration.verify.status`.
+public enum RelayVerifyStatus: String, Sendable, Codable, Hashable, CaseIterable {
+    case running = "running"
+    case passed = "passed"
+    case failed = "failed"
+    case timeout = "timeout"
+    case cancelled = "cancelled"
+    case interrupted = "interrupted"
+
+    public var isTerminal: Bool {
+        switch self {
+        case .running:
+            return false
+        default:
+            return true
+        }
+    }
+
+    public func localizedLabel(in language: RelayLanguage) -> String {
+        switch self {
+        case .running:
+            return RelayLocalizer.select(language, "running", "运行中")
+        case .passed:
+            return RelayLocalizer.select(language, "passed", "通过")
+        case .failed:
+            return RelayLocalizer.select(language, "failed", "失败")
+        case .timeout:
+            return RelayLocalizer.select(language, "timeout", "超时")
+        case .cancelled:
+            return RelayLocalizer.select(language, "cancelled", "已取消")
+        case .interrupted:
+            return RelayLocalizer.select(language, "interrupted", "中断")
+        }
+    }
+}
+
+public struct RelayMergeConflictItem: Sendable, Codable, Hashable, Equatable {
+    public let path: String
+    public let code: String
+
+    public init(path: String, code: String) {
+        self.path = path
+        self.code = code
+    }
+}
+
+public struct RelayRunMergeRecord: Sendable, Codable, Hashable, Equatable, Identifiable {
+    public var id: String { laneID }
+    public var ordinal: Int
+    public let laneID: String
+    public var laneCommitOID: String?
+    public var status: RelayMergeStepStatus
+    public var mergeCommitOID: String?
+    public var conflicts: [RelayMergeConflictItem]
+    public var conflictLines: [String]
+    public var startedAt: Date?
+    public var finishedAt: Date?
+
+    private enum CodingKeys: String, CodingKey {
+        case ordinal
+        case laneID
+        case laneCommitOID
+        case status
+        case mergeCommitOID
+        case conflicts
+        case conflictLines
+        case startedAt
+        case finishedAt
+    }
+
+    public init(
+        ordinal: Int = 0,
+        laneID: String,
+        laneCommitOID: String? = nil,
+        status: RelayMergeStepStatus,
+        mergeCommitOID: String? = nil,
+        conflicts: [RelayMergeConflictItem] = [],
+        conflictLines: [String] = [],
+        startedAt: Date? = nil,
+        finishedAt: Date? = nil
+    ) {
+        self.ordinal = ordinal
+        self.laneID = laneID
+        self.laneCommitOID = laneCommitOID
+        self.status = status
+        self.mergeCommitOID = mergeCommitOID
+        self.conflicts = conflicts
+        self.conflictLines = conflictLines
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.ordinal = try c.decodeIfPresent(Int.self, forKey: .ordinal) ?? 0
+        self.laneID = try c.decode(String.self, forKey: .laneID)
+        self.laneCommitOID = try c.decodeIfPresent(String.self, forKey: .laneCommitOID)
+        self.status = try c.decode(RelayMergeStepStatus.self, forKey: .status)
+        self.mergeCommitOID = try c.decodeIfPresent(String.self, forKey: .mergeCommitOID)
+        self.conflicts = try c.decodeIfPresent([RelayMergeConflictItem].self, forKey: .conflicts) ?? []
+        self.conflictLines = try c.decodeIfPresent([String].self, forKey: .conflictLines) ?? []
+        self.startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt)
+        self.finishedAt = try c.decodeIfPresent(Date.self, forKey: .finishedAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(ordinal, forKey: .ordinal)
+        try c.encode(laneID, forKey: .laneID)
+        try encodeNullable(laneCommitOID, into: &c, forKey: .laneCommitOID)
+        try c.encode(status, forKey: .status)
+        try encodeNullable(mergeCommitOID, into: &c, forKey: .mergeCommitOID)
+        try c.encode(conflicts, forKey: .conflicts)
+        try c.encode(conflictLines, forKey: .conflictLines)
+        try encodeNullable(startedAt, into: &c, forKey: .startedAt)
+        try encodeNullable(finishedAt, into: &c, forKey: .finishedAt)
+    }
+}
+
+public struct RelayRunVerifyRecord: Sendable, Codable, Hashable, Equatable {
+    public var command: String
+    public var timeoutSec: Int
+    public var status: RelayVerifyStatus
+    public var exitCode: Int32?
+    public var signal: Int32?
+    public var pid: Int32?
+    public var startedAt: Date?
+    public var finishedAt: Date?
+    public var logPath: String?
+    public var logBytes: Int
+    public var logTruncated: Bool
+    public var modifiedTrackedFiles: [String]
+
+    private enum CodingKeys: String, CodingKey {
+        case command
+        case timeoutSec
+        case status
+        case exitCode
+        case signal
+        case pid
+        case startedAt
+        case finishedAt
+        case logPath
+        case logBytes
+        case logTruncated
+        case modifiedTrackedFiles
+    }
+
+    public init(
+        command: String,
+        timeoutSec: Int,
+        status: RelayVerifyStatus,
+        exitCode: Int32? = nil,
+        signal: Int32? = nil,
+        pid: Int32? = nil,
+        startedAt: Date? = nil,
+        finishedAt: Date? = nil,
+        logPath: String? = nil,
+        logBytes: Int = 0,
+        logTruncated: Bool = false,
+        modifiedTrackedFiles: [String] = []
+    ) {
+        self.command = command
+        self.timeoutSec = timeoutSec
+        self.status = status
+        self.exitCode = exitCode
+        self.signal = signal
+        self.pid = pid
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+        self.logPath = logPath
+        self.logBytes = logBytes
+        self.logTruncated = logTruncated
+        self.modifiedTrackedFiles = modifiedTrackedFiles
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.command = try c.decode(String.self, forKey: .command)
+        self.timeoutSec = try c.decode(Int.self, forKey: .timeoutSec)
+        self.status = try c.decode(RelayVerifyStatus.self, forKey: .status)
+        self.exitCode = try c.decodeIfPresent(Int32.self, forKey: .exitCode)
+        self.signal = try c.decodeIfPresent(Int32.self, forKey: .signal)
+        self.pid = try c.decodeIfPresent(Int32.self, forKey: .pid)
+        self.startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt)
+        self.finishedAt = try c.decodeIfPresent(Date.self, forKey: .finishedAt)
+        self.logPath = try c.decodeIfPresent(String.self, forKey: .logPath)
+        self.logBytes = try c.decodeIfPresent(Int.self, forKey: .logBytes) ?? 0
+        self.logTruncated = try c.decodeIfPresent(Bool.self, forKey: .logTruncated) ?? false
+        self.modifiedTrackedFiles = try c.decodeIfPresent([String].self, forKey: .modifiedTrackedFiles) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(command, forKey: .command)
+        try c.encode(timeoutSec, forKey: .timeoutSec)
+        try c.encode(status, forKey: .status)
+        try encodeNullable(exitCode, into: &c, forKey: .exitCode)
+        try encodeNullable(signal, into: &c, forKey: .signal)
+        try encodeNullable(pid, into: &c, forKey: .pid)
+        try encodeNullable(startedAt, into: &c, forKey: .startedAt)
+        try encodeNullable(finishedAt, into: &c, forKey: .finishedAt)
+        try encodeNullable(logPath, into: &c, forKey: .logPath)
+        try c.encode(logBytes, forKey: .logBytes)
+        try c.encode(logTruncated, forKey: .logTruncated)
+        try c.encode(modifiedTrackedFiles, forKey: .modifiedTrackedFiles)
+    }
+}
+
+public struct RelayRunIntegrationRecord: Sendable, Codable, Hashable, Equatable {
+    public var branch: String?
+    public var worktreePath: String?
+    public var baseCommitOID: String
+    public var headCommitOID: String?
+    public var status: RelayIntegrationStatus
+    public var reason: String?
+    public var ready: Bool
+    public var merges: [RelayRunMergeRecord]
+    public var verify: RelayRunVerifyRecord?
+
+    private enum CodingKeys: String, CodingKey {
+        case branch
+        case worktreePath
+        case baseCommitOID
+        case headCommitOID
+        case status
+        case reason
+        case ready
+        case merges
+        case verify
+    }
+
+    public init(
+        branch: String? = nil,
+        worktreePath: String? = nil,
+        baseCommitOID: String,
+        headCommitOID: String? = nil,
+        status: RelayIntegrationStatus = .pending,
+        reason: String? = nil,
+        ready: Bool = false,
+        merges: [RelayRunMergeRecord] = [],
+        verify: RelayRunVerifyRecord? = nil
+    ) {
+        self.branch = branch
+        self.worktreePath = worktreePath
+        self.baseCommitOID = baseCommitOID
+        self.headCommitOID = headCommitOID
+        self.status = status
+        self.reason = reason
+        self.ready = ready
+        self.merges = merges
+        self.verify = verify
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.branch = try c.decodeIfPresent(String.self, forKey: .branch)
+        self.worktreePath = try c.decodeIfPresent(String.self, forKey: .worktreePath)
+        self.baseCommitOID = try c.decode(String.self, forKey: .baseCommitOID)
+        self.headCommitOID = try c.decodeIfPresent(String.self, forKey: .headCommitOID)
+        self.status = try c.decode(RelayIntegrationStatus.self, forKey: .status)
+        self.reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        self.ready = try c.decode(Bool.self, forKey: .ready)
+        self.merges = try c.decodeIfPresent([RelayRunMergeRecord].self, forKey: .merges) ?? []
+        self.verify = try c.decodeIfPresent(RelayRunVerifyRecord.self, forKey: .verify)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try encodeNullable(branch, into: &c, forKey: .branch)
+        try encodeNullable(worktreePath, into: &c, forKey: .worktreePath)
+        try c.encode(baseCommitOID, forKey: .baseCommitOID)
+        try encodeNullable(headCommitOID, into: &c, forKey: .headCommitOID)
+        try c.encode(status, forKey: .status)
+        try encodeNullable(reason, into: &c, forKey: .reason)
+        try c.encode(ready, forKey: .ready)
+        try c.encode(merges, forKey: .merges)
+        try encodeNullable(verify, into: &c, forKey: .verify)
+    }
+}
+
 public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codable {
     public var id: String { runID }
     public let runID: String
@@ -369,6 +730,7 @@ public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codab
     public var reason: String?
     public let relayidePID: Int32
     public var lanes: [RelayRunLaneRecord]
+    public var integration: RelayRunIntegrationRecord?
 
     private enum CodingKeys: String, CodingKey {
         case runID
@@ -401,7 +763,8 @@ public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codab
         status: RelayRunStatus,
         reason: String? = nil,
         relayidePID: Int32,
-        lanes: [RelayRunLaneRecord] = []
+        lanes: [RelayRunLaneRecord] = [],
+        integration: RelayRunIntegrationRecord? = nil
     ) {
         self.runID = runID
         self.repoPath = repoPath
@@ -417,6 +780,7 @@ public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codab
         self.reason = reason
         self.relayidePID = relayidePID
         self.lanes = lanes
+        self.integration = integration
     }
 
     public func encode(to encoder: Encoder) throws {

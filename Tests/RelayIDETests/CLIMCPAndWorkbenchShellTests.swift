@@ -93,7 +93,7 @@ struct CLIMCPAndWorkbenchShellTests {
         let stats = try JSONDecoder().decode(RelayWorkspaceStats.self, from: Data(statusJSON.utf8))
         #expect(stats.activeLaneCount >= 4)
         #expect(stats.taskNodeCount >= 4)
-        #expect(stats.schemaVersion == 5)
+        #expect(stats.schemaVersion == 6)
 
         // 3. lanes --project <path>
         let lanesOut = try await cli.execute(arguments: ["lanes", "--project", bundlePath])
@@ -1826,7 +1826,7 @@ struct CLIMCPAndWorkbenchShellTests {
         )
         #expect(plainStatusRes.exitCode == 0)
         let m0Stats = try JSONDecoder().decode(RelayWorkspaceStats.self, from: Data(plainStatusRes.stdout.utf8))
-        #expect(m0Stats.schemaVersion == 5)
+        #expect(m0Stats.schemaVersion == 6)
     }
 
     // MARK: - 27. M1 `RelayIDE run` Pre-Run Helpers & Exhaustive Unit Tests (§2, §3, §4, §9, §12)

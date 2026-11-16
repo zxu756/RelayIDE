@@ -233,12 +233,62 @@ public enum RelaySchemaMigrationCatalog {
         expectedTables: ["relay_runs", "relay_run_lanes"]
     )
 
+    public static let v6RelayRunIntegrationAndMerges = RelaySchemaMigrationDescriptor(
+        version: 6,
+        codename: "v6_relay_run_integration_and_merges",
+        summary: "Adds relay_run_integration and relay_run_merges ledgers for M2 sequential git merge pipeline and verify outcomes.",
+        ddlStatements: [
+            """
+            CREATE TABLE IF NOT EXISTS relay_run_integration (
+                run_id TEXT PRIMARY KEY REFERENCES relay_runs(run_id) ON DELETE CASCADE,
+                branch TEXT,
+                worktree_path TEXT,
+                base_commit_oid TEXT NOT NULL,
+                head_commit_oid TEXT,
+                status TEXT NOT NULL,
+                reason TEXT,
+                ready INTEGER NOT NULL DEFAULT 0,
+                verify_command TEXT,
+                verify_timeout_sec INTEGER,
+                verify_status TEXT,
+                verify_exit_code INTEGER,
+                verify_signal INTEGER,
+                verify_pid INTEGER,
+                verify_started_at REAL,
+                verify_finished_at REAL,
+                verify_log_path TEXT,
+                verify_log_bytes INTEGER,
+                verify_log_truncated INTEGER,
+                verify_modified_tracked_files_json TEXT
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS relay_run_merges (
+                run_id TEXT NOT NULL REFERENCES relay_runs(run_id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                lane_id TEXT NOT NULL,
+                lane_commit_oid TEXT,
+                status TEXT NOT NULL,
+                merge_commit_oid TEXT,
+                conflicts_json TEXT NOT NULL,
+                conflict_lines_json TEXT NOT NULL,
+                started_at REAL,
+                finished_at REAL,
+                PRIMARY KEY (run_id, lane_id)
+            );
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_relay_run_merges_run ON relay_run_merges(run_id, ordinal);"
+        ],
+        expectedTables: ["relay_run_integration", "relay_run_merges"]
+    )
+
     public static let allMigrations: [RelaySchemaMigrationDescriptor] = [
         v1CoreWorkspaceAndDAG,
         v2SemanticMergeLedger,
         v3WiretapAndGuardrails,
         v4UndoJournalAndFTS5Index,
-        v5RelayRunsAndRunLanes
+        v5RelayRunsAndRunLanes,
+        v6RelayRunIntegrationAndMerges
     ]
 
     public static func descriptor(forVersion version: Int) -> RelaySchemaMigrationDescriptor? {
@@ -1380,7 +1430,9 @@ public extension RelayProjectDatabase {
             ("undo_redo_stack", "mutation_json"),
             ("relay_fts5_doc_meta", "body_text"),
             ("relay_runs", "plan_copy_path"),
-            ("relay_run_lanes", "prompt_path")
+            ("relay_run_lanes", "prompt_path"),
+            ("relay_run_integration", "status"),
+            ("relay_run_merges", "conflicts_json")
         ]
 
         let tableRows: [SQLiteTableTelemetryRow] = try withLockedHandle { db in

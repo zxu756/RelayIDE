@@ -2,12 +2,12 @@ import Foundation
 import RelayModels
 import SQLite3
 
-// MARK: - .relayproj SQLite3 WAL Persistence Engine (Schema v1..v5)
+// MARK: - .relayproj SQLite3 WAL Persistence Engine (Schema v1..v6)
 
 private let RELAY_SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 public final class RelayProjectDatabase: @unchecked Sendable {
-    public static let currentSchemaVersion = 5
+    public static let currentSchemaVersion = 6
     private let lock = NSLock()
     public let bundleDirectoryURL: URL
     public let sqliteFileURL: URL
@@ -183,6 +183,47 @@ public final class RelayProjectDatabase: @unchecked Sendable {
             );
             CREATE INDEX IF NOT EXISTS idx_relay_run_lanes_run ON relay_run_lanes(run_id, ordinal);
             INSERT INTO schema_migrations (version, applied_at) VALUES (5, strftime('%s','now'));
+            """)
+        }
+        if current < 6 {
+            try execRaw("""
+            CREATE TABLE IF NOT EXISTS relay_run_integration (
+                run_id TEXT PRIMARY KEY REFERENCES relay_runs(run_id) ON DELETE CASCADE,
+                branch TEXT,
+                worktree_path TEXT,
+                base_commit_oid TEXT NOT NULL,
+                head_commit_oid TEXT,
+                status TEXT NOT NULL,
+                reason TEXT,
+                ready INTEGER NOT NULL DEFAULT 0,
+                verify_command TEXT,
+                verify_timeout_sec INTEGER,
+                verify_status TEXT,
+                verify_exit_code INTEGER,
+                verify_signal INTEGER,
+                verify_pid INTEGER,
+                verify_started_at REAL,
+                verify_finished_at REAL,
+                verify_log_path TEXT,
+                verify_log_bytes INTEGER,
+                verify_log_truncated INTEGER,
+                verify_modified_tracked_files_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS relay_run_merges (
+                run_id TEXT NOT NULL REFERENCES relay_runs(run_id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                lane_id TEXT NOT NULL,
+                lane_commit_oid TEXT,
+                status TEXT NOT NULL,
+                merge_commit_oid TEXT,
+                conflicts_json TEXT NOT NULL,
+                conflict_lines_json TEXT NOT NULL,
+                started_at REAL,
+                finished_at REAL,
+                PRIMARY KEY (run_id, lane_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_relay_run_merges_run ON relay_run_merges(run_id, ordinal);
+            INSERT INTO schema_migrations (version, applied_at) VALUES (6, strftime('%s','now'));
             """)
         }
     }
@@ -390,6 +431,16 @@ public final class RelayProjectDatabase: @unchecked Sendable {
                     }
                 }
 
+                if let integration = run.integration {
+                    try upsertRunIntegrationUnlocked(
+                        db: db,
+                        runID: run.runID,
+                        integration: integration,
+                        configuredVerifyCommand: run.verifyCommand,
+                        configuredVerifyTimeoutSec: integration.verify?.timeoutSec
+                    )
+                }
+
                 try Self.execImmediateSQL(db, sql: "COMMIT;")
             } catch {
                 _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
@@ -457,6 +508,306 @@ public final class RelayProjectDatabase: @unchecked Sendable {
         }
     }
 
+    // MARK: - M2 Integration & Merge Ledger Persistence (Schema v6)
+
+    public func upsertRunIntegration(
+        runID: String,
+        _ integration: RelayRunIntegrationRecord,
+        configuredVerifyCommand: String? = nil,
+        configuredVerifyTimeoutSec: Int? = nil
+    ) throws {
+        try withLockedHandle { db in
+            try Self.execImmediateSQL(db, sql: "BEGIN IMMEDIATE TRANSACTION;")
+            do {
+                try upsertRunIntegrationUnlocked(
+                    db: db,
+                    runID: runID,
+                    integration: integration,
+                    configuredVerifyCommand: configuredVerifyCommand,
+                    configuredVerifyTimeoutSec: configuredVerifyTimeoutSec
+                )
+                try Self.execImmediateSQL(db, sql: "COMMIT;")
+            } catch {
+                _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+                throw error
+            }
+        }
+    }
+
+    public func updateRunMerge(runID: String, _ merge: RelayRunMergeRecord) throws {
+        let conflictsJSON = try encodeJSONString(merge.conflicts)
+        let conflictLinesJSON = try encodeJSONString(merge.conflictLines)
+        try runBound("""
+        INSERT INTO relay_run_merges (
+            run_id, ordinal, lane_id, lane_commit_oid, status, merge_commit_oid,
+            conflicts_json, conflict_lines_json, started_at, finished_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ON CONFLICT(run_id, lane_id) DO UPDATE SET
+            ordinal = excluded.ordinal,
+            lane_commit_oid = excluded.lane_commit_oid,
+            status = excluded.status,
+            merge_commit_oid = excluded.merge_commit_oid,
+            conflicts_json = excluded.conflicts_json,
+            conflict_lines_json = excluded.conflict_lines_json,
+            started_at = excluded.started_at,
+            finished_at = excluded.finished_at;
+        """) { stmt in
+            Self.bindText(stmt, 1, runID)
+            sqlite3_bind_int(stmt, 2, Int32(merge.ordinal))
+            Self.bindText(stmt, 3, merge.laneID)
+            Self.bindOptionalText(stmt, 4, merge.laneCommitOID)
+            Self.bindText(stmt, 5, merge.status.rawValue)
+            Self.bindOptionalText(stmt, 6, merge.mergeCommitOID)
+            Self.bindText(stmt, 7, conflictsJSON)
+            Self.bindText(stmt, 8, conflictLinesJSON)
+            Self.bindOptionalDate(stmt, 9, merge.startedAt)
+            Self.bindOptionalDate(stmt, 10, merge.finishedAt)
+        }
+    }
+
+    public func replaceRunMerges(runID: String, _ merges: [RelayRunMergeRecord]) throws {
+        try withLockedHandle { db in
+            try Self.execImmediateSQL(db, sql: "BEGIN IMMEDIATE TRANSACTION;")
+            do {
+                try replaceRunMergesUnlocked(db: db, runID: runID, merges: merges)
+                try Self.execImmediateSQL(db, sql: "COMMIT;")
+            } catch {
+                _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+                throw error
+            }
+        }
+    }
+
+    public func configuredIntegrationVerifySpec(runID: String) throws -> (command: String?, timeoutSec: Int?)? {
+        try withLockedHandle { db in
+            let sql = "SELECT verify_command, verify_timeout_sec FROM relay_run_integration WHERE run_id = ?1;"
+            var stmt: OpaquePointer?
+            let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+            guard rc == SQLITE_OK, let prepared = stmt else {
+                throw RelayIDEError.databaseError(code: rc, message: String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(prepared) }
+            Self.bindText(prepared, 1, runID)
+            guard sqlite3_step(prepared) == SQLITE_ROW else {
+                return nil
+            }
+            return (Self.columnText(prepared, 0), Self.columnOptionalInt(prepared, 1))
+        }
+    }
+
+    private func upsertRunIntegrationUnlocked(
+        db: OpaquePointer,
+        runID: String,
+        integration: RelayRunIntegrationRecord,
+        configuredVerifyCommand: String?,
+        configuredVerifyTimeoutSec: Int?
+    ) throws {
+        let verify = integration.verify
+        let modifiedTrackedJSON = try verify.map { try encodeJSONString($0.modifiedTrackedFiles) }
+        let effectiveVerifyCommand = verify?.command ?? configuredVerifyCommand
+        let effectiveVerifyTimeoutSec = verify?.timeoutSec ?? configuredVerifyTimeoutSec
+
+        try Self.runPreparedStatement(
+            db,
+            sql: """
+            INSERT INTO relay_run_integration (
+                run_id, branch, worktree_path, base_commit_oid, head_commit_oid,
+                status, reason, ready, verify_command, verify_timeout_sec,
+                verify_status, verify_exit_code, verify_signal, verify_pid,
+                verify_started_at, verify_finished_at, verify_log_path,
+                verify_log_bytes, verify_log_truncated, verify_modified_tracked_files_json
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17,
+                ?18, ?19, ?20
+            )
+            ON CONFLICT(run_id) DO UPDATE SET
+                branch = excluded.branch,
+                worktree_path = excluded.worktree_path,
+                base_commit_oid = excluded.base_commit_oid,
+                head_commit_oid = excluded.head_commit_oid,
+                status = excluded.status,
+                reason = excluded.reason,
+                ready = excluded.ready,
+                verify_command = COALESCE(excluded.verify_command, relay_run_integration.verify_command),
+                verify_timeout_sec = COALESCE(excluded.verify_timeout_sec, relay_run_integration.verify_timeout_sec),
+                verify_status = excluded.verify_status,
+                verify_exit_code = excluded.verify_exit_code,
+                verify_signal = excluded.verify_signal,
+                verify_pid = excluded.verify_pid,
+                verify_started_at = excluded.verify_started_at,
+                verify_finished_at = excluded.verify_finished_at,
+                verify_log_path = excluded.verify_log_path,
+                verify_log_bytes = excluded.verify_log_bytes,
+                verify_log_truncated = excluded.verify_log_truncated,
+                verify_modified_tracked_files_json = excluded.verify_modified_tracked_files_json;
+            """
+        ) { stmt in
+            Self.bindText(stmt, 1, runID)
+            Self.bindOptionalText(stmt, 2, integration.branch)
+            Self.bindOptionalText(stmt, 3, integration.worktreePath)
+            Self.bindText(stmt, 4, integration.baseCommitOID)
+            Self.bindOptionalText(stmt, 5, integration.headCommitOID)
+            Self.bindText(stmt, 6, integration.status.rawValue)
+            Self.bindOptionalText(stmt, 7, integration.reason)
+            sqlite3_bind_int(stmt, 8, integration.ready ? 1 : 0)
+            Self.bindOptionalText(stmt, 9, effectiveVerifyCommand)
+            Self.bindOptionalInt(stmt, 10, effectiveVerifyTimeoutSec)
+            Self.bindOptionalText(stmt, 11, verify?.status.rawValue)
+            Self.bindOptionalInt32(stmt, 12, verify?.exitCode)
+            Self.bindOptionalInt32(stmt, 13, verify?.signal)
+            Self.bindOptionalInt32(stmt, 14, verify?.pid)
+            Self.bindOptionalDate(stmt, 15, verify?.startedAt)
+            Self.bindOptionalDate(stmt, 16, verify?.finishedAt)
+            Self.bindOptionalText(stmt, 17, verify?.logPath)
+            Self.bindOptionalInt(stmt, 18, verify?.logBytes)
+            Self.bindOptionalInt32(stmt, 19, verify.map { $0.logTruncated ? 1 : 0 })
+            Self.bindOptionalText(stmt, 20, modifiedTrackedJSON)
+        }
+
+        try replaceRunMergesUnlocked(db: db, runID: runID, merges: integration.merges)
+    }
+
+    private func replaceRunMergesUnlocked(
+        db: OpaquePointer,
+        runID: String,
+        merges: [RelayRunMergeRecord]
+    ) throws {
+        try Self.runPreparedStatement(db, sql: "DELETE FROM relay_run_merges WHERE run_id = ?1;") { stmt in
+            Self.bindText(stmt, 1, runID)
+        }
+        for merge in merges {
+            let conflictsJSON = try encodeJSONString(merge.conflicts)
+            let conflictLinesJSON = try encodeJSONString(merge.conflictLines)
+            try Self.runPreparedStatement(
+                db,
+                sql: """
+                INSERT INTO relay_run_merges (
+                    run_id, ordinal, lane_id, lane_commit_oid, status, merge_commit_oid,
+                    conflicts_json, conflict_lines_json, started_at, finished_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);
+                """
+            ) { stmt in
+                Self.bindText(stmt, 1, runID)
+                sqlite3_bind_int(stmt, 2, Int32(merge.ordinal))
+                Self.bindText(stmt, 3, merge.laneID)
+                Self.bindOptionalText(stmt, 4, merge.laneCommitOID)
+                Self.bindText(stmt, 5, merge.status.rawValue)
+                Self.bindOptionalText(stmt, 6, merge.mergeCommitOID)
+                Self.bindText(stmt, 7, conflictsJSON)
+                Self.bindText(stmt, 8, conflictLinesJSON)
+                Self.bindOptionalDate(stmt, 9, merge.startedAt)
+                Self.bindOptionalDate(stmt, 10, merge.finishedAt)
+            }
+        }
+    }
+
+    private func fetchIntegrationUnlocked(db: OpaquePointer, runID: String) throws -> RelayRunIntegrationRecord? {
+        let sql = """
+        SELECT branch, worktree_path, base_commit_oid, head_commit_oid,
+               status, reason, ready, verify_command, verify_timeout_sec,
+               verify_status, verify_exit_code, verify_signal, verify_pid,
+               verify_started_at, verify_finished_at, verify_log_path,
+               verify_log_bytes, verify_log_truncated, verify_modified_tracked_files_json
+        FROM relay_run_integration
+        WHERE run_id = ?1;
+        """
+        var stmt: OpaquePointer?
+        let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard rc == SQLITE_OK, let prepared = stmt else {
+            throw RelayIDEError.databaseError(code: rc, message: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(prepared) }
+        Self.bindText(prepared, 1, runID)
+        guard sqlite3_step(prepared) == SQLITE_ROW else {
+            return nil
+        }
+
+        let status = RelayIntegrationStatus(rawValue: Self.columnText(prepared, 4) ?? "") ?? .interrupted
+        let ready = sqlite3_column_int(prepared, 6) != 0
+        let verify: RelayRunVerifyRecord?
+        if let rawVerifyStatus = Self.columnText(prepared, 9) {
+            let vStatus = RelayVerifyStatus(rawValue: rawVerifyStatus) ?? .interrupted
+            let modifiedFiles: [String]
+            if let rawModified = Self.columnText(prepared, 18) {
+                modifiedFiles = (try? decoder.decode([String].self, from: Data(rawModified.utf8))) ?? []
+            } else {
+                modifiedFiles = []
+            }
+            verify = RelayRunVerifyRecord(
+                command: Self.columnText(prepared, 7) ?? "",
+                timeoutSec: Self.columnOptionalInt(prepared, 8) ?? 1800,
+                status: vStatus,
+                exitCode: Self.columnOptionalInt32(prepared, 10),
+                signal: Self.columnOptionalInt32(prepared, 11),
+                pid: Self.columnOptionalInt32(prepared, 12),
+                startedAt: Self.columnOptionalDate(prepared, 13),
+                finishedAt: Self.columnOptionalDate(prepared, 14),
+                logPath: Self.columnText(prepared, 15),
+                logBytes: Self.columnOptionalInt(prepared, 16) ?? 0,
+                logTruncated: (Self.columnOptionalInt32(prepared, 17) ?? 0) != 0,
+                modifiedTrackedFiles: modifiedFiles
+            )
+        } else {
+            verify = nil
+        }
+
+        let merges = try fetchMergesUnlocked(db: db, runID: runID)
+        return RelayRunIntegrationRecord(
+            branch: Self.columnText(prepared, 0),
+            worktreePath: Self.columnText(prepared, 1),
+            baseCommitOID: Self.columnText(prepared, 2) ?? "",
+            headCommitOID: Self.columnText(prepared, 3),
+            status: status,
+            reason: Self.columnText(prepared, 5),
+            ready: ready,
+            merges: merges,
+            verify: verify
+        )
+    }
+
+    private func fetchMergesUnlocked(db: OpaquePointer, runID: String) throws -> [RelayRunMergeRecord] {
+        let sql = """
+        SELECT ordinal, lane_id, lane_commit_oid, status, merge_commit_oid,
+               conflicts_json, conflict_lines_json, started_at, finished_at
+        FROM relay_run_merges
+        WHERE run_id = ?1
+        ORDER BY ordinal ASC, lane_id ASC;
+        """
+        var stmt: OpaquePointer?
+        let rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard rc == SQLITE_OK, let prepared = stmt else {
+            throw RelayIDEError.databaseError(code: rc, message: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(prepared) }
+        Self.bindText(prepared, 1, runID)
+
+        var list: [RelayRunMergeRecord] = []
+        while sqlite3_step(prepared) == SQLITE_ROW {
+            let rawConflicts = Self.columnText(prepared, 5) ?? "[]"
+            let conflicts = (try? decoder.decode([RelayMergeConflictItem].self, from: Data(rawConflicts.utf8))) ?? []
+            let rawConflictLines = Self.columnText(prepared, 6) ?? "[]"
+            let conflictLines = (try? decoder.decode([String].self, from: Data(rawConflictLines.utf8))) ?? []
+            let status = RelayMergeStepStatus(rawValue: Self.columnText(prepared, 3) ?? "") ?? .notAttempted
+            list.append(
+                RelayRunMergeRecord(
+                    ordinal: Int(sqlite3_column_int(prepared, 0)),
+                    laneID: Self.columnText(prepared, 1) ?? "",
+                    laneCommitOID: Self.columnText(prepared, 2),
+                    status: status,
+                    mergeCommitOID: Self.columnText(prepared, 4),
+                    conflicts: conflicts,
+                    conflictLines: conflictLines,
+                    startedAt: Self.columnOptionalDate(prepared, 7),
+                    finishedAt: Self.columnOptionalDate(prepared, 8)
+                )
+            )
+        }
+        return list
+    }
+
     public func fetchRun(runID: String, reconcileWithLock: Bool = true) throws -> RelayRunRecord? {
         let rawRecord: RelayRunRecord? = try withLockedHandle { db in
             let sql = """
@@ -478,6 +829,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
             }
             var run = Self.decodeRunRow(prepared)
             run.lanes = try fetchLanesUnlocked(db: db, runID: run.runID)
+            run.integration = try fetchIntegrationUnlocked(db: db, runID: run.runID)
             return run
         }
 
@@ -508,6 +860,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
             }
             for idx in list.indices {
                 list[idx].lanes = try fetchLanesUnlocked(db: db, runID: list[idx].runID)
+                list[idx].integration = try fetchIntegrationUnlocked(db: db, runID: list[idx].runID)
             }
             return list
         }

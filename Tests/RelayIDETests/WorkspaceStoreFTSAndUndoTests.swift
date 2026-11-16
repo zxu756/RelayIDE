@@ -19,21 +19,22 @@ struct WorkspaceStoreFTSAndUndoTests {
 
     // MARK: - 1. Schema Migration Catalog `v1 -> v4` & Idempotent Reopen
 
-    @Test("RelayProjectDatabase applies v1->v5 WAL migrations cleanly and reopens idempotently")
+    @Test("RelayProjectDatabase applies v1->v6 WAL migrations cleanly and reopens idempotently")
     func sqliteSchemaMigrationsV1ThroughV4AndIdempotentReopen() throws {
         let (rootDir, bundleDir) = try makeTempBundleURL(label: "migrations")
         defer { try? FileManager.default.removeItem(at: rootDir) }
 
-        #expect(RelayProjectDatabase.currentSchemaVersion == 5)
-        #expect(RelaySchemaMigrationCatalog.allMigrations.map(\.version) == [1, 2, 3, 4, 5])
+        #expect(RelayProjectDatabase.currentSchemaVersion == 6)
+        #expect(RelaySchemaMigrationCatalog.allMigrations.map(\.version) == [1, 2, 3, 4, 5, 6])
         #expect(RelaySchemaMigrationCatalog.descriptor(forVersion: 5) != nil)
+        #expect(RelaySchemaMigrationCatalog.descriptor(forVersion: 6) != nil)
 
         do {
             let db = try RelayProjectDatabase(bundleDirectoryURL: bundleDir)
             try db.makeFTS5SearchStore().ensureExtensionTables()
             _ = try db.performWALCheckpoint(mode: .passive)
             let applied = try db.appliedSchemaMigrations()
-            #expect(applied.map(\.version) == [1, 2, 3, 4, 5])
+            #expect(applied.map(\.version) == [1, 2, 3, 4, 5, 6])
             #expect(applied.allSatisfy { $0.allExpectedTablesPresent })
             try db.setMeta(key: "workspace_name", value: "PersistenceCheck")
         }
@@ -41,7 +42,7 @@ struct WorkspaceStoreFTSAndUndoTests {
         // Reopen existing bundle -> migrations must be idempotent and metadata preserved
         let reopened = try RelayProjectDatabase(bundleDirectoryURL: bundleDir)
         #expect(reopened.getMeta(key: "workspace_name") == "PersistenceCheck")
-        #expect(try reopened.appliedSchemaMigrations().count == 5)
+        #expect(try reopened.appliedSchemaMigrations().count == 6)
     }
 
     // MARK: - 2. `PRAGMA integrity_check`, WAL Checkpoint, Telemetry & Online Backup
@@ -66,7 +67,7 @@ struct WorkspaceStoreFTSAndUndoTests {
         #expect(walReport.elapsedMs >= 0)
 
         let telemetry = try db.collectStorageTelemetry()
-        #expect(telemetry.schemaVersion == 5)
+        #expect(telemetry.schemaVersion == 6)
         #expect(telemetry.sqliteFileBytes > 0)
         #expect(!telemetry.tables.isEmpty)
 
@@ -216,7 +217,7 @@ struct WorkspaceStoreFTSAndUndoTests {
         // 6. Aggregate Stats
         let stats = try db.computeStats()
         #expect(stats.workspaceName == "FlagshipCRUD")
-        #expect(stats.schemaVersion == 5)
+        #expect(stats.schemaVersion == 6)
         #expect(stats.activeLaneCount == 2)
         #expect(stats.taskNodeCount == 2)
         #expect(stats.semanticAutoMergeCount == 1)
@@ -887,7 +888,7 @@ struct WorkspaceStoreFTSAndUndoTests {
 
         try db.makeFTS5SearchStore().ensureExtensionTables()
         let applied = try db.appliedSchemaMigrations()
-        #expect(applied.map(\.version) == [1, 2, 3, 4, 5])
+        #expect(applied.map(\.version) == [1, 2, 3, 4, 5, 6])
         #expect(applied.allSatisfy { $0.allExpectedTablesPresent })
         #expect(db.getMeta(key: "workspace_name") == "UpgradedFromV4")
         let preservedLanes = try db.allLanes()
@@ -1126,5 +1127,273 @@ struct WorkspaceStoreFTSAndUndoTests {
         #expect(persistedRaw.lanes.first { $0.laneID == "active" }?.status == .interrupted)
         #expect(persistedRaw.lanes.first { $0.laneID == "queued" }?.status == .skipped)
         #expect(persistedRaw.lanes.allSatisfy { $0.status.isTerminal })
+    }
+
+    // MARK: - 21. Schema v5 -> v6 Upgrade Preserves M1 Run (`integration == nil`) & Persists `relay_run_integration` + `relay_run_merges` (R65)
+
+    @Test("Upgrading a freshly constructed v5 SQLite bundle to v6 keeps M1 run integration nil and persists M2 integration, merges, and verify rows")
+    func sqliteSchemaV5ToV6UpgradePreservesM1RunWithNilIntegrationAndPersistsM2Tables() throws {
+        let (rootDir, bundleDir) = try makeTempBundleURL(label: "v5-to-v6")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        try FileManager.default.createDirectory(at: bundleDir, withIntermediateDirectories: true)
+        let sqlitePath = bundleDir.appendingPathComponent("workspace.sqlite").path
+        let m1RunID = "20261116-050000-0005"
+
+        // Construct a genuine v5 database on disk with an M1-era run and two lanes (no v6 tables).
+        do {
+            var rawDB: OpaquePointer?
+            #expect(sqlite3_open_v2(sqlitePath, &rawDB, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+            defer { if let rawDB { sqlite3_close(rawDB) } }
+
+            let v5BootstrapSQL = """
+            PRAGMA journal_mode = WAL;
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
+            CREATE TABLE workspace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE managed_lanes (lane_id TEXT PRIMARY KEY, vendor TEXT NOT NULL, payload_json TEXT NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE dag_specs (dag_id TEXT PRIMARY KEY, name TEXT NOT NULL, payload_json TEXT NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE semantic_merge_reports (relative_path TEXT PRIMARY KEY, auto_merged_count INTEGER NOT NULL, conflict_count INTEGER NOT NULL, payload_json TEXT NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE wiretap_spans (span_id TEXT PRIMARY KEY, lane_id TEXT NOT NULL, vendor TEXT NOT NULL, total_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL, payload_json TEXT NOT NULL, recorded_at REAL NOT NULL);
+            CREATE TABLE guardrail_findings (finding_id TEXT PRIMARY KEY, plugin_id TEXT NOT NULL, severity TEXT NOT NULL, payload_json TEXT NOT NULL, created_at REAL NOT NULL);
+            CREATE TABLE undo_redo_stack (seq INTEGER PRIMARY KEY AUTOINCREMENT, stack_kind TEXT NOT NULL, title TEXT NOT NULL, mutation_json TEXT NOT NULL, created_at REAL NOT NULL);
+            CREATE TABLE relay_runs (
+                run_id TEXT PRIMARY KEY,
+                repo_path TEXT NOT NULL,
+                plan_copy_path TEXT NOT NULL,
+                base_ref TEXT NOT NULL,
+                base_commit_oid TEXT NOT NULL,
+                verify_command TEXT,
+                relay_sh_path TEXT NOT NULL,
+                relay_sh_sha256 TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                finished_at REAL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                relayide_pid INTEGER NOT NULL
+            );
+            CREATE TABLE relay_run_lanes (
+                run_id TEXT NOT NULL REFERENCES relay_runs(run_id) ON DELETE CASCADE,
+                lane_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                agent TEXT NOT NULL,
+                prompt_path TEXT NOT NULL,
+                after_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                signal INTEGER,
+                reason TEXT,
+                started_at REAL,
+                finished_at REAL,
+                pid INTEGER,
+                cost_usd REAL,
+                tokens INTEGER,
+                cost_source TEXT,
+                branch TEXT,
+                commit_oid TEXT,
+                worktree_path TEXT,
+                uncommitted_files_json TEXT,
+                PRIMARY KEY (run_id, lane_id)
+            );
+            CREATE INDEX idx_relay_run_lanes_run ON relay_run_lanes(run_id, ordinal);
+            INSERT INTO schema_migrations (version, applied_at) VALUES
+                (1, 1700000001), (2, 1700000002), (3, 1700000003), (4, 1700000004), (5, 1700000005);
+            INSERT INTO workspace_meta (key, value) VALUES ('workspace_name', 'UpgradedFromV5');
+            INSERT INTO relay_runs (
+                run_id, repo_path, plan_copy_path, base_ref, base_commit_oid,
+                verify_command, relay_sh_path, relay_sh_sha256,
+                started_at, finished_at, status, reason, relayide_pid
+            ) VALUES (
+                '\(m1RunID)', '/tmp/v5-repo', '/tmp/v5-plan.json', 'main',
+                '1111111111111111111111111111111111111111',
+                'swift test', '/tmp/fake-relay.sh',
+                '2222222222222222222222222222222222222222222222222222222222222222',
+                1763220000, 1763220030, 'succeeded', NULL, 7777
+            );
+            INSERT INTO relay_run_lanes (
+                run_id, lane_id, ordinal, agent, prompt_path, after_json,
+                status, exit_code, signal, reason, started_at, finished_at,
+                pid, cost_usd, tokens, cost_source, branch, commit_oid,
+                worktree_path, uncommitted_files_json
+            ) VALUES (
+                '\(m1RunID)', 'api', 0, 'claude', '/tmp/prompts/api.md', '[]',
+                'succeeded', 0, NULL, NULL, 1763220001, 1763220029,
+                7778, 0.025, NULL, 'usd', 'relay/\(m1RunID)/api',
+                '3333333333333333333333333333333333333333',
+                '/tmp/worktrees/api', NULL
+            );
+            """
+            #expect(sqlite3_exec(rawDB, v5BootstrapSQL, nil, nil, nil) == SQLITE_OK)
+        }
+
+        // Open via RelayProjectDatabase -> must migrate v5 -> v6 cleanly in both migration catalog & SQLite store.
+        #expect(RelayProjectDatabase.currentSchemaVersion == 6)
+        #expect(RelaySchemaMigrationCatalog.descriptor(forVersion: 6)?.expectedTables == ["relay_run_integration", "relay_run_merges"])
+
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: bundleDir)
+        try db.makeFTS5SearchStore().ensureExtensionTables()
+        let applied = try db.appliedSchemaMigrations()
+        #expect(applied.map(\.version) == [1, 2, 3, 4, 5, 6])
+        #expect(applied.allSatisfy { $0.allExpectedTablesPresent })
+        #expect(db.getMeta(key: "workspace_name") == "UpgradedFromV5")
+
+        // M1-era run must load cleanly with `integration == nil`!
+        let m1Loaded = try #require(try db.fetchRun(runID: m1RunID))
+        #expect(m1Loaded.status == .succeeded)
+        #expect(m1Loaded.lanes.count == 1)
+        #expect(m1Loaded.lanes[0].laneID == "api")
+        #expect(m1Loaded.integration == nil)
+
+        // Create an M2 run with initial `pending` integration (verify not yet started -> verify is nil, but configured spec stored)
+        let m2RunID = "20261117-010000-0006"
+        let tStart = Date(timeIntervalSince1970: 1_763_300_000)
+        let tMergeDone = Date(timeIntervalSince1970: 1_763_300_010)
+        let tVerifyDone = Date(timeIntervalSince1970: 1_763_300_025)
+        let baseOID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let apiOID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let mergeOID = "cccccccccccccccccccccccccccccccccccccccc"
+
+        let pendingIntegration = RelayRunIntegrationRecord(
+            branch: nil,
+            worktreePath: nil,
+            baseCommitOID: baseOID,
+            headCommitOID: nil,
+            status: .pending,
+            reason: nil,
+            ready: false,
+            merges: [],
+            verify: nil
+        )
+        let m2Initial = RelayRunRecord(
+            runID: m2RunID,
+            repoPath: "/tmp/v6-repo",
+            planCopyPath: bundleDir.appendingPathComponent("runs/\(m2RunID)/plan.json").path,
+            baseRef: "main",
+            baseCommitOID: baseOID,
+            verifyCommand: "swift test",
+            relayShPath: "/tmp/fake-relay.sh",
+            relayShSHA256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            startedAt: tStart,
+            finishedAt: nil,
+            status: .running,
+            reason: nil,
+            relayidePID: 8888,
+            lanes: [
+                RelayRunLaneRecord(
+                    runID: m2RunID,
+                    laneID: "api",
+                    ordinal: 0,
+                    agent: .claude,
+                    promptPath: "/tmp/p/api.md",
+                    after: [],
+                    status: .succeeded,
+                    exitCode: 0,
+                    commitOID: apiOID
+                ),
+                RelayRunLaneRecord(
+                    runID: m2RunID,
+                    laneID: "docs",
+                    ordinal: 1,
+                    agent: .agy,
+                    promptPath: "/tmp/p/docs.md",
+                    after: [],
+                    status: .succeededNoChanges,
+                    exitCode: 0,
+                    commitOID: nil
+                ),
+            ],
+            integration: pendingIntegration
+        )
+        try db.createRun(m2Initial)
+        try db.upsertRunIntegration(
+            runID: m2RunID,
+            pendingIntegration,
+            configuredVerifyCommand: "swift test",
+            configuredVerifyTimeoutSec: 900
+        )
+
+        let afterPending = try #require(try db.fetchRun(runID: m2RunID, reconcileWithLock: false))
+        #expect(afterPending.integration?.status == .pending)
+        #expect(afterPending.integration?.verify == nil)
+        let verifySpec = try #require(try db.configuredIntegrationVerifySpec(runID: m2RunID))
+        #expect(verifySpec.command == "swift test")
+        #expect(verifySpec.timeoutSec == 900)
+
+        // Update integration with merges (merged + no-changes + conflict example) and verify outcome
+        let verifiedIntegration = RelayRunIntegrationRecord(
+            branch: "relay/\(m2RunID)/integration",
+            worktreePath: bundleDir.appendingPathComponent("runs/\(m2RunID)/worktrees/integration").path,
+            baseCommitOID: baseOID,
+            headCommitOID: mergeOID,
+            status: .verified,
+            reason: nil,
+            ready: true,
+            merges: [
+                RelayRunMergeRecord(
+                    ordinal: 0,
+                    laneID: "api",
+                    laneCommitOID: apiOID,
+                    status: .merged,
+                    mergeCommitOID: mergeOID,
+                    conflicts: [],
+                    conflictLines: [],
+                    startedAt: tStart,
+                    finishedAt: tMergeDone
+                ),
+                RelayRunMergeRecord(
+                    ordinal: 1,
+                    laneID: "docs",
+                    laneCommitOID: nil,
+                    status: .noChanges,
+                    mergeCommitOID: nil,
+                    conflicts: [],
+                    conflictLines: [],
+                    startedAt: tMergeDone,
+                    finishedAt: tMergeDone
+                ),
+            ],
+            verify: RelayRunVerifyRecord(
+                command: "swift test",
+                timeoutSec: 900,
+                status: .passed,
+                exitCode: 0,
+                signal: nil,
+                pid: 8899,
+                startedAt: tMergeDone,
+                finishedAt: tVerifyDone,
+                logPath: bundleDir.appendingPathComponent("runs/\(m2RunID)/verify.pty").path,
+                logBytes: 4096,
+                logTruncated: false,
+                modifiedTrackedFiles: []
+            )
+        )
+        try db.upsertRunIntegration(runID: m2RunID, verifiedIntegration)
+        try db.updateRunStatus(runID: m2RunID, status: .succeeded, reason: nil, finishedAt: tVerifyDone)
+
+        let m2Loaded = try #require(try db.fetchRun(runID: m2RunID, reconcileWithLock: false))
+        #expect(m2Loaded.integration == verifiedIntegration)
+
+        // Also verify conflict item + conflictLines round-trip through updateRunMerge
+        let conflictStep = RelayRunMergeRecord(
+            ordinal: 1,
+            laneID: "docs",
+            laneCommitOID: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            status: .conflict,
+            mergeCommitOID: nil,
+            conflicts: [RelayMergeConflictItem(path: "f.txt", code: "UU")],
+            conflictLines: ["CONFLICT (content): Merge conflict in f.txt"],
+            startedAt: tMergeDone,
+            finishedAt: tVerifyDone
+        )
+        try db.updateRunMerge(runID: m2RunID, conflictStep)
+        let afterMergeUpdate = try #require(try db.fetchRun(runID: m2RunID, reconcileWithLock: false))
+        #expect(afterMergeUpdate.integration?.merges[1] == conflictStep)
+
+        // Verify allRuns returns M1 run (integration == nil) followed by M2 run (integration != nil)
+        let all = try db.allRuns(reconcileWithLock: false)
+        #expect(all.map(\.runID) == [m1RunID, m2RunID])
+        #expect(all[0].integration == nil)
+        #expect(all[1].integration != nil)
+        #expect(try db.runDetailedIntegrityAudit().isHealthy == true)
     }
 }
