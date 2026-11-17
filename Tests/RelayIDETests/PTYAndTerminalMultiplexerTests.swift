@@ -2542,4 +2542,221 @@ struct PTYAndTerminalMultiplexerTests {
         #expect(noIdentRes.exitCode != 0)
         #expect(FileManager.default.fileExists(atPath: decoyMarker.path) == false)
     }
+
+    // MARK: - M2 Stage 05: Stub Verify Test Double (`Tests/Support/stub-verify.sh`)
+
+    private static var stubVerifyPath: String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Support/stub-verify.sh")
+            .path
+    }
+
+    @Test("stub-verify.sh supports byte emission, exit codes, self-signals, barriers, markers, git/env/tty probes, git log -1, tracked edits, cat stdin, and tagged stubborn setpgrp children (M2 §12)")
+    func stubVerifySupportsAllM2CapabilitiesAndTagsLongRunningChildren() async throws {
+        let tmpDir = try Self.makeMktempDirectory(prefix: "relay-m2-stub-verify")
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let tempToken = tmpDir.lastPathComponent
+
+        #expect(FileManager.default.isExecutableFile(atPath: Self.stubVerifyPath) == true, "Missing executable stub-verify.sh")
+        guard FileManager.default.isExecutableFile(atPath: Self.stubVerifyPath) else { return }
+
+        let (baseEnv, decoyMarker) = try Self.makeIsolatedDecoyEnvironment(
+            in: tmpDir,
+            extraEnv: [
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "PAGER": "cat",
+                "GIT_PAGER": "cat"
+            ]
+        )
+
+        // 1. Direct Process check: exact stdout & stderr byte counts and custom exit code
+        let byteOutURL = tmpDir.appendingPathComponent("bytes.stdout")
+        let byteErrURL = tmpDir.appendingPathComponent("bytes.stderr")
+        FileManager.default.createFile(atPath: byteOutURL.path, contents: nil)
+        FileManager.default.createFile(atPath: byteErrURL.path, contents: nil)
+        do {
+            let outFH = try FileHandle(forWritingTo: byteOutURL)
+            let errFH = try FileHandle(forWritingTo: byteErrURL)
+            defer {
+                try? outFH.close()
+                try? errFH.close()
+            }
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: Self.stubVerifyPath)
+            proc.arguments = ["--stdout-bytes", "4096", "--stderr-bytes", "2048", "--exit", "7"]
+            proc.currentDirectoryURL = tmpDir
+            proc.environment = baseEnv
+            proc.standardInput = FileHandle.nullDevice
+            proc.standardOutput = outFH
+            proc.standardError = errFH
+            try proc.run()
+            proc.waitUntilExit()
+            #expect(proc.terminationReason == .exit)
+            #expect(proc.terminationStatus == 7)
+        }
+        let outBytes = try Data(contentsOf: byteOutURL)
+        let errBytes = try Data(contentsOf: byteErrURL)
+        #expect(outBytes.count == 4096 && outBytes.allSatisfy { $0 == UInt8(ascii: "x") })
+        #expect(errBytes.count == 2048 && errBytes.allSatisfy { $0 == UInt8(ascii: "e") })
+
+        // 2. PTY verify invocation (`exec </dev/null; exec /bin/sh -c "$1"`):
+        //    marker, probe file (pwd -P, git rev-parse HEAD, git status --porcelain, $PATH, test -t 0),
+        //    git log -1 to terminal, cat stdin immediate EOF, and modify tracked file.
+        let repoDir = tmpDir.appendingPathComponent("int-wt", isDirectory: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        #expect(try Self.runGitForTest(["init", "-q", "-b", "main"], cwd: repoDir, env: baseEnv).exitCode == 0)
+        #expect(try Self.runGitForTest(["config", "user.name", "Verify Test Bot"], cwd: repoDir, env: baseEnv).exitCode == 0)
+        #expect(try Self.runGitForTest(["config", "user.email", "verify-bot@relayide.invalid"], cwd: repoDir, env: baseEnv).exitCode == 0)
+        try FileManager.default.createDirectory(at: repoDir.appendingPathComponent("src"), withIntermediateDirectories: true)
+        try "line1\n".write(to: repoDir.appendingPathComponent("src/a.txt"), atomically: true, encoding: .utf8)
+        #expect(try Self.runGitForTest(["add", "src/a.txt"], cwd: repoDir, env: baseEnv).exitCode == 0)
+        #expect(try Self.runGitForTest(["commit", "--no-gpg-sign", "-q", "-m", "UniqueVerifyCommitSubject"], cwd: repoDir, env: baseEnv).exitCode == 0)
+        let expectedHead = try Self.runGitForTest(["rev-parse", "HEAD"], cwd: repoDir, env: baseEnv).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let markerURL = tmpDir.appendingPathComponent("verify.marker")
+        let probeURL = tmpDir.appendingPathComponent("probe.json")
+        let catOutURL = tmpDir.appendingPathComponent("cat-stdin.out")
+        let verifyTranscriptURL = tmpDir.appendingPathComponent("verify-probe.pty")
+        let verifyCmd = "'\(Self.stubVerifyPath)' --write-marker '\(markerURL.path)' --probe-file '\(probeURL.path)' --git-log-1 --cat-stdin-to '\(catOutURL.path)' --modify-tracked src/a.txt --exit 0"
+
+        let probePty = POSIXPseudoTerminalSession(laneID: "verify-probe", updatesScreenBuffer: false)
+        defer { probePty.terminate(signal: SIGKILL) }
+        try probePty.spawn(
+            executablePath: "/bin/sh",
+            arguments: ["-c", "exec </dev/null; exec /bin/sh -c \"$1\"", "relayide-verify", verifyCmd],
+            workingDirectory: repoDir.path,
+            environmentOverrides: baseEnv,
+            rawOutputFilePath: verifyTranscriptURL.path,
+            preserveEnvironmentVerbatim: true
+        )
+        #expect(probePty.waitForExit(timeout: 10.0) == true)
+        #expect(probePty.metrics().exitReason == .exited(code: 0))
+        #expect(FileManager.default.fileExists(atPath: markerURL.path) == true)
+
+        let probeJSON = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: probeURL)) as? [String: Any])
+        var realRepoBuf = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let realRepoPath = repoDir.path.withCString { cstr -> String in
+            guard Darwin.realpath(cstr, &realRepoBuf) != nil else { return repoDir.path }
+            let nulIndex = realRepoBuf.firstIndex(of: 0) ?? realRepoBuf.endIndex
+            return String(decoding: realRepoBuf[..<nulIndex].map(UInt8.init(bitPattern:)), as: UTF8.self)
+        }
+        #expect((probeJSON["pwdP"] as? String) == realRepoPath)
+        #expect((probeJSON["gitHead"] as? String) == expectedHead)
+        #expect((probeJSON["gitStatusPorcelain"] as? String) == "")
+        #expect((probeJSON["path"] as? String) == baseEnv["PATH"])
+        #expect((probeJSON["stdinIsTTY"] as? Bool) == false)
+        #expect((probeJSON["testT0ExitCode"] as? Int) == 1)
+
+        let ptyText = String(decoding: try Data(contentsOf: verifyTranscriptURL), as: UTF8.self)
+        #expect(ptyText.contains("UniqueVerifyCommitSubject"))
+        #expect((try Data(contentsOf: catOutURL)).isEmpty)
+
+        let postDirtyStatus = try Self.runGitForTest(["status", "--porcelain=v1", "--untracked-files=no"], cwd: repoDir, env: baseEnv).stdout
+        #expect(postDirtyStatus.contains("src/a.txt"))
+
+        // 3. Self-signal termination (`--kill-self 9` and `--kill-self TERM`)
+        for (sigToken, expectedSig) in [("9", SIGKILL), ("TERM", SIGTERM)] {
+            let sigPty = POSIXPseudoTerminalSession(laneID: "verify-sig-\(sigToken)", updatesScreenBuffer: false)
+            defer { sigPty.terminate(signal: SIGKILL) }
+            try sigPty.spawn(
+                executablePath: Self.stubVerifyPath,
+                arguments: ["--kill-self", sigToken],
+                workingDirectory: tmpDir.path,
+                environmentOverrides: baseEnv,
+                preserveEnvironmentVerbatim: true
+            )
+            #expect(sigPty.waitForExit(timeout: 5.0) == true)
+            let m = sigPty.metrics()
+            #expect(m.exitStatus == nil)
+            #expect(m.terminationSignal == expectedSig)
+        }
+
+        // 4. Barrier wait (`--wait-barrier`) tags child argv with tempToken and unblocks cleanly
+        let barrierReadyURL = tmpDir.appendingPathComponent("barrier-ready.marker")
+        let barrierGateURL = tmpDir.appendingPathComponent("barrier.gate")
+        let barrierDoneURL = tmpDir.appendingPathComponent("barrier-done.marker")
+        let barrierPty = POSIXPseudoTerminalSession(laneID: "verify-barrier", updatesScreenBuffer: false)
+        defer { barrierPty.terminate(signal: SIGKILL) }
+        try barrierPty.spawn(
+            executablePath: Self.stubVerifyPath,
+            arguments: [
+                "--tag", tempToken,
+                "--write-marker", barrierReadyURL.path,
+                "--wait-barrier", barrierGateURL.path,
+                "--write-marker", barrierDoneURL.path,
+                "--exit", "0"
+            ],
+            workingDirectory: tmpDir.path,
+            environmentOverrides: baseEnv,
+            preserveEnvironmentVerbatim: true
+        )
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: barrierReadyURL.path) { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: barrierReadyURL.path) == true)
+        let barrierLeaderPID = barrierPty.metrics().pid
+        var barrierChildTagged = false
+        for _ in 0..<50 {
+            let procs = try Self.listProcessesMatching(tempToken)
+            if procs.contains(where: { $0.ppid == barrierLeaderPID && $0.pid != barrierLeaderPID }) {
+                barrierChildTagged = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(barrierChildTagged == true)
+        #expect(FileManager.default.fileExists(atPath: barrierDoneURL.path) == false)
+        try "open\n".write(to: barrierGateURL, atomically: true, encoding: .utf8)
+        #expect(barrierPty.waitForExit(timeout: 5.0) == true)
+        #expect(barrierPty.metrics().exitStatus == 0)
+        #expect(FileManager.default.fileExists(atPath: barrierDoneURL.path) == true)
+
+        // 5. Stubborn setpgrp + ignore INT/TERM/HUP child + long sleep: both carry tempToken, resist INT/TERM/HUP, and get cleaned by escalation
+        let stubbornPIDFile = tmpDir.appendingPathComponent("stubborn.pid")
+        let stubbornReadyFile = tmpDir.appendingPathComponent("stubborn-ready.marker")
+        let stubbornPty = POSIXPseudoTerminalSession(laneID: "verify-stubborn", updatesScreenBuffer: false)
+        defer { _ = stubbornPty.terminateWithEscalationReport(sigintGraceSeconds: 0.1, sigtermGraceSeconds: 0.1) }
+        try stubbornPty.spawn(
+            executablePath: Self.stubVerifyPath,
+            arguments: [
+                "--tag", tempToken,
+                "--stubborn-pid-file", stubbornPIDFile.path,
+                "--spawn-stubborn", "60",
+                "--write-marker", stubbornReadyFile.path,
+                "--sleep", "60"
+            ],
+            workingDirectory: tmpDir.path,
+            environmentOverrides: baseEnv,
+            preserveEnvironmentVerbatim: true
+        )
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: stubbornReadyFile.path) { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: stubbornReadyFile.path) == true)
+        let stubbornPID = try #require(pid_t(try String(contentsOf: stubbornPIDFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        #expect(stubbornPID > 0 && Darwin.getpgid(stubbornPID) == stubbornPID)
+        let taggedBeforeKill = try Self.listProcessesMatching(tempToken)
+        #expect(taggedBeforeKill.contains(where: { $0.pid == stubbornPID }))
+
+        // Directly verify INT/TERM/HUP are ignored by the stubborn child
+        _ = Darwin.kill(stubbornPID, SIGINT)
+        _ = Darwin.kill(stubbornPID, SIGTERM)
+        _ = Darwin.kill(stubbornPID, SIGHUP)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        #expect(Darwin.kill(stubbornPID, 0) == 0)
+
+        let escalation = stubbornPty.terminateWithEscalationReport(sigintGraceSeconds: 0.2, sigtermGraceSeconds: 0.2)
+        #expect(escalation.survivingPIDs.isEmpty)
+        let reapLimit = ContinuousClock.now + .seconds(5)
+        while (try Self.listProcessesMatching(tempToken)).isEmpty == false && ContinuousClock.now < reapLimit {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect((try Self.listProcessesMatching(tempToken)).isEmpty)
+        #expect(FileManager.default.fileExists(atPath: decoyMarker.path) == false)
+    }
 }
