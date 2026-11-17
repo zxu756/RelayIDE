@@ -1289,6 +1289,689 @@ assert git("diff", "--name-only", f"{base_oid}..relay/{run_id}/c").strip() == "s
 PY
 }
 
+# ------------------------------------------------------------------
+# Row 6: Plan order [b (after a), c, a] -> merge order c, a, b on --first-parent chain
+# ------------------------------------------------------------------
+row_06_topological_and_plan_priority_merge_order() {
+    local d="${WORK_TMP}/r06"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/b.txt from-b-after-a\n' > "${d}/prompts/b.md"
+    printf 'STUB WRITE src/c.txt from-c\n' > "${d}/prompts/c.md"
+    printf 'STUB WRITE src/a.txt from-a\n' > "${d}/prompts/a.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": ["a"]},
+    {"id": "c", "agent": "vibe",   "prompt": "prompts/c.md", "after": []},
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []}
+  ]
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 6 expected exit 0, got ${rc}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" "${repo}" "${base_oid}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, base_oid, empty_home = sys.argv[1:5]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+lanes = {l["laneID"]: l for l in data["lanes"]}
+integ = data["integration"]
+assert integ["status"] == "merged" and integ["ready"] is False, integ
+
+merges = integ["merges"]
+assert [m["laneID"] for m in merges] == ["c", "a", "b"], merges
+for m in merges:
+    assert m["status"] == "merged" and m["mergeCommitOID"], m
+
+env = dict(os.environ)
+env["HOME"] = empty_home
+env["GIT_CONFIG_NOSYSTEM"] = "1"
+env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+
+def git(*args):
+    return subprocess.run(["/usr/bin/git", "-C", repo_dir, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, check=True).stdout.decode("utf-8")
+
+int_branch = f"relay/{run_id}/integration"
+fp = [x for x in git("rev-list", "--first-parent", "--reverse", f"{base_oid}..{int_branch}").splitlines() if x]
+assert len(fp) == 3, f"expected 3 merge commits, got {fp}"
+expected_lanes = ["c", "a", "b"]
+prev_first_parent = base_oid
+for idx, (m_oid, lid) in enumerate(zip(fp, expected_lanes)):
+    assert merges[idx]["mergeCommitOID"] == m_oid, (idx, merges[idx], m_oid)
+    parents = git("rev-list", "--parents", "-n", "1", m_oid).strip().split()
+    assert parents == [m_oid, prev_first_parent, lanes[lid]["commitOID"]], f"step {idx} ({lid}) parents mismatch: {parents}"
+    prev_first_parent = m_oid
+
+diff_files = sorted(x for x in git("diff", "--name-only", base_oid, int_branch).splitlines() if x)
+assert diff_files == ["src/a.txt", "src/b.txt", "src/c.txt"], diff_files
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 7: (a) x makes no changes, y writes 1 file -> x no-changes, 1 merge, exit 0
+#        (b) neither lane makes changes -> nothing-to-merge, no branch/worktree/verify marker, exit 0
+# ------------------------------------------------------------------
+row_07_no_changes_lane_and_nothing_to_merge() {
+    local root="${WORK_TMP}/r07"
+    rm -rf "${root}"
+    mkdir -p "${root}"
+
+    # 7a: x makes no changes, y writes src/y.txt
+    {
+        local d="${root}/one-nochange"
+        mkdir -p "${d}/prompts" "${d}/traces"
+        init_temp_git_repo "${d}/repo" 1
+        local base_oid
+        base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+        init_temp_project "${d}/Proj.relayproj"
+
+        printf 'STUB MESSAGE Lane x inspected files and made zero edits\n' > "${d}/prompts/x.md"
+        printf 'STUB WRITE src/y.txt payload-from-y\n' > "${d}/prompts/y.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "x", "agent": "claude", "prompt": "prompts/x.md", "after": []},
+    {"id": "y", "agent": "vibe",   "prompt": "prompts/y.md", "after": []}
+  ]
+}
+EOF
+        local rc=0
+        invoke_run_checked "${d}/repo" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+            "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+        [[ "${rc}" -eq 0 ]] || { cat "${d}/run.stderr" >&2 || true; echo "Row 7a expected exit 0, got ${rc}" >&2; return 1; }
+
+        /usr/bin/python3 - "${d}/run.stdout" "${d}/repo" "${base_oid}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, base_oid, empty_home = sys.argv[1:5]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+lanes = {l["laneID"]: l for l in data["lanes"]}
+assert lanes["x"]["status"] == "succeeded-no-changes" and lanes["x"]["commitOID"] is None, lanes["x"]
+assert lanes["y"]["status"] == "succeeded" and lanes["y"]["commitOID"], lanes["y"]
+
+integ = data["integration"]
+assert integ["status"] == "merged" and integ["ready"] is False, integ
+merges = integ["merges"]
+assert [m["laneID"] for m in merges] == ["x", "y"], merges
+assert merges[0]["status"] == "no-changes" and merges[0]["mergeCommitOID"] is None, merges[0]
+assert merges[1]["status"] == "merged" and merges[1]["mergeCommitOID"], merges[1]
+
+env = dict(os.environ)
+env["HOME"] = empty_home
+env["GIT_CONFIG_NOSYSTEM"] = "1"
+env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+fp = subprocess.run(
+    ["/usr/bin/git", "-C", repo_dir, "rev-list", "--first-parent", "--reverse", f"{base_oid}..relay/{run_id}/integration"],
+    env=env, stdin=subprocess.DEVNULL, capture_output=True, check=True
+).stdout.decode("utf-8").splitlines()
+fp = [x for x in fp if x]
+assert len(fp) == 1 and fp[0] == merges[1]["mergeCommitOID"], fp
+PY
+    }
+
+    # 7b: neither lane makes changes -> nothing-to-merge, no branch, no worktree, no verify marker, exit 0
+    {
+        local d="${root}/all-nochange"
+        local marker="${d}/verify-must-not-run.marker"
+        mkdir -p "${d}/prompts" "${d}/traces"
+        init_temp_git_repo "${d}/repo" 1
+        init_temp_project "${d}/Proj.relayproj"
+
+        printf 'STUB MESSAGE Lane x made no changes\n' > "${d}/prompts/x.md"
+        printf 'STUB MESSAGE Lane y made no changes\n' > "${d}/prompts/y.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "x", "agent": "claude", "prompt": "prompts/x.md", "after": []},
+    {"id": "y", "agent": "codex",  "prompt": "prompts/y.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --write-marker '${marker}' --exit 0"
+}
+EOF
+        local rc=0
+        invoke_run_checked "${d}/repo" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+            "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+        [[ "${rc}" -eq 0 ]] || { cat "${d}/run.stderr" >&2 || true; echo "Row 7b expected exit 0, got ${rc}" >&2; return 1; }
+        [[ ! -e "${marker}" ]] || { echo "Row 7b verify marker exists unexpectedly" >&2; return 1; }
+
+        /usr/bin/python3 - "${d}/run.stdout" "${d}/repo" "${d}/Proj.relayproj" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, proj_dir, empty_home = sys.argv[1:5]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+integ = data["integration"]
+assert integ["status"] == "nothing-to-merge", integ
+assert integ["ready"] is False, integ
+assert integ["branch"] is None and integ["worktreePath"] is None, integ
+assert integ["verify"] is None and integ["merges"] == [], integ
+
+int_wt_path = os.path.join(proj_dir, "runs", run_id, "worktrees", "integration")
+assert not os.path.exists(int_wt_path), f"integration worktree should not exist: {int_wt_path}"
+
+env = dict(os.environ)
+env["HOME"] = empty_home
+env["GIT_CONFIG_NOSYSTEM"] = "1"
+env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+sr = subprocess.run(
+    ["/usr/bin/git", "-C", repo_dir, "show-ref", "--verify", "--quiet", f"refs/heads/relay/{run_id}/integration"],
+    env=env, stdin=subprocess.DEVNULL, capture_output=True
+)
+assert sr.returncode != 0, "integration branch should not exist when status is nothing-to-merge"
+PY
+    }
+}
+
+# ------------------------------------------------------------------
+# Row 8: Stub runs GIT_COMMIT on first file, then writes second file uncommitted -> parent chain & merge
+# ------------------------------------------------------------------
+row_08_stub_git_commit_preserved_under_relay_commit() {
+    local d="${WORK_TMP}/r08"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+    init_temp_project "${proj}"
+
+    cat > "${d}/prompts/a.md" <<'EOF'
+STUB WRITE src/agent_committed.txt committed-by-stub-agent
+STUB GIT_COMMIT feat(lane-a): stub agent direct commit
+STUB WRITE src/relay_committed.txt committed-by-relayide-afterward
+EOF
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []}
+  ]
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 8 expected exit 0, got ${rc}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" "${repo}" "${base_oid}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, base_oid, empty_home = sys.argv[1:5]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+lane_a = data["lanes"][0]
+lane_oid = lane_a["commitOID"]
+assert lane_a["status"] == "succeeded" and lane_oid, lane_a
+
+integ = data["integration"]
+assert integ["status"] == "merged" and integ["ready"] is False, integ
+m1 = integ["headCommitOID"]
+assert m1 and integ["merges"][0]["mergeCommitOID"] == m1, integ
+
+env = dict(os.environ)
+env["HOME"] = empty_home
+env["GIT_CONFIG_NOSYSTEM"] = "1"
+env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+
+def git(*args):
+    return subprocess.run(["/usr/bin/git", "-C", repo_dir, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, check=True).stdout.decode("utf-8")
+
+# Lane commitOID's first parent is the stub's own GIT_COMMIT commit, whose parent is base_oid
+assert git("rev-list", "--count", f"{base_oid}..{lane_oid}").strip() == "2"
+stub_commit_oid = git("rev-parse", f"{lane_oid}^1").strip()
+assert git("rev-parse", f"{stub_commit_oid}^1").strip() == base_oid
+assert git("log", "-1", "--format=%s", stub_commit_oid).strip() == "feat(lane-a): stub agent direct commit"
+
+# Integration branch contains both files and merge commit's second parent equals lane_oid
+int_branch = f"relay/{run_id}/integration"
+diff_files = sorted(x for x in git("diff", "--name-only", base_oid, int_branch).splitlines() if x)
+assert diff_files == ["src/agent_committed.txt", "src/relay_committed.txt"], diff_files
+assert git("show", f"{int_branch}:src/agent_committed.txt") == "committed-by-stub-agent\n"
+assert git("show", f"{int_branch}:src/relay_committed.txt") == "committed-by-relayide-afterward\n"
+
+parents = git("rev-list", "--parents", "-n", "1", m1).strip().split()
+assert parents == [m1, base_oid, lane_oid], f"merge commit parents mismatch: {parents}"
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 9: Non-succeeded lane (a exits 3; second run a returns STATUS: partial) -> skipped, no branch/wt/verify, exit 1
+# ------------------------------------------------------------------
+row_09_failed_or_partial_lane_skips_integration() {
+    local root="${WORK_TMP}/r09"
+    rm -rf "${root}"
+    mkdir -p "${root}"
+
+    for submode in "failed:STUB EXIT 3" "partial:STUB STATUS partial"; do
+        local expected_lane_st="${submode%%:*}"
+        local directive="${submode#*:}"
+        local d="${root}/${expected_lane_st}"
+        local marker="${d}/verify-must-not-run.marker"
+        mkdir -p "${d}/prompts" "${d}/traces"
+
+        init_temp_git_repo "${d}/repo" 1
+        init_temp_project "${d}/Proj.relayproj"
+
+        printf 'STUB WRITE src/a.txt from-a\n%s\n' "${directive}" > "${d}/prompts/a.md"
+        printf 'STUB WRITE src/b.txt from-b\n' > "${d}/prompts/b.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --write-marker '${marker}' --exit 0"
+}
+EOF
+        local rc=0
+        invoke_run_checked "${d}/repo" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+            "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+        [[ "${rc}" -eq 1 ]] || { cat "${d}/run.stderr" >&2 || true; echo "Row 9 (${expected_lane_st}) expected exit 1, got ${rc}" >&2; return 1; }
+        [[ ! -e "${marker}" ]] || { echo "Row 9 (${expected_lane_st}) verify marker exists unexpectedly" >&2; return 1; }
+
+        /usr/bin/python3 - "${d}/run.stdout" "${d}/repo" "${d}/Proj.relayproj" "${expected_lane_st}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, proj_dir, exp_st, empty_home = sys.argv[1:6]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+lanes = {l["laneID"]: l for l in data["lanes"]}
+assert lanes["a"]["status"] == exp_st, lanes["a"]
+assert lanes["b"]["status"] == "succeeded", lanes["b"]
+
+integ = data["integration"]
+assert integ["status"] == "skipped", integ
+assert integ["ready"] is False, integ
+assert integ["branch"] is None and integ["worktreePath"] is None, integ
+assert integ["verify"] is None and integ["merges"] == [], integ
+reason = integ.get("reason") or ""
+assert "a" in reason and exp_st in reason, f"expected lane 'a' and status '{exp_st}' in integration.reason, got: {reason!r}"
+
+int_wt_path = os.path.join(proj_dir, "runs", run_id, "worktrees", "integration")
+assert not os.path.exists(int_wt_path), f"integration worktree must not exist: {int_wt_path}"
+
+env = dict(os.environ)
+env["HOME"] = empty_home
+env["GIT_CONFIG_NOSYSTEM"] = "1"
+env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+sr = subprocess.run(
+    ["/usr/bin/git", "-C", repo_dir, "show-ref", "--verify", "--quiet", f"refs/heads/relay/{run_id}/integration"],
+    env=env, stdin=subprocess.DEVNULL, capture_output=True
+)
+assert sr.returncode != 0, "integration branch must not exist when integration is skipped"
+PY
+    done
+}
+
+# ------------------------------------------------------------------
+# Row 22: Merge-phase 125: while lanes wait on barrier, place regular file at worktrees/integration -> 125, empty stdout, status=error
+# ------------------------------------------------------------------
+row_22_merge_phase_125_obstructed_integration_worktree() {
+    local d="${WORK_TMP}/r22"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    local barrier="${d}/release.barrier"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+    init_temp_project "${proj}"
+
+    cat > "${d}/prompts/a.md" <<EOF
+STUB WRITE src/a.txt alpha-r22
+STUB WAIT ${barrier} 90
+EOF
+    cat > "${d}/prompts/b.md" <<EOF
+STUB WRITE src/b.txt beta-r22
+STUB WAIT ${barrier} 90
+EOF
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ]
+}
+EOF
+
+    snapshot_repo_state "${repo}" "main" "${d}/snap"
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${traces}" \
+        "${RELAY_CLI}" run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run.stdout" 2>"${d}/run.stderr" ) &
+    local bg_pid=$!
+    start_pid_watchdog "${bg_pid}" 120
+
+    wait_for_trace_start "${traces}/a.trace" "${bg_pid}" 60
+    wait_for_trace_start "${traces}/b.trace" "${bg_pid}" 60
+    verify_pid_is_tested_binary "${bg_pid}" "${proj}"
+
+    local run_id
+    run_id="$(read_lock_run_id "${proj}")"
+    [[ -n "${run_id}" ]] || { stop_pid_watchdog "${WATCHDOG_PID}"; echo "Row 22 failed to read runID from run.lock" >&2; return 1; }
+
+    mkdir -p "${proj}/runs/${run_id}/worktrees"
+    printf 'regular-file-obstructing-integration-worktree\n' > "${proj}/runs/${run_id}/worktrees/integration"
+
+    : > "${barrier}"
+    set +e
+    wait "${bg_pid}"
+    local run_rc=$?
+    set -e
+    stop_pid_watchdog "${WATCHDOG_PID}"
+
+    assert_base_untouched "${repo}" "main" "${d}/snap" "${run_id}"
+
+    [[ "${run_rc}" -eq 125 ]] || { cat "${d}/run.stderr" >&2 || true; echo "Row 22 expected exit 125, got ${run_rc}" >&2; return 1; }
+    [[ ! -s "${d}/run.stdout" ]] || { echo "Row 22 expected empty stdout on exit 125" >&2; return 1; }
+    [[ -s "${d}/run.stderr" ]] || { echo "Row 22 expected non-empty stderr explaining reason" >&2; return 1; }
+
+    local st_rc=0
+    invoke_product "${d}/status.stdout" "${d}/status.stderr" -- \
+        status --project "${proj}" --run "${run_id}" --lang zh || st_rc=$?
+    [[ "${st_rc}" -eq 0 ]] || { echo "Row 22 status --run exited ${st_rc}" >&2; return 1; }
+
+    /usr/bin/python3 - "${d}/status.stdout" "${repo}" "${base_oid}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+st_p, repo_dir, base_oid, empty_home = sys.argv[1:5]
+data = json.load(open(st_p, encoding="utf-8"))
+run_id = data["runID"]
+integ = data["integration"]
+assert integ is not None, "integration is null"
+assert integ["status"] == "error", integ
+assert integ["ready"] is False, integ
+assert (integ.get("reason") or "").strip() != "", integ
+
+lanes = {l["laneID"]: l for l in data["lanes"]}
+for lid in ("a", "b"):
+    assert lanes[lid]["status"] == "succeeded" and lanes[lid]["commitOID"], lanes[lid]
+
+env = dict(os.environ)
+env["HOME"] = empty_home
+env["GIT_CONFIG_NOSYSTEM"] = "1"
+env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+
+def git(*args, check=True):
+    return subprocess.run(["/usr/bin/git", "-C", repo_dir, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, check=check)
+
+for lid in ("a", "b"):
+    ref_oid = git("rev-parse", f"relay/{run_id}/{lid}").stdout.decode("utf-8").strip()
+    assert ref_oid == lanes[lid]["commitOID"], (lid, ref_oid, lanes[lid]["commitOID"])
+    ahead = git("rev-list", "--count", f"{base_oid}..{ref_oid}").stdout.decode("utf-8").strip()
+    assert ahead == "1", (lid, ahead)
+
+sr = git("show-ref", "--verify", "--quiet", f"refs/heads/relay/{run_id}/integration", check=False)
+assert sr.returncode != 0, "integration branch should not exist when worktree creation failed"
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 23: Hostile repository config + 7 failing hooks -> run exits 0, exact Row 1 merge commits, no hook marker
+# ------------------------------------------------------------------
+row_23_hostile_repo_configs_and_failing_hooks() {
+    local d="${WORK_TMP}/r23"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    local hook_marker="${d}/hook-triggered.marker"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+
+    # Hostile repository git config settings
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" config merge.verifySignatures true
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" config commit.gpgSign true
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" config merge.log true
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" config merge.ff only
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" config rerere.enabled true
+
+    # Install 7 failing hooks that record marker if ever invoked
+    mkdir -p "${repo}/.git/hooks"
+    local hname
+    for hname in pre-commit prepare-commit-msg commit-msg post-commit pre-merge-commit post-merge post-checkout; do
+        cat > "${repo}/.git/hooks/${hname}" <<EOF
+#!/bin/sh
+printf '%s\n' "${hname}" >> "${hook_marker}"
+exit 1
+EOF
+        chmod +x "${repo}/.git/hooks/${hname}"
+    done
+
+    init_temp_project "${proj}"
+    printf 'STUB WRITE src/a.txt hostile-lane-a\n' > "${d}/prompts/a.md"
+    printf 'STUB WRITE src/b.txt hostile-lane-b\n' > "${d}/prompts/b.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ]
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 23 expected exit 0, got ${rc}" >&2
+        return 1
+    fi
+    if [[ -e "${hook_marker}" ]]; then
+        echo "Row 23 hook marker file exists (hooks were not skipped):" >&2
+        cat "${hook_marker}" >&2 || true
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" "${repo}" "${base_oid}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, base_oid, empty_home = sys.argv[1:5]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+lanes = {l["laneID"]: l for l in data["lanes"]}
+a_oid = lanes["a"]["commitOID"]
+b_oid = lanes["b"]["commitOID"]
+
+integ = data["integration"]
+assert integ["status"] == "merged" and integ["ready"] is False, integ
+
+env = dict(os.environ)
+env["HOME"] = empty_home
+env["GIT_CONFIG_NOSYSTEM"] = "1"
+env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+
+def git(*args):
+    return subprocess.run(["/usr/bin/git", "-C", repo_dir, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, check=True).stdout.decode("utf-8")
+
+int_branch = f"relay/{run_id}/integration"
+fp = [x for x in git("rev-list", "--first-parent", "--reverse", f"{base_oid}..{int_branch}").splitlines() if x]
+assert len(fp) == 2, fp
+m1, m2 = fp
+assert git("rev-list", "--parents", "-n", "1", m1).strip().split() == [m1, base_oid, a_oid]
+assert git("rev-list", "--parents", "-n", "1", m2).strip().split() == [m2, m1, b_oid]
+
+# Commit message must match Row 1 verbatim (no merge.log commit summary appended)
+for commit_oid, lane_id, agent_name, lane_oid in ((m1, "a", "claude", a_oid), (m2, "b", "vibe", b_oid)):
+    full_msg = git("log", "-1", "--format=%B", commit_oid).rstrip("\n")
+    expected_msg = (
+        f"relay {run_id} merge {lane_id} ({agent_name})\n\n"
+        f"Lane branch: relay/{run_id}/{lane_id}\n"
+        f"Lane commit: {lane_oid}\n"
+        f"Merged by RelayIDE; repository hooks skipped."
+    )
+    assert full_msg == expected_msg, f"Row 23 commit message mismatch:\ngot:\n{full_msg!r}\nexpected:\n{expected_msg!r}"
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 24: Plan validation errors (9 cases) and `status <runID> --project <proj>` -> all exit 2, empty stdout, untouched state
+# ------------------------------------------------------------------
+row_24_m2_plan_errors_and_status_positional_arg_exit_2() {
+    local d="${WORK_TMP}/r24"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${d}/plans" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    init_temp_project "${proj}"
+    printf 'STUB WRITE src/a.txt never-runs\n' > "${d}/prompts/a.md"
+
+    local wt_before branches_before
+    wt_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" worktree list --porcelain)"
+    branches_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" for-each-ref --format='%(refname) %(objectname)' refs/heads/ | LC_ALL=C sort)"
+
+    # Generate all 9 invalid plans
+    /usr/bin/python3 - "${d}/plans" "${repo}" "${d}/prompts/a.md" <<'PY'
+import json, os, sys
+
+plans_dir, repo_dir, prompt_p = sys.argv[1:4]
+base_lane = {"id": "a", "agent": "claude", "prompt": prompt_p, "after": []}
+
+cases = [
+    ("01_verify_array",         {"repo": repo_dir, "base": "main", "lanes": [base_lane], "verify": ["echo", "hi"]}),
+    ("02_verify_number",        {"repo": repo_dir, "base": "main", "lanes": [base_lane], "verify": 123}),
+    ("03_timeout_zero",         {"repo": repo_dir, "base": "main", "lanes": [base_lane], "verify": "true", "verify_timeout": 0}),
+    ("04_timeout_86401",        {"repo": repo_dir, "base": "main", "lanes": [base_lane], "verify": "true", "verify_timeout": 86401}),
+    ("05_timeout_float",        None),
+    ("06_timeout_string",       {"repo": repo_dir, "base": "main", "lanes": [base_lane], "verify": "true", "verify_timeout": "60"}),
+    ("07_timeout_no_verify",    {"repo": repo_dir, "base": "main", "lanes": [base_lane], "verify_timeout": 30}),
+    ("08_unknown_top_timout",   {"repo": repo_dir, "base": "main", "lanes": [base_lane], "verify": "true", "verify_timout": 30}),
+    ("09_unknown_lane_befor",   {"repo": repo_dir, "base": "main", "lanes": [{"id": "a", "agent": "claude", "prompt": prompt_p, "befor": []}]}),
+]
+
+for name, obj in cases:
+    p = os.path.join(plans_dir, f"{name}.json")
+    if name == "05_timeout_float":
+        raw = (
+            '{\n'
+            f'  "repo": {json.dumps(repo_dir)},\n'
+            '  "base": "main",\n'
+            f'  "lanes": [{json.dumps(base_lane)}],\n'
+            '  "verify": "true",\n'
+            '  "verify_timeout": 1.5\n'
+            '}\n'
+        )
+        open(p, "w", encoding="utf-8").write(raw)
+    else:
+        open(p, "w", encoding="utf-8").write(json.dumps(obj, indent=2) + "\n")
+PY
+
+    local case_name
+    for case_name in \
+        01_verify_array \
+        02_verify_number \
+        03_timeout_zero \
+        04_timeout_86401 \
+        05_timeout_float \
+        06_timeout_string \
+        07_timeout_no_verify \
+        08_unknown_top_timout \
+        09_unknown_lane_befor
+    do
+        local out_f="${d}/${case_name}.stdout"
+        local err_f="${d}/${case_name}.stderr"
+        local rc=0
+        invoke_run_checked "${repo}" "main" "${d}/snap-${case_name}" "${out_f}" "${err_f}" \
+            "STUB_TRACE_DIR=${traces}" -- \
+            run "${d}/plans/${case_name}.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+        [[ "${rc}" -eq 2 ]] || { echo "Row 24 (${case_name}) expected exit 2, got ${rc}" >&2; cat "${err_f}" >&2 || true; return 1; }
+        [[ ! -s "${out_f}" ]] || { echo "Row 24 (${case_name}) expected empty stdout" >&2; return 1; }
+        [[ -s "${err_f}" ]] || { echo "Row 24 (${case_name}) expected non-empty stderr" >&2; return 1; }
+
+        if [[ "${case_name}" == "08_unknown_top_timout" ]]; then
+            grep -Fq "verify_timout" "${err_f}" || { echo "Row 24 (${case_name}) stderr missing field name 'verify_timout'" >&2; return 1; }
+        elif [[ "${case_name}" == "09_unknown_lane_befor" ]]; then
+            grep -Fq "befor" "${err_f}" || { echo "Row 24 (${case_name}) stderr missing field name 'befor'" >&2; return 1; }
+        fi
+
+        local wt_now branches_now
+        wt_now="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" worktree list --porcelain)"
+        branches_now="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" for-each-ref --format='%(refname) %(objectname)' refs/heads/ | LC_ALL=C sort)"
+        [[ "${wt_now}" == "${wt_before}" ]] || { echo "Row 24 (${case_name}) worktree list changed" >&2; return 1; }
+        [[ "${branches_now}" == "${branches_before}" ]] || { echo "Row 24 (${case_name}) branch list changed" >&2; return 1; }
+
+        invoke_product "${d}/runs-check.stdout" "${d}/runs-check.stderr" -- status --project "${proj}" --runs --lang zh
+        /usr/bin/python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r == [], r' "${d}/runs-check.stdout"
+    done
+
+    # 10th check: `status <runID> --project <project>` (extra positional argument -> exit 2, empty stdout)
+    snapshot_repo_state "${repo}" "main" "${d}/snap-status-pos"
+    local st_pos_rc=0
+    invoke_product "${d}/status-pos.stdout" "${d}/status-pos.stderr" -- \
+        status "20261117-000000-beef" --project "${proj}" --lang zh || st_pos_rc=$?
+    assert_base_untouched "${repo}" "main" "${d}/snap-status-pos" ""
+    [[ "${st_pos_rc}" -eq 2 ]] || { echo "Row 24 (status positional) expected exit 2, got ${st_pos_rc}" >&2; return 1; }
+    [[ ! -s "${d}/status-pos.stdout" ]] || { echo "Row 24 (status positional) expected empty stdout" >&2; return 1; }
+    [[ -s "${d}/status-pos.stderr" ]] || { echo "Row 24 (status positional) expected non-empty stderr" >&2; return 1; }
+
+    local wt_final branches_final
+    wt_final="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" worktree list --porcelain)"
+    branches_final="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" for-each-ref --format='%(refname) %(objectname)' refs/heads/ | LC_ALL=C sort)"
+    [[ "${wt_final}" == "${wt_before}" && "${branches_final}" == "${branches_before}" ]] || return 1
+    invoke_product "${d}/runs-final.stdout" "${d}/runs-final.stderr" -- status --project "${proj}" --runs --lang zh
+    /usr/bin/python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r == [], r' "${d}/runs-final.stdout"
+    [[ -z "$(ls -A "${traces}" 2>/dev/null || true)" ]] || { echo "Row 24 stub agent ran unexpectedly" >&2; return 1; }
+}
+
 run_quick_mode() {
     echo "================================================================"
     echo "RelayIDE M2 Acceptance Quick Check (--quick, Row 1)"
@@ -1357,10 +2040,10 @@ run_full_suite() {
     run_row "3" "Same-line conflict on f.txt records UU, aborts cleanly without MERGE_HEAD/markers, skips verify, and exits 1" row_03_same_line_conflict_aborts_cleanly_and_skips_verify
     run_row "4" "Remaining conflict types (AA, UD, DU, binary NUL, file/directory fd~) record expected codes and abort cleanly" row_04_remaining_conflict_types_abort_cleanly
     run_row "5" "Conflict in b leaves trailing independent lane c as not-attempted with its branch & commit OID intact" row_05_conflict_leaves_subsequent_lane_not_attempted
-    record_skip "6"  "Topological + plan-order merge sequence [b(after a), c, a] -> c, a, b"
-    record_skip "7"  "no-changes lane skipped in merge and all-no-changes -> nothing-to-merge"
-    record_skip "8"  "Agent GIT_COMMIT preserved before RelayIDE lane commit and merged cleanly"
-    record_skip "9"  "Failed or partial lane -> integration skipped without branch/worktree/verify"
+    run_row "6" "Plan order [b (after a), c, a] merges in topological + plan order c, a, b along --first-parent" row_06_topological_and_plan_priority_merge_order
+    run_row "7" "No-change lane records no-changes (null mergeCommitOID); all-no-change run records nothing-to-merge without branch/worktree/verify" row_07_no_changes_lane_and_nothing_to_merge
+    run_row "8" "Stub GIT_COMMIT preserved as parent of lane commitOID and both files land on integration branch" row_08_stub_git_commit_preserved_under_relay_commit
+    run_row "9" "Non-succeeded lane (exit 3 or STATUS: partial) marks integration skipped naming lane & status without branch/worktree/verify" row_09_failed_or_partial_lane_skips_integration
     record_skip "10" "verify passes: probes pwd -P, HEAD, git status, PATH, test -t 0, git log -1, cat"
     record_skip "11" "verify exits 3 -> verify-failed, ready=false, merges kept, run exits 1"
     record_skip "12" "verify emits 307200 stdout bytes + stderr marker + exit 1 -> failed (not timeout)"
@@ -1373,9 +2056,9 @@ run_full_suite() {
     record_skip "19" "SIGINT during custom merge driver -> 130, cancelled, clean integration worktree"
     record_skip "20" "kill -9 RelayIDE during verify -> 0 procs, status shows interrupted, recovery run exits 0"
     record_skip "21" "SIGINT while lanes blocked on barrier -> 130, integration skipped, no branch/worktree"
-    record_skip "22" "Merge-phase 125 when file obstructs worktrees/integration -> empty stdout, integration error"
-    record_skip "23" "Hostile repo config (verifySignatures, gpgSign, log, ff=only, rerere) + 7 failing hooks"
-    record_skip "24" "M2 plan schema errors & status extra positional argument -> exit 2, empty stdout"
+    run_row "22" "Merge-phase 125 when regular file obstructs worktrees/integration -> exit 125, empty stdout, status=error, lanes & base intact" row_22_merge_phase_125_obstructed_integration_worktree
+    run_row "23" "Hostile repository (verifySignatures, gpgSign, merge.log, ff=only, rerere + 7 exit-1 hooks) merges cleanly with exact Row 1 messages and zero hook runs" row_23_hostile_repo_configs_and_failing_hooks
+    run_row "24" "M2 plan validation errors and status extra positional argument each exit 2 with empty stdout and zero repo/DB side effects" row_24_m2_plan_errors_and_status_positional_arg_exit_2
     record_skip "25" "Two projects concurrently running + verifying against same repository"
     record_skip "26" "Same plan run twice -> distinct integration branches, first unchanged"
     record_skip "27" "Rows 1, 3, 11, 18 run stdout byte-identical to status --run"
