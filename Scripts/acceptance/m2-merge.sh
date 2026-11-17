@@ -779,6 +779,516 @@ assert git("rev-parse", f"relay/{run_id}/b").strip() == b_oid
 PY
 }
 
+# ------------------------------------------------------------------
+# Row 2: 40-line file modified at line 5 by a and line 30 by b -> matches hand-computed & git merge-file -p
+# ------------------------------------------------------------------
+row_02_same_file_distant_lines_matches_git_merge_file() {
+    local d="${WORK_TMP}/r02"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    mkdir -p "${repo}/src"
+    /usr/bin/python3 - "${repo}/src/forty.txt" "${d}" <<'PY'
+import os, sys
+repo_file, d_dir = sys.argv[1], sys.argv[2]
+base_lines = [f"line-{i:02d}" for i in range(1, 41)]
+a_lines = list(base_lines)
+a_lines[4] = "line-05-modified-by-lane-a"
+b_lines = list(base_lines)
+b_lines[29] = "line-30-modified-by-lane-b"
+exp_lines = list(base_lines)
+exp_lines[4] = "line-05-modified-by-lane-a"
+exp_lines[29] = "line-30-modified-by-lane-b"
+
+def write_lines(path, lines):
+    with open(path, "wb") as fh:
+        fh.write(("\n".join(lines) + "\n").encode("utf-8"))
+
+write_lines(repo_file, base_lines)
+write_lines(os.path.join(d_dir, "base-forty.txt"), base_lines)
+write_lines(os.path.join(d_dir, "a-forty.txt"), a_lines)
+write_lines(os.path.join(d_dir, "b-forty.txt"), b_lines)
+write_lines(os.path.join(d_dir, "hand-expected.txt"), exp_lines)
+
+with open(os.path.join(d_dir, "prompts", "a.md"), "wb") as fh:
+    fh.write(("STUB WRITE_BLOCK src/forty.txt EOF_FORTY_A\n" + "\n".join(a_lines) + "\nEOF_FORTY_A\n").encode("utf-8"))
+with open(os.path.join(d_dir, "prompts", "b.md"), "wb") as fh:
+    fh.write(("STUB WRITE_BLOCK src/forty.txt EOF_FORTY_B\n" + "\n".join(b_lines) + "\nEOF_FORTY_B\n").encode("utf-8"))
+PY
+
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" add src/forty.txt
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" -c commit.gpgsign=false commit -q -m "Add 40-line baseline file"
+    init_temp_project "${proj}"
+
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []}
+  ]
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 2 expected exit 0, got ${rc}" >&2
+        return 1
+    fi
+
+    HOME="${WORK_TMP}/empty-git-home" git merge-file -p \
+        "${d}/a-forty.txt" "${d}/base-forty.txt" "${d}/b-forty.txt" > "${d}/git-merge-file.txt"
+
+    /usr/bin/python3 - "${d}/run.stdout" "${repo}" "${d}/hand-expected.txt" "${d}/git-merge-file.txt" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, hand_p, gmf_p, empty_home = sys.argv[1:6]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+integ = data["integration"]
+assert integ["status"] == "merged" and integ["ready"] is False, integ
+
+env = dict(os.environ)
+env["HOME"] = empty_home
+env["GIT_CONFIG_NOSYSTEM"] = "1"
+env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+
+branch_bytes = subprocess.run(
+    ["/usr/bin/git", "-C", repo_dir, "show", f"relay/{run_id}/integration:src/forty.txt"],
+    env=env, stdin=subprocess.DEVNULL, capture_output=True, check=True
+).stdout
+wt_bytes = open(os.path.join(integ["worktreePath"], "src", "forty.txt"), "rb").read()
+hand_bytes = open(hand_p, "rb").read()
+gmf_bytes = open(gmf_p, "rb").read()
+
+assert hand_bytes == gmf_bytes, "hand-computed expected bytes differed from git merge-file -p"
+assert branch_bytes == hand_bytes, "integration branch file differed from hand-computed expected bytes"
+assert branch_bytes == gmf_bytes, "integration branch file differed from git merge-file -p output"
+assert wt_bytes == hand_bytes, "integration worktree file differed from expected bytes"
+PY
+}
+
+# Shared Python verifier for Row 3 and Row 4 conflict & clean-abort invariants.
+verify_conflict_abort_invariants() {
+    local stdout_p="$1"
+    local repo_dir="$2"
+    local base_oid="$3"
+    local marker_p="$4"
+    local mode="$5"
+    local extra_arg="${6:-}"
+
+    /usr/bin/python3 - "${stdout_p}" "${repo_dir}" "${base_oid}" "${marker_p}" "${mode}" "${extra_arg}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, base_oid, marker_p, mode, extra_arg, empty_home = sys.argv[1:8]
+assert not os.path.exists(marker_p), f"verify marker file must NOT exist on conflict: {marker_p}"
+
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+lanes_by_id = {l["laneID"]: l for l in data["lanes"]}
+a_oid = lanes_by_id["a"]["commitOID"]
+assert a_oid, lanes_by_id["a"]
+
+integ = data["integration"]
+assert integ is not None, "integration is null"
+assert integ["status"] == "conflict", integ
+assert integ["ready"] is False, integ
+assert integ["verify"] is None, integ
+
+merges = integ["merges"]
+assert [m["laneID"] for m in merges] == ["a", "b"], merges
+m_a, m_b = merges[0], merges[1]
+assert m_a["status"] == "merged" and m_a["mergeCommitOID"] and m_a["conflicts"] == [], m_a
+assert m_b["status"] == "conflict" and m_b["mergeCommitOID"] is None, m_b
+
+conflicts = m_b["conflicts"]
+if mode == "exact_uu_f":
+    assert conflicts == [{"code": "UU", "path": "f.txt"}], f"expected exact UU f.txt, got {conflicts}"
+elif mode in ("AA", "UD", "DU", "UU"):
+    assert any(c["code"] == mode and c["path"] == extra_arg for c in conflicts), f"expected ({extra_arg}, {mode}) in {conflicts}"
+elif mode == "fd_tilde":
+    assert any(c["path"].startswith("fd~") for c in conflicts), f"expected path starting with 'fd~' in {conflicts}"
+else:
+    raise AssertionError(f"unknown mode {mode}")
+
+env = dict(os.environ)
+env["HOME"] = empty_home
+env["GIT_CONFIG_NOSYSTEM"] = "1"
+env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+
+def git(*args, cwd=repo_dir, check=True, binary=False):
+    res = subprocess.run(["/usr/bin/git", "-C", cwd, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, check=check)
+    return (res.returncode, res.stdout if binary else res.stdout.decode("utf-8", errors="replace"))
+
+int_branch = f"relay/{run_id}/integration"
+_, fp_out = git("rev-list", "--first-parent", "--reverse", f"{base_oid}..{int_branch}")
+fp = [x for x in fp_out.splitlines() if x]
+assert len(fp) == 1, f"expected exactly 1 first-parent commit on integration branch, got {fp}"
+m1 = fp[0]
+assert m1 == m_a["mergeCommitOID"] == integ["headCommitOID"], (m1, m_a["mergeCommitOID"], integ["headCommitOID"])
+
+_, parents_str = git("rev-list", "--parents", "-n", "1", m1)
+parents = parents_str.strip().split()
+assert parents == [m1, base_oid, a_oid], f"integration HEAD parents mismatch: {parents}"
+
+wt_dir = os.path.realpath(integ["worktreePath"])
+assert os.path.isdir(wt_dir), wt_dir
+_, wt_head = git("rev-parse", "HEAD", cwd=wt_dir)
+assert wt_head.strip() == m1, (wt_head.strip(), m1)
+
+# No MERGE_HEAD in integration worktree
+mh_rc, _ = git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=wt_dir, check=False)
+assert mh_rc != 0, "MERGE_HEAD ref still resolves in integration worktree"
+_, mh_git_path = git("rev-parse", "--git-path", "MERGE_HEAD", cwd=wt_dir)
+mh_resolved = mh_git_path.strip()
+if not os.path.isabs(mh_resolved):
+    mh_resolved = os.path.join(wt_dir, mh_resolved)
+assert not os.path.exists(mh_resolved), f"MERGE_HEAD file still exists at {mh_resolved}"
+
+# `git status --porcelain -uall --ignored` is completely empty
+_, st_out = git("status", "--porcelain=v1", "-uall", "--ignored", cwd=wt_dir)
+assert st_out == "", f"integration worktree status not empty after abort: {st_out!r}"
+
+# Walk integration worktree: no line starting with <<<<<<< (and for fd_tilde, no fd~* entries)
+for root, dirs, files in os.walk(wt_dir):
+    if ".git" in dirs:
+        dirs.remove(".git")
+    rel_root = os.path.relpath(root, wt_dir)
+    if mode == "fd_tilde":
+        for entry in list(dirs) + list(files):
+            rel_entry = entry if rel_root == "." else os.path.join(rel_root, entry)
+            assert not entry.startswith("fd~") and not rel_entry.startswith("fd~"), f"leftover fd~ path in worktree: {rel_entry}"
+    for fname in files:
+        fpath = os.path.join(root, fname)
+        if os.path.islink(fpath):
+            continue
+        raw = open(fpath, "rb").read()
+        for line in raw.splitlines():
+            assert not line.startswith(b"<<<<<<<"), f"conflict marker found in {fpath}: {line!r}"
+
+if mode == "UU" and extra_arg == "blob.bin":
+    _, a_blob = git("show", f"relay/{run_id}/a:blob.bin", binary=True)
+    wt_blob = open(os.path.join(wt_dir, "blob.bin"), "rb").read()
+    assert wt_blob == a_blob and b"\x00" in wt_blob, "binary file in worktree does not match lane a version byte-for-byte"
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 3: Same-line conflict on f.txt with marker-writing verify -> UU, clean abort, verify null, exit 1
+# ------------------------------------------------------------------
+row_03_same_line_conflict_aborts_cleanly_and_skips_verify() {
+    local d="${WORK_TMP}/r03"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    local marker="${d}/verify-should-not-run.marker"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    printf 'line-1\nshared-conflict-line\nline-3\n' > "${repo}/f.txt"
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" add f.txt
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" -c commit.gpgsign=false commit -q -m "Add f.txt"
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+    init_temp_project "${proj}"
+
+    cat > "${d}/prompts/a.md" <<'EOF'
+STUB WRITE_BLOCK f.txt EOF_A
+line-1
+alpha-replacement-line
+line-3
+EOF_A
+EOF
+    cat > "${d}/prompts/b.md" <<'EOF'
+STUB WRITE_BLOCK f.txt EOF_B
+line-1
+beta-replacement-line
+line-3
+EOF_B
+EOF
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --write-marker '${marker}' --exit 0"
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 1 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 3 expected exit 1, got ${rc}" >&2
+        return 1
+    fi
+
+    verify_conflict_abort_invariants "${d}/run.stdout" "${repo}" "${base_oid}" "${marker}" "exact_uu_f"
+}
+
+# ------------------------------------------------------------------
+# Row 4: Remaining conflict types run separately: AA, UD, DU, binary NUL (UU), file vs directory (fd~)
+# ------------------------------------------------------------------
+row_04_remaining_conflict_types_abort_cleanly() {
+    local root="${WORK_TMP}/r04"
+    rm -rf "${root}"
+    mkdir -p "${root}"
+
+    # 4.1 add/add (AA)
+    {
+        local d="${root}/aa"
+        mkdir -p "${d}/prompts" "${d}/traces"
+        init_temp_git_repo "${d}/repo" 1
+        local base_oid
+        base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+        init_temp_project "${d}/Proj.relayproj"
+        printf 'STUB WRITE added.txt from-lane-a\n' > "${d}/prompts/a.md"
+        printf 'STUB WRITE added.txt from-lane-b\n' > "${d}/prompts/b.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --write-marker '${d}/v.marker' --exit 0"
+}
+EOF
+        local rc=0
+        invoke_run_checked "${d}/repo" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+            "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+        [[ "${rc}" -eq 1 ]] || { echo "Row 4 (AA) expected exit 1, got ${rc}" >&2; return 1; }
+        verify_conflict_abort_invariants "${d}/run.stdout" "${d}/repo" "${base_oid}" "${d}/v.marker" "AA" "added.txt"
+    }
+
+    # 4.2 a modifies, b deletes (UD)
+    {
+        local d="${root}/ud"
+        mkdir -p "${d}/prompts" "${d}/traces"
+        init_temp_git_repo "${d}/repo" 1
+        printf 'original\n' > "${d}/repo/moddel.txt"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" add moddel.txt
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" -c commit.gpgsign=false commit -q -m "Add moddel.txt"
+        local base_oid
+        base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+        init_temp_project "${d}/Proj.relayproj"
+        printf 'STUB WRITE moddel.txt modified-by-a\n' > "${d}/prompts/a.md"
+        printf 'STUB DELETE moddel.txt\n' > "${d}/prompts/b.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --write-marker '${d}/v.marker' --exit 0"
+}
+EOF
+        local rc=0
+        invoke_run_checked "${d}/repo" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+            "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+        [[ "${rc}" -eq 1 ]] || { echo "Row 4 (UD) expected exit 1, got ${rc}" >&2; return 1; }
+        verify_conflict_abort_invariants "${d}/run.stdout" "${d}/repo" "${base_oid}" "${d}/v.marker" "UD" "moddel.txt"
+    }
+
+    # 4.3 a deletes, b modifies (DU)
+    {
+        local d="${root}/du"
+        mkdir -p "${d}/prompts" "${d}/traces"
+        init_temp_git_repo "${d}/repo" 1
+        printf 'original\n' > "${d}/repo/delmod.txt"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" add delmod.txt
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" -c commit.gpgsign=false commit -q -m "Add delmod.txt"
+        local base_oid
+        base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+        init_temp_project "${d}/Proj.relayproj"
+        printf 'STUB DELETE delmod.txt\n' > "${d}/prompts/a.md"
+        printf 'STUB WRITE delmod.txt modified-by-b\n' > "${d}/prompts/b.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "agy",    "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --write-marker '${d}/v.marker' --exit 0"
+}
+EOF
+        local rc=0
+        invoke_run_checked "${d}/repo" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+            "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+        [[ "${rc}" -eq 1 ]] || { echo "Row 4 (DU) expected exit 1, got ${rc}" >&2; return 1; }
+        verify_conflict_abort_invariants "${d}/run.stdout" "${d}/repo" "${base_oid}" "${d}/v.marker" "DU" "delmod.txt"
+    }
+
+    # 4.4 Binary NUL conflict (UU; worktree file matches lane a byte-for-byte)
+    {
+        local d="${root}/bin"
+        mkdir -p "${d}/prompts" "${d}/traces"
+        init_temp_git_repo "${d}/repo" 1
+        /usr/bin/python3 -c 'import sys; open(sys.argv[1], "wb").write(bytes.fromhex("000102000304"))' "${d}/repo/blob.bin"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" add blob.bin
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" -c commit.gpgsign=false commit -q -m "Add binary blob.bin"
+        local base_oid
+        base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+        init_temp_project "${d}/Proj.relayproj"
+        printf 'STUB WRITE_HEX blob.bin 00aa1100bb227f00\n' > "${d}/prompts/a.md"
+        printf 'STUB WRITE_HEX blob.bin 00cc3300dd44fe00\n' > "${d}/prompts/b.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --write-marker '${d}/v.marker' --exit 0"
+}
+EOF
+        local rc=0
+        invoke_run_checked "${d}/repo" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+            "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+        [[ "${rc}" -eq 1 ]] || { echo "Row 4 (binary) expected exit 1, got ${rc}" >&2; return 1; }
+        verify_conflict_abort_invariants "${d}/run.stdout" "${d}/repo" "${base_oid}" "${d}/v.marker" "UU" "blob.bin"
+    }
+
+    # 4.5 File vs directory (a deletes fd and creates fd/inner; b modifies fd -> conflict path starts with fd~, none left after abort)
+    {
+        local d="${root}/fd"
+        mkdir -p "${d}/prompts" "${d}/traces"
+        init_temp_git_repo "${d}/repo" 1
+        printf 'initial-fd-file\n' > "${d}/repo/fd"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" add fd
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" -c commit.gpgsign=false commit -q -m "Add file fd"
+        local base_oid
+        base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+        init_temp_project "${d}/Proj.relayproj"
+        cat > "${d}/prompts/a.md" <<'EOF'
+STUB DELETE fd
+STUB WRITE fd/inner inside-dir-from-a
+EOF
+        printf 'STUB WRITE fd modified-file-from-b\n' > "${d}/prompts/b.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --write-marker '${d}/v.marker' --exit 0"
+}
+EOF
+        local rc=0
+        invoke_run_checked "${d}/repo" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+            "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+        [[ "${rc}" -eq 1 ]] || { echo "Row 4 (fd~) expected exit 1, got ${rc}" >&2; return 1; }
+        verify_conflict_abort_invariants "${d}/run.stdout" "${d}/repo" "${base_oid}" "${d}/v.marker" "fd_tilde"
+    }
+}
+
+# ------------------------------------------------------------------
+# Row 5: a & b conflict, independent lane c last in plan -> a merged, b conflict, c not-attempted
+# ------------------------------------------------------------------
+row_05_conflict_leaves_subsequent_lane_not_attempted() {
+    local d="${WORK_TMP}/r05"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    printf 'shared-baseline\n' > "${repo}/shared.txt"
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" add shared.txt
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" -c commit.gpgsign=false commit -q -m "Add shared.txt"
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE shared.txt from-a\n' > "${d}/prompts/a.md"
+    printf 'STUB WRITE shared.txt from-b\n' > "${d}/prompts/b.md"
+    printf 'STUB WRITE src/c.txt independent-c\n' > "${d}/prompts/c.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []},
+    {"id": "c", "agent": "vibe",   "prompt": "prompts/c.md", "after": []}
+  ]
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 1 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 5 expected exit 1, got ${rc}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" "${repo}" "${base_oid}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, base_oid, empty_home = sys.argv[1:5]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+lanes = {l["laneID"]: l for l in data["lanes"]}
+for lid in ("a", "b", "c"):
+    assert lanes[lid]["status"] == "succeeded" and lanes[lid]["commitOID"], lanes[lid]
+
+integ = data["integration"]
+assert integ["status"] == "conflict" and integ["ready"] is False, integ
+merges = integ["merges"]
+assert [m["laneID"] for m in merges] == ["a", "b", "c"], merges
+assert merges[0]["status"] == "merged" and merges[0]["mergeCommitOID"], merges[0]
+assert merges[1]["status"] == "conflict" and merges[1]["mergeCommitOID"] is None, merges[1]
+assert merges[2]["status"] == "not-attempted" and merges[2]["mergeCommitOID"] is None, merges[2]
+assert merges[2]["laneCommitOID"] == lanes["c"]["commitOID"], merges[2]
+
+env = dict(os.environ)
+env["HOME"] = empty_home
+env["GIT_CONFIG_NOSYSTEM"] = "1"
+env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+
+def git(*args):
+    return subprocess.run(["/usr/bin/git", "-C", repo_dir, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, check=True).stdout.decode("utf-8")
+
+fp = [x for x in git("rev-list", "--first-parent", "--reverse", f"{base_oid}..relay/{run_id}/integration").splitlines() if x]
+assert len(fp) == 1 and fp[0] == merges[0]["mergeCommitOID"], fp
+c_ref_oid = git("rev-parse", f"relay/{run_id}/c").strip()
+assert c_ref_oid == lanes["c"]["commitOID"], (c_ref_oid, lanes["c"]["commitOID"])
+assert git("diff", "--name-only", f"{base_oid}..relay/{run_id}/c").strip() == "src/c.txt"
+PY
+}
+
 run_quick_mode() {
     echo "================================================================"
     echo "RelayIDE M2 Acceptance Quick Check (--quick, Row 1)"
@@ -843,10 +1353,10 @@ run_full_suite() {
     fi
 
     run_row "1" "Two independent lanes a & b merge with --no-ff, configured identity, exact message, clean integration worktree, and unchanged lane OIDs" row_01_two_independent_lanes_no_verify
-    record_skip "2"  "40-line same-file non-overlapping merge vs hand-computed & git merge-file -p"
-    record_skip "3"  "Same-line UU conflict aborts cleanly and skips verify"
-    record_skip "4"  "Remaining conflict types (AA, UD, DU, binary NUL, file/directory fd~) abort cleanly"
-    record_skip "5"  "Conflict stops merge pipeline leaving trailing lane not-attempted"
+    run_row "2" "40-line file modified at line 5 (a) and line 30 (b) matches hand-computed bytes and git merge-file -p" row_02_same_file_distant_lines_matches_git_merge_file
+    run_row "3" "Same-line conflict on f.txt records UU, aborts cleanly without MERGE_HEAD/markers, skips verify, and exits 1" row_03_same_line_conflict_aborts_cleanly_and_skips_verify
+    run_row "4" "Remaining conflict types (AA, UD, DU, binary NUL, file/directory fd~) record expected codes and abort cleanly" row_04_remaining_conflict_types_abort_cleanly
+    run_row "5" "Conflict in b leaves trailing independent lane c as not-attempted with its branch & commit OID intact" row_05_conflict_leaves_subsequent_lane_not_attempted
     record_skip "6"  "Topological + plan-order merge sequence [b(after a), c, a] -> c, a, b"
     record_skip "7"  "no-changes lane skipped in merge and all-no-changes -> nothing-to-merge"
     record_skip "8"  "Agent GIT_COMMIT preserved before RelayIDE lane commit and merged cleanly"
