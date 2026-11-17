@@ -1602,6 +1602,10 @@ struct PTYAndTerminalMultiplexerTests {
         sleepPty.terminate(signal: SIGTERM)
         #expect(Darwin.kill(sleepLeaderPID, 0) != 0)
         if let sleepChildPID {
+            let reapDeadline = ContinuousClock.now + .seconds(5)
+            while Darwin.kill(sleepChildPID, 0) == 0 && ContinuousClock.now < reapDeadline {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
             #expect(Darwin.kill(sleepChildPID, 0) != 0)
         }
 
