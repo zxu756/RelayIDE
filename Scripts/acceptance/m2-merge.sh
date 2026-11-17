@@ -515,7 +515,7 @@ assert_base_untouched() {
     local after_prefix="${snap_prefix}.after"
     snapshot_repo_state "${repo_dir}" "${base_ref}" "${after_prefix}"
 
-    /usr/bin/python3 - "${snap_prefix}" "${after_prefix}" "${base_ref}" "${run_id}" <<'PY'
+    if ! /usr/bin/python3 - "${snap_prefix}" "${after_prefix}" "${base_ref}" "${run_id}" <<'PY'
 import sys
 
 before_p, after_p, base_ref, run_id = sys.argv[1:5]
@@ -536,7 +536,7 @@ if b_reflog != a_reflog:
     sys.stderr.write(f"assert_base_untouched FAILED: reflog/tag check for '{base_ref}' changed: before={b_reflog} after={a_reflog}\n")
     sys.exit(1)
 
-allowed_prefix = f"refs/heads/relay/{run_id}/" if run_id else None
+allowed_prefixes = [f"refs/heads/relay/{rid}/" for rid in run_id.split(",") if rid]
 
 def filter_refs(lines):
     out = []
@@ -544,7 +544,7 @@ def filter_refs(lines):
         if not line:
             continue
         refname = line.split(" ", 1)[0]
-        if allowed_prefix and refname.startswith(allowed_prefix):
+        if any(refname.startswith(pref) for pref in allowed_prefixes):
             continue
         out.append(line)
     return out
@@ -555,7 +555,7 @@ b_refs = filter_refs(b_refs_raw)
 a_refs = filter_refs(a_refs_raw)
 if b_refs != a_refs:
     sys.stderr.write(
-        f"assert_base_untouched FAILED: refs outside {allowed_prefix or '<none>'} changed:\n"
+        f"assert_base_untouched FAILED: refs outside {allowed_prefixes or '<none>'} changed:\n"
         f"  before: {b_refs}\n"
         f"  after:  {a_refs}\n"
     )
@@ -577,6 +577,15 @@ if b_head != a_head:
     sys.stderr.write(f"assert_base_untouched FAILED: symbolic-ref HEAD changed: before={b_head} after={a_head}\n")
     sys.exit(1)
 PY
+    then
+        if [[ -n "${WORK_TMP:-}" && -d "${WORK_TMP}" ]]; then
+            printf 'FAIL\t%s\t%s\t%s\n' "${repo_dir}" "${base_ref}" "${run_id}" >> "${WORK_TMP}/assert-base-untouched.log"
+        fi
+        return 1
+    fi
+    if [[ -n "${WORK_TMP:-}" && -d "${WORK_TMP}" ]]; then
+        printf 'PASS\t%s\t%s\t%s\n' "${repo_dir}" "${base_ref}" "${run_id}" >> "${WORK_TMP}/assert-base-untouched.log"
+    fi
 }
 
 # Helper that snapshots repo state before `run`, invokes product, extracts `runID` (if JSON stdout produced),
@@ -1670,6 +1679,465 @@ PY
     done
 }
 
+# Shared helper used by Row 10 and Row 29 (for main, un-checked-out branch dev, and tag v0).
+run_row10_verify_probe_scenario() {
+    local d="$1"
+    local repo="$2"
+    local base_ref="$3"
+    local expected_base_oid="$4"
+
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    local probe_json="${d}/probe.json"
+    local cat_out="${d}/cat-stdin.bin"
+    mkdir -p "${d}/prompts" "${traces}"
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/a.txt row10-alpha\n' > "${d}/prompts/a.md"
+    printf 'STUB WRITE src/b.txt row10-beta\n' > "${d}/prompts/b.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "${base_ref}",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --probe-file '${probe_json}' --git-log-1 --cat-stdin --cat-stdin-to '${cat_out}' --exit 0",
+  "verify_timeout": 20
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "${base_ref}" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 10 scenario (${base_ref}) expected exit 0, got ${rc}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" "${proj}" "${probe_json}" "${cat_out}" "${expected_base_oid}" "${SAFE_PATH}" "${DECOY_DIR}" <<'PY'
+import json, os, sys
+
+stdout_p, proj_dir, probe_p, cat_p, expected_base_oid, expected_path, decoy_dir = sys.argv[1:8]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+assert data["status"] == "succeeded", data
+
+integ = data["integration"]
+assert integ is not None, "integration is null"
+assert integ["status"] == "verified", integ
+assert integ["ready"] is True, integ
+assert integ["reason"] is None, integ
+assert integ["baseCommitOID"] == expected_base_oid, (integ["baseCommitOID"], expected_base_oid)
+
+expected_wt = os.path.realpath(os.path.join(proj_dir, "runs", run_id, "worktrees", "integration"))
+assert os.path.isdir(expected_wt), expected_wt
+assert os.path.realpath(integ["worktreePath"]) == expected_wt, (integ["worktreePath"], expected_wt)
+
+assert os.path.isfile(probe_p), f"missing probe json {probe_p}"
+probe = json.load(open(probe_p, encoding="utf-8"))
+assert os.path.realpath(probe["pwdP"]) == expected_wt and probe["pwdP"] == expected_wt, (probe["pwdP"], expected_wt)
+assert probe["gitHead"] == integ["headCommitOID"], (probe["gitHead"], integ["headCommitOID"])
+assert probe["gitStatusPorcelain"] == "", probe
+assert probe["path"] == expected_path, f"PATH mismatch:\ngot:      {probe['path']!r}\nexpected: {expected_path!r}"
+assert probe["path"].split(":")[0] == decoy_dir, (probe["path"], decoy_dir)
+assert probe["stdinIsTTY"] is False and probe["testT0ExitCode"] != 0, probe
+
+assert os.path.isfile(cat_p) and os.path.getsize(cat_p) == 0, f"cat stdin did not immediately get EOF: size={os.path.getsize(cat_p) if os.path.exists(cat_p) else 'missing'}"
+
+ver = integ["verify"]
+assert ver is not None, integ
+assert ver["status"] == "passed", ver
+assert ver["exitCode"] == 0, ver
+assert ver["signal"] is None, ver
+assert ver["timeoutSec"] == 20, ver
+assert ver["logTruncated"] is False, ver
+assert ver["modifiedTrackedFiles"] == [], ver
+
+expected_log = os.path.realpath(os.path.join(proj_dir, "runs", run_id, "verify.pty"))
+assert ver["logPath"] and os.path.realpath(ver["logPath"]) == expected_log, (ver["logPath"], expected_log)
+assert os.path.isfile(expected_log) and os.path.getsize(expected_log) > 0, expected_log
+pty_text = open(expected_log, "rb").read().decode("utf-8", errors="replace")
+assert integ["headCommitOID"] in pty_text, f"git log -1 output missing headCommitOID in verify.pty: {pty_text!r}"
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 10: verify passes -> verified, ready=true, exit 0, exact worktree/HEAD/clean status/PATH/non-TTY stdin/cat EOF/verify.pty
+# ------------------------------------------------------------------
+row_10_verify_passes_probes_environment_and_marks_ready() {
+    local d="${WORK_TMP}/r10"
+    rm -rf "${d}"
+    mkdir -p "${d}"
+    init_temp_git_repo "${d}/repo" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+    run_row10_verify_probe_scenario "${d}" "${d}/repo" "main" "${base_oid}"
+}
+
+# ------------------------------------------------------------------
+# Row 11: verify exits 3 -> verify failed (exitCode 3), verify-failed, ready=false, merges preserved, run exits 1
+# ------------------------------------------------------------------
+row_11_verify_exits_3_preserves_merges_and_exits_1() {
+    local d="${WORK_TMP}/r11"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/a.txt row11-a\n' > "${d}/prompts/a.md"
+    printf 'STUB WRITE src/b.txt row11-b\n' > "${d}/prompts/b.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --stderr-line 'verify-failed-with-3' --exit 3"
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 1 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 11 expected exit 1, got ${rc}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" "${repo}" "${base_oid}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, base_oid, empty_home = sys.argv[1:5]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+lanes = {l["laneID"]: l for l in data["lanes"]}
+
+integ = data["integration"]
+assert integ["status"] == "verify-failed", integ
+assert integ["ready"] is False, integ
+
+ver = integ["verify"]
+assert ver is not None, integ
+assert ver["status"] == "failed", ver
+assert ver["exitCode"] == 3, ver
+assert ver["signal"] is None, ver
+
+env = dict(os.environ, HOME=empty_home, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+def git(*args, cwd=repo_dir):
+    return subprocess.run(["/usr/bin/git", "-C", cwd, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, check=True).stdout.decode("utf-8")
+
+int_branch = f"relay/{run_id}/integration"
+fp = [x for x in git("rev-list", "--first-parent", "--reverse", f"{base_oid}..{int_branch}").splitlines() if x]
+assert len(fp) == 2 and fp[-1] == integ["headCommitOID"], (fp, integ["headCommitOID"])
+assert git("rev-list", "--parents", "-n", "1", fp[0]).strip().split() == [fp[0], base_oid, lanes["a"]["commitOID"]]
+assert git("rev-list", "--parents", "-n", "1", fp[1]).strip().split() == [fp[1], fp[0], lanes["b"]["commitOID"]]
+diff_files = sorted(x for x in git("diff", "--name-only", base_oid, int_branch).splitlines() if x)
+assert diff_files == ["src/a.txt", "src/b.txt"], diff_files
+assert git("rev-parse", "HEAD", cwd=integ["worktreePath"]).strip() == integ["headCommitOID"]
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 12: verify writes 307200 'x' bytes to stdout + stderr marker + exit 1 (verify_timeout=60)
+#         -> failed (exitCode 1, NOT timeout), duration < 30s, verify.pty has 307200 'x' & marker, run exits 1
+# ------------------------------------------------------------------
+row_12_verify_300kb_stdout_and_stderr_marker_exits_1_without_hanging() {
+    local d="${WORK_TMP}/r12"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/a.txt row12-a\n' > "${d}/prompts/a.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --stdout-bytes 307200 --stderr-line 'ROW12_STDERR_MARKER_9F2A' --exit 1",
+  "verify_timeout": 60
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 1 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 12 expected exit 1, got ${rc}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+from datetime import datetime
+import json, os, sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+integ = data["integration"]
+ver = integ["verify"]
+assert ver is not None, integ
+assert ver["status"] == "failed", f"expected verify.status='failed' (not timeout), got {ver}"
+assert ver["exitCode"] == 1, ver
+assert ver["signal"] is None, ver
+assert integ["status"] == "verify-failed" and integ["ready"] is False, integ
+
+def parse_iso(ts):
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+elapsed = (parse_iso(ver["finishedAt"]) - parse_iso(ver["startedAt"])).total_seconds()
+assert 0.0 <= elapsed < 30.0, f"expected verify duration < 30s, got {elapsed:.3f}s"
+
+log_path = ver["logPath"]
+assert log_path and os.path.isfile(log_path), ver
+raw = open(log_path, "rb").read()
+x_count = raw.count(b"x")
+assert x_count == 307200, f"expected 307200 'x' bytes in verify.pty, got {x_count} (total={len(raw)})"
+assert b"ROW12_STDERR_MARKER_9F2A" in raw, "stderr marker missing from verify.pty"
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 13: verify emits 20 MiB (20971520 bytes) + exit 0 -> verify.pty exactly 16777216 bytes, logTruncated=true, exit 0
+# ------------------------------------------------------------------
+row_13_verify_20mib_output_truncates_at_16mib_and_passes() {
+    local d="${WORK_TMP}/r13"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/a.txt row13-a\n' > "${d}/prompts/a.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --stdout-bytes 20971520 --exit 0"
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 13 expected exit 0, got ${rc}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+import json, os, sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+integ = data["integration"]
+assert integ["status"] == "verified" and integ["ready"] is True, integ
+ver = integ["verify"]
+assert ver is not None, integ
+assert ver["status"] == "passed" and ver["exitCode"] == 0 and ver["signal"] is None, ver
+assert ver["logTruncated"] is True, ver
+assert ver["logBytes"] == 16777216, ver
+assert ver["logPath"] and os.path.isfile(ver["logPath"]), ver
+disk_size = os.path.getsize(ver["logPath"])
+assert disk_size == 16777216, f"expected verify.pty disk size 16777216, got {disk_size}"
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 14: verify spawns setpgrp + INT/TERM/HUP-ignoring child and sleeps; verify_timeout=2
+#         -> verify timeout (exitCode null), verify-timeout, run exits 1, 0 processes within 30s
+# ------------------------------------------------------------------
+row_14_verify_timeout_kills_stubborn_setpgrp_descendants() {
+    local d="${WORK_TMP}/r14"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    local stubborn_pf="${d}/stubborn.pid"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/a.txt row14-a\n' > "${d}/prompts/a.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --stubborn-pid-file '${stubborn_pf}' --spawn-stubborn 120 --sleep 120",
+  "verify_timeout": 2
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 1 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 14 expected exit 1, got ${rc}" >&2
+        return 1
+    fi
+
+    [[ -s "${stubborn_pf}" ]] || { echo "Row 14 stubborn.pid was not written" >&2; return 1; }
+    local stubborn_pid
+    stubborn_pid="$(tr -d '[:space:]' < "${stubborn_pf}")"
+    [[ "${stubborn_pid}" =~ ^[0-9]+$ && "${stubborn_pid}" -gt 0 ]] || { echo "Row 14 invalid stubborn PID '${stubborn_pid}'" >&2; return 1; }
+
+    poll_until_no_procs "${WORK_TMP}" 30
+    if kill -0 "${stubborn_pid}" 2>/dev/null; then
+        echo "Row 14 stubborn child PID ${stubborn_pid} is still alive" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+import json, sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+integ = data["integration"]
+assert integ["status"] == "verify-timeout" and integ["ready"] is False, integ
+ver = integ["verify"]
+assert ver is not None, integ
+assert ver["status"] == "timeout", ver
+assert ver["exitCode"] is None, ver
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 15: verify executes `kill -9 $$` -> verify failed, signal=9, exitCode=null (neither 9 nor 0), run exits 1
+# ------------------------------------------------------------------
+row_15_verify_killed_by_sigkill_records_signal_9_and_null_exit_code() {
+    local d="${WORK_TMP}/r15"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/a.txt row15-a\n' > "${d}/prompts/a.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []}
+  ],
+  "verify": "kill -9 \$\$"
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 1 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 15 expected exit 1, got ${rc}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+import json, sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+integ = data["integration"]
+assert integ["status"] == "verify-failed" and integ["ready"] is False, integ
+ver = integ["verify"]
+assert ver is not None, integ
+assert ver["status"] == "failed", ver
+assert ver["signal"] == 9, ver
+assert ver["exitCode"] is None and ver["exitCode"] != 9 and ver["exitCode"] != 0, ver
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 16: verify appends a line to tracked src/a.txt and exits 0
+#         -> verify failed, reason explains tracked modification, modifiedTrackedFiles == ["src/a.txt"], ready=false, run exits 1
+# ------------------------------------------------------------------
+row_16_verify_modifies_tracked_file_fails_despite_exit_0() {
+    local d="${WORK_TMP}/r16"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/a.txt row16-a\n' > "${d}/prompts/a.md"
+    printf 'STUB WRITE src/b.txt row16-b\n' > "${d}/prompts/b.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --modify-tracked src/a.txt --exit 0"
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 1 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 16 expected exit 1, got ${rc}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+import json, sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+integ = data["integration"]
+assert integ["status"] == "verify-failed" and integ["ready"] is False, integ
+reason = integ.get("reason") or ""
+assert "tracked" in reason.lower() and "src/a.txt" in reason, f"unexpected reason: {reason!r}"
+
+ver = integ["verify"]
+assert ver is not None, integ
+assert ver["status"] == "failed", ver
+assert ver["modifiedTrackedFiles"] == ["src/a.txt"], ver
+PY
+}
+
 # ------------------------------------------------------------------
 # Row 22: Merge-phase 125: while lanes wait on barrier, place regular file at worktrees/integration -> 125, empty stdout, status=error
 # ------------------------------------------------------------------
@@ -2069,13 +2537,13 @@ run_full_suite() {
     run_row "7" "No-change lane records no-changes (null mergeCommitOID); all-no-change run records nothing-to-merge without branch/worktree/verify" row_07_no_changes_lane_and_nothing_to_merge
     run_row "8" "Stub GIT_COMMIT preserved as parent of lane commitOID and both files land on integration branch" row_08_stub_git_commit_preserved_under_relay_commit
     run_row "9" "Non-succeeded lane (exit 3 or STATUS: partial) marks integration skipped naming lane & status without branch/worktree/verify" row_09_failed_or_partial_lane_skips_integration
-    record_skip "10" "verify passes: probes pwd -P, HEAD, git status, PATH, test -t 0, git log -1, cat"
-    record_skip "11" "verify exits 3 -> verify-failed, ready=false, merges kept, run exits 1"
-    record_skip "12" "verify emits 307200 stdout bytes + stderr marker + exit 1 -> failed (not timeout)"
-    record_skip "13" "verify emits 20 MiB + exit 0 -> verify.pty capped at 16777216 bytes, logTruncated=true"
-    record_skip "14" "verify spawns setpgrp + INT/TERM/HUP-ignoring child with timeout 2s -> 0 leftover procs"
-    record_skip "15" "verify kill -9 self -> signal=9, exitCode=null, run exits 1"
-    record_skip "16" "verify modifies tracked file + exit 0 -> failed, modifiedTrackedFiles=['src/a.txt']"
+    run_row "10" "verify passes: probes pwd -P, HEAD, clean git status, verbatim PATH, non-TTY stdin, git log -1, and cat EOF -> verified, ready=true" row_10_verify_passes_probes_environment_and_marks_ready
+    run_row "11" "verify exits 3 -> verify failed (exitCode 3), verify-failed, ready=false, merges preserved, run exits 1" row_11_verify_exits_3_preserves_merges_and_exits_1
+    run_row "12" "verify writes 307200 stdout bytes + stderr marker + exit 1 (timeout 60s) -> failed (exitCode 1, not timeout) in <30s with full transcript" row_12_verify_300kb_stdout_and_stderr_marker_exits_1_without_hanging
+    run_row "13" "verify writes 20 MiB + exit 0 -> passed, verify.pty capped at 16777216 bytes, logTruncated=true" row_13_verify_20mib_output_truncates_at_16mib_and_passes
+    run_row "14" "verify spawns setpgrp + INT/TERM/HUP-ignoring child with timeout 2s -> timeout (exitCode null), 0 leftover procs within 30s" row_14_verify_timeout_kills_stubborn_setpgrp_descendants
+    run_row "15" "verify executes kill -9 self -> verify failed with signal=9 and exitCode=null, run exits 1" row_15_verify_killed_by_sigkill_records_signal_9_and_null_exit_code
+    run_row "16" "verify modifies tracked src/a.txt + exit 0 -> verify failed naming tracked file, modifiedTrackedFiles=['src/a.txt'], ready=false, exit 1" row_16_verify_modifies_tracked_file_fails_despite_exit_0
     record_skip "17" "live status --run while verify blocked on barrier -> verifying + alive PID"
     record_skip "18" "SIGINT / SIGTERM during verify -> 130 / 143, cancelled, merges kept, 0 procs"
     record_skip "19" "SIGINT during custom merge driver -> 130, cancelled, clean integration worktree"
