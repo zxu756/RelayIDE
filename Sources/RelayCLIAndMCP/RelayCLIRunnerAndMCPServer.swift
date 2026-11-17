@@ -291,8 +291,8 @@ public struct RelayCLIRunner: Sendable {
 
             case "version", "--version":
                 let msg = lang.isChinese
-                    ? "RelayIDE 1.3.0 (macOS arm64 · M2：可用 run 经 agent-relay 在各自 git worktree 中运行智能体，全部通道成功后按固定顺序 git merge --no-ff 合入集成分支并在伪终端执行 verify，需先安装 agent-relay；不修改 base，尚不支持多前置通道、整单预算及桌面界面实时接入)"
-                    : "RelayIDE 1.3.0 (macOS arm64 · M2: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first], merges succeeded lanes onto an integration branch with git merge --no-ff, and runs verify in a PTY; never modifies base, and does not support multi-predecessor lanes, whole-job budgets, or live desktop UI yet)"
+                    ? "RelayIDE 1.4.0 (macOS arm64 · M2：可用 run 经 agent-relay 在各自 git worktree 中运行智能体，全部通道成功后按固定顺序 git merge --no-ff 合入集成分支并在伪终端执行 verify，需先安装 agent-relay；不修改 base，尚不支持多前置通道、整单预算及桌面界面实时接入)"
+                    : "RelayIDE 1.4.0 (macOS arm64 · M2: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first], merges succeeded lanes onto an integration branch with git merge --no-ff, and runs verify in a PTY; never modifies base, and does not support multi-predecessor lanes, whole-job budgets, or live desktop UI yet)"
                 return RelayCLIExecutionResult(stdout: msg, exitCode: 0)
 
             case "init":
@@ -815,7 +815,7 @@ public struct RelayCLIRunner: Sendable {
     public static func helpBanner(language: RelayLanguage) -> String {
         if language.isChinese {
             return """
-            RelayIDE 1.3.0 · 基于 agent-relay 的多智能体工作树运行器、合并流水线与工作区工具（M2：可用 run 经 agent-relay 在各自 git worktree 中运行智能体、按固定顺序 git merge --no-ff 合入集成分支并在伪终端执行 verify，需先安装 agent-relay；不修改 base，尚不支持多前置通道、整单预算及桌面界面实时接入）
+            RelayIDE 1.4.0 · 基于 agent-relay 的多智能体工作树运行器、合并流水线与工作区工具（M2：可用 run 经 agent-relay 在各自 git worktree 中运行智能体、按固定顺序 git merge --no-ff 合入集成分支并在伪终端执行 verify，需先安装 agent-relay；不修改 base，尚不支持多前置通道、整单预算及桌面界面实时接入）
             命令（可执行文件名：RelayIDE；Homebrew Cask 软链名：relayide）：
               init [--project <path.relayproj>] [--seed-demo]       新建 .relayproj SQLite WAL 工作区（--seed-demo 会写入带 [演示数据] 标记的合成样本）
               run <plan.json> --project <path.relayproj> [--relay-sh <path>]
@@ -845,7 +845,7 @@ public struct RelayCLIRunner: Sendable {
             """
         }
         return """
-        RelayIDE 1.3.0 · Multi-Agent Worktree Runner, Merge Pipeline & Workspace Tool over agent-relay (M2: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first], merges succeeded lanes onto an integration branch with git merge --no-ff, and runs verify in a PTY; never modifies base, and does not support multi-predecessor lanes, whole-job budgets, or live desktop UI yet)
+        RelayIDE 1.4.0 · Multi-Agent Worktree Runner, Merge Pipeline & Workspace Tool over agent-relay (M2: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first], merges succeeded lanes onto an integration branch with git merge --no-ff, and runs verify in a PTY; never modifies base, and does not support multi-predecessor lanes, whole-job budgets, or live desktop UI yet)
         Commands (built executable: RelayIDE; Homebrew Cask symlink: relayide):
           init [--project <path.relayproj>] [--seed-demo]       Initialize .relayproj SQLite WAL workspace (--seed-demo writes [DEMO] synthetic fixtures)
           run <plan.json> --project <path.relayproj> [--relay-sh <path>]
@@ -912,7 +912,7 @@ public struct RelayMCPServer: Sendable {
         case "initialize":
             var serverInfo: [String: Any] = [
                 "name": "relayide-mcp",
-                "version": "1.3.0"
+                "version": "1.4.0"
             ]
             if let boundPath = projectBundleURL?.path {
                 serverInfo["projectPath"] = boundPath
