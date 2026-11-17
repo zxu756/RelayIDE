@@ -51,23 +51,33 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(helpOut == RelayCLIRunner.helpBanner)
         #expect(helpOut.contains("run <plan.json> --project"))
         #expect(helpOut.contains("agent-relay"))
+        #expect(helpOut.contains("status [--project <path.relayproj>] [--run <id> | --runs] [--json]"))
+        #expect(helpOut.contains("--json produces identical output"))
+        #expect(helpOut.contains("integration.ready"))
         #expect(!helpOut.contains("does not launch coding agents yet"))
+        #expect(!helpOut.contains("does not merge branches"))
 
         let helpZhOut = try await cli.execute(arguments: ["--help", "--lang", "zh"])
         #expect(helpZhOut.contains("run <plan.json> --project"))
         #expect(helpZhOut.contains("agent-relay"))
+        #expect(helpZhOut.contains("status [--project <path.relayproj>] [--run <id> | --runs] [--json]"))
+        #expect(helpZhOut.contains("写不写 --json 结果相同"))
+        #expect(helpZhOut.contains("integration.ready"))
         #expect(!helpZhOut.contains("尚不会启动任何 coding agent"))
+        #expect(!helpZhOut.contains("还不合并分支"))
 
         let versionOut = try await cli.execute(arguments: ["--version"])
         #expect(versionOut.contains("RelayIDE 1.3.0"))
-        #expect(versionOut.contains("M1"))
+        #expect(versionOut.contains("M2"))
         #expect(versionOut.contains("agent-relay"))
         #expect(!versionOut.contains("does not launch coding agents yet"))
+        #expect(!versionOut.contains("does not merge branches"))
 
         let versionZhOut = try await cli.execute(arguments: ["version", "--lang", "zh"])
-        #expect(versionZhOut.contains("M1"))
+        #expect(versionZhOut.contains("M2"))
         #expect(versionZhOut.contains("agent-relay"))
         #expect(!versionZhOut.contains("尚不会启动任何 coding agent"))
+        #expect(!versionZhOut.contains("还不合并分支"))
 
         await #expect(throws: RelayIDEError.self) {
             _ = try await cli.execute(arguments: ["non-existent-subcommand"])
@@ -5289,5 +5299,57 @@ struct CLIMCPAndWorkbenchShellTests {
             let psOut = try runTool("/bin/ps", ["-axo", "pid=,command="], environment: dbFailFx.baseEnvironment).stdout
             #expect(!psOut.contains("\(dbFailToken)-dbhold"))
         }
+    }
+
+    // MARK: - 42. M2 Stage 7: `status --json` Byte Parity & Committed `docs/demo-relay-dossier.html` Schema v6 (R63, R65)
+
+    @Test("RelayCLIRunner status --json produces byte-identical output to omitting --json across workspace, --runs, and --run modes, and docs/demo-relay-dossier.html carries Schema v6")
+    func cliStatusJsonFlagByteParityAndCommittedDossierSchemaV6() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-m2-s7-status-json")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let promptsDir = fx.rootURL.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "STUB WRITE src/a.txt ok\n".write(to: promptsDir.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        let planURL = fx.rootURL.appendingPathComponent("plan.json")
+        try JSONSerialization.data(
+            withJSONObject: [
+                "repo": fx.repoURL.path,
+                "base": "main",
+                "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []]],
+                "verify": "true"
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        ).write(to: planURL, options: .atomic)
+
+        let runID = "20261117-120000-0701"
+        let cli = RelayCLIRunner(runIDProvider: { runID })
+        let runRes = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+            environment: fx.baseEnvironment
+        )
+        #expect(runRes.exitCode == 0)
+
+        for lang in ["en", "zh"] {
+            let plainStats = try await cli.execute(arguments: ["status", "--project", fx.projectURL.path, "--lang", lang])
+            let jsonStats = try await cli.execute(arguments: ["status", "--project", fx.projectURL.path, "--json", "--lang", lang])
+            #expect(plainStats == jsonStats)
+
+            let plainRuns = try await cli.execute(arguments: ["status", "--project", fx.projectURL.path, "--runs", "--lang", lang])
+            let jsonRuns = try await cli.execute(arguments: ["status", "--project", fx.projectURL.path, "--runs", "--json", "--lang", lang])
+            #expect(plainRuns == jsonRuns)
+
+            let plainRun = try await cli.execute(arguments: ["status", "--project", fx.projectURL.path, "--run", runID, "--lang", lang])
+            let jsonRun = try await cli.execute(arguments: ["status", "--project", fx.projectURL.path, "--run", runID, "--json", "--lang", lang])
+            #expect(plainRun == jsonRun)
+            #expect(jsonRun == runRes.stdout)
+        }
+
+        let dossierURL = Self.repositoryRootURL.appendingPathComponent("docs/demo-relay-dossier.html")
+        let dossierHTML = try String(contentsOf: dossierURL, encoding: .utf8)
+        #expect(dossierHTML.contains("Schema v6"))
+        #expect(dossierHTML.contains("架构 v6"))
+        #expect(!dossierHTML.contains("Schema v5"))
+        #expect(!dossierHTML.contains("架构 v5"))
     }
 }
