@@ -2022,4 +2022,556 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(finalized.runRecord.finishedAt != nil)
         #expect(finalized.runRecord.integration?.status == .merged)
     }
+
+    // MARK: - 25. M2 `RelayVerifyRunner` & Verify Stderr Formatter Direct Unit Tests (§6, §7, §10; R51–R54)
+
+    private struct VerifyTestFixture {
+        let tempRoot: URL
+        let tempToken: String
+        let homeDir: URL
+        let repoDir: URL
+        let projectDir: URL
+        let runID: String
+        let baseOID: String
+        let integrationWorktreePath: String
+        let gitEnv: [String: String]
+        let engine: GitWorktreePlumbingEngine
+    }
+
+    private func makeVerifyIntegrationFixture(prefix: String = "relay-m2-verify") throws -> VerifyTestFixture {
+        let tempRoot = try makeMktempDirectory(prefix: prefix)
+        let tempToken = tempRoot.lastPathComponent
+        let homeDir = tempRoot.appendingPathComponent("home", isDirectory: true)
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        let projectDir = tempRoot.appendingPathComponent("Proj.relayproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let gitEnv = makeIsolatedGitEnvironment(homeDir: homeDir)
+
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "Verify Runner Tester"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "verify@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+
+        let srcDir = repoDir.appendingPathComponent("src", isDirectory: true)
+        try FileManager.default.createDirectory(at: srcDir, withIntermediateDirectories: true)
+        try "initial-a\n".write(to: srcDir.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "src/a.txt"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "base"], cwd: repoDir.path, environment: gitEnv)
+        let baseOID = try engine.runGit(["rev-parse", "HEAD"], cwd: repoDir.path, environment: gitEnv)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let runID = "20261117-060000-vf01"
+        let wt = try engine.createIntegrationWorktree(
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            runID: runID,
+            baseCommitOID: baseOID,
+            environment: gitEnv
+        )
+        return VerifyTestFixture(
+            tempRoot: tempRoot,
+            tempToken: tempToken,
+            homeDir: homeDir,
+            repoDir: repoDir,
+            projectDir: projectDir,
+            runID: runID,
+            baseOID: baseOID,
+            integrationWorktreePath: wt.worktreePath,
+            gitEnv: gitEnv,
+            engine: engine
+        )
+    }
+
+    private static func listProcessesMatchingToken(_ needle: String) throws -> [(pid: Int32, ppid: Int32, command: String)] {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-axo", "pid=,ppid=,command="]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try proc.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        let output = String(decoding: data, as: UTF8.self)
+        var results: [(pid: Int32, ppid: Int32, command: String)] = []
+        for rawLine in output.split(separator: "\n") {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            guard trimmed.contains(needle) else { continue }
+            let parts = trimmed.split(maxSplits: 2, omittingEmptySubsequences: true, whereSeparator: { $0 == " " || $0 == "\t" })
+            guard parts.count == 3,
+                  let pid = Int32(parts[0]),
+                  let ppid = Int32(parts[1]) else { continue }
+            results.append((pid: pid, ppid: ppid, command: String(parts[2])))
+        }
+        return results
+    }
+
+    @Test("RelayVerifyRunner handles 300 KB output + exit 1 without hanging or false timeout, recording failed, exitCode 1, and exact logBytes (§6, Item 6.1, R23)")
+    func verifyRunner300KBOutputAndExit1() async throws {
+        let fx = try makeVerifyIntegrationFixture(prefix: "relay-m2-vf300k")
+        defer { try? FileManager.default.removeItem(at: fx.tempRoot) }
+
+        let cmd = """
+        /usr/bin/python3 -I -c 'import sys; sys.stdout.buffer.write(b"x" * 307200); sys.stdout.buffer.flush(); sys.stderr.write("VERIFY_STDERR_300K_MARKER\\n"); sys.stderr.flush()'
+        exit 1
+        """
+
+        let outcome = try await RelayVerifyRunner.runVerifyWithOutcome(
+            runID: fx.runID,
+            projectBundlePath: fx.projectDir.path,
+            integrationWorktreePath: fx.integrationWorktreePath,
+            command: cmd,
+            timeoutSec: 30,
+            gitEngine: fx.engine,
+            language: .en,
+            environment: fx.gitEnv
+        )
+        let record = outcome.verifyRecord
+        #expect(record.status == .failed)
+        #expect(record.exitCode == 1)
+        #expect(record.signal == nil)
+        #expect(record.logTruncated == false)
+        #expect(outcome.integrationStatus == .verifyFailed)
+        #expect(outcome.ready == false)
+
+        let expectedLogPath = RelayVerifyRunner.defaultVerifyLogPath(
+            projectBundlePath: fx.projectDir.path,
+            runID: fx.runID
+        )
+        #expect(record.logPath == expectedLogPath)
+        let logData = try Data(contentsOf: URL(fileURLWithPath: expectedLogPath))
+        #expect(record.logBytes == logData.count)
+        #expect(record.logBytes >= 307_200)
+        let logText = String(decoding: logData, as: UTF8.self)
+        #expect(logText.contains(String(repeating: "x", count: 1024)))
+        #expect(logText.contains("VERIFY_STDERR_300K_MARKER"))
+    }
+
+    @Test("RelayVerifyRunner escalates INT -> TERM -> KILL on timeout and cancellation, cleaning up stubborn setpgrp child + grandchild with zero leftover processes (§6, Item 6.2, R52, R54)")
+    func verifyRunnerTimeoutWithStubbornDescendantsAndCancellation() async throws {
+        let fx = try makeVerifyIntegrationFixture(prefix: "relay-m2-vftmo")
+        let tempToken = fx.tempToken
+        var trackedChildPID: pid_t = -1
+        var trackedGrandchildPID: pid_t = -1
+        defer {
+            if trackedGrandchildPID > 0 { _ = Darwin.kill(-trackedGrandchildPID, SIGKILL); _ = Darwin.kill(trackedGrandchildPID, SIGKILL) }
+            if trackedChildPID > 0 { _ = Darwin.kill(-trackedChildPID, SIGKILL); _ = Darwin.kill(trackedChildPID, SIGKILL) }
+            if let leftovers = try? Self.listProcessesMatchingToken(tempToken) {
+                for p in leftovers { _ = Darwin.kill(p.pid, SIGKILL) }
+            }
+            try? FileManager.default.removeItem(at: fx.tempRoot)
+        }
+
+        let childPIDURL = fx.tempRoot.appendingPathComponent("stubborn-child.pid")
+        let grandchildPIDURL = fx.tempRoot.appendingPathComponent("stubborn-grandchild.pid")
+        let readyURL = fx.tempRoot.appendingPathComponent("stubborn-ready")
+
+        let stubbornCmd = """
+        /usr/bin/perl -MPOSIX=setpgid -e '
+            my ($cfile, $gcfile, $rfile, $tok) = @ARGV;
+            setpgid(0, 0) or die "setpgid: $!";
+            $SIG{INT} = $SIG{TERM} = $SIG{HUP} = "IGNORE";
+            my $gc = fork();
+            die "fork: $!" unless defined $gc;
+            if ($gc == 0) {
+                $SIG{INT} = $SIG{TERM} = $SIG{HUP} = "IGNORE";
+                open(my $gfh, ">", $gcfile) or die $!;
+                print $gfh "$$\\n";
+                close($gfh);
+                select(undef, undef, undef, 30);
+                exit 0;
+            }
+            for (1..200) { last if -s $gcfile; select(undef, undef, undef, 0.01); }
+            open(my $cfh, ">", $cfile) or die $!;
+            print $cfh "$$\\n";
+            close($cfh);
+            open(my $rfh, ">", $rfile) or die $!;
+            print $rfh "ready\\n";
+            close($rfh);
+            select(undef, undef, undef, 30);
+        ' "\(childPIDURL.path)" "\(grandchildPIDURL.path)" "\(readyURL.path)" "\(tempToken)" </dev/null >/dev/null 2>&1 &
+        while [ ! -s "\(readyURL.path)" ]; do /bin/sleep 0.02; done
+        /usr/bin/perl -e 'select(undef, undef, undef, 30);' "\(tempToken)-verify-leader"
+        """
+
+        let timeoutOutcome = try await RelayVerifyRunner.runVerifyWithOutcome(
+            runID: fx.runID,
+            projectBundlePath: fx.projectDir.path,
+            integrationWorktreePath: fx.integrationWorktreePath,
+            command: stubbornCmd,
+            timeoutSec: 1,
+            sigintGraceSeconds: 0.2,
+            sigtermGraceSeconds: 0.2,
+            gitEngine: fx.engine,
+            language: .en,
+            environment: fx.gitEnv
+        )
+
+        if let rawC = try? String(contentsOf: childPIDURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           let pidC = pid_t(rawC) {
+            trackedChildPID = pidC
+        }
+        if let rawGC = try? String(contentsOf: grandchildPIDURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           let pidGC = pid_t(rawGC) {
+            trackedGrandchildPID = pidGC
+        }
+
+        #expect(trackedChildPID > 0 && trackedGrandchildPID > 0)
+        #expect(timeoutOutcome.verifyRecord.status == .timeout)
+        #expect(timeoutOutcome.verifyRecord.exitCode == nil)
+        #expect(timeoutOutcome.integrationStatus == .verifyTimeout)
+        #expect(timeoutOutcome.ready == false)
+        #expect(timeoutOutcome.survivingPIDs.isEmpty)
+        #expect(Darwin.kill(trackedChildPID, 0) != 0, "Stubborn setpgrp child survived verify timeout escalation")
+        #expect(Darwin.kill(trackedGrandchildPID, 0) != 0, "Stubborn grandchild survived verify timeout escalation")
+        let remainingAfterTimeout = try Self.listProcessesMatchingToken(tempToken)
+        #expect(remainingAfterTimeout.isEmpty)
+
+        // 2. Cancellation via `isCancelled()` closure also runs escalation ladder and records `.cancelled`.
+        let cancelRunID = "20261117-060001-vfcn"
+        let cancelReadyURL = fx.tempRoot.appendingPathComponent("cancel-ready")
+        final class CancelBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = false
+            var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return value }
+            func cancel() { lock.lock(); value = true; lock.unlock() }
+        }
+        let cancelBox = CancelBox()
+        let cancelCmd = """
+        : > "\(cancelReadyURL.path)"
+        /usr/bin/perl -e 'select(undef, undef, undef, 30);' "\(tempToken)-cancel-wait"
+        """
+        let cancelTriggerTask = Task {
+            for _ in 0..<200 {
+                if FileManager.default.fileExists(atPath: cancelReadyURL.path) {
+                    cancelBox.cancel()
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 15_000_000)
+            }
+        }
+        let cancelOutcome = try await RelayVerifyRunner.runVerifyWithOutcome(
+            runID: cancelRunID,
+            projectBundlePath: fx.projectDir.path,
+            integrationWorktreePath: fx.integrationWorktreePath,
+            command: cancelCmd,
+            timeoutSec: 30,
+            sigintGraceSeconds: 0.2,
+            sigtermGraceSeconds: 0.2,
+            gitEngine: fx.engine,
+            language: .zhHans,
+            environment: fx.gitEnv,
+            isCancelled: { cancelBox.isCancelled }
+        )
+        await cancelTriggerTask.value
+        #expect(cancelOutcome.verifyRecord.status == .cancelled)
+        #expect(cancelOutcome.integrationStatus == .cancelled)
+        #expect(cancelOutcome.ready == false)
+        let remainingAfterCancel = try Self.listProcessesMatchingToken(tempToken)
+        #expect(remainingAfterCancel.isEmpty)
+
+        // 3. When both descendant enumeration methods fail, reason reports potentially leftover PIDs instead of claiming clean exit.
+        let enumFailRunID = "20261117-060002-vfef"
+        let enumFailOutcome = try await RelayVerifyRunner.runVerifyWithOutcome(
+            runID: enumFailRunID,
+            projectBundlePath: fx.projectDir.path,
+            integrationWorktreePath: fx.integrationWorktreePath,
+            command: "/usr/bin/perl -e 'select(undef, undef, undef, 30);' \"\(tempToken)-enum-fail\"",
+            timeoutSec: 1,
+            sigintGraceSeconds: 0.2,
+            sigtermGraceSeconds: 0.2,
+            gitEngine: fx.engine,
+            language: .en,
+            environment: fx.gitEnv,
+            descendantEnumerator: { _ in ([], false) }
+        )
+        #expect(enumFailOutcome.enumerationSucceeded == false)
+        if let failPID = enumFailOutcome.verifyRecord.pid {
+            #expect(enumFailOutcome.integrationReason?.contains("\(failPID)") == true)
+        } else {
+            Issue.record("Expected verify PID to be recorded")
+        }
+        let remainingFinal = try Self.listProcessesMatchingToken(tempToken)
+        #expect(remainingFinal.isEmpty)
+    }
+
+    @Test("RelayVerifyRunner decodes signal death (`kill -9 $$`) via POSIXWaitStatus as failed with signal 9 and nil exitCode (§6, Item 6.3, R53)")
+    func verifyRunnerKilledBySignal9() async throws {
+        let fx = try makeVerifyIntegrationFixture(prefix: "relay-m2-vfsig9")
+        defer { try? FileManager.default.removeItem(at: fx.tempRoot) }
+
+        let outcome = try await RelayVerifyRunner.runVerifyWithOutcome(
+            runID: fx.runID,
+            projectBundlePath: fx.projectDir.path,
+            integrationWorktreePath: fx.integrationWorktreePath,
+            command: "kill -9 $$",
+            timeoutSec: 20,
+            gitEngine: fx.engine,
+            language: .en,
+            environment: fx.gitEnv
+        )
+        let record = outcome.verifyRecord
+        #expect(record.status == .failed)
+        #expect(record.signal == 9)
+        #expect(record.exitCode == nil)
+        #expect(outcome.integrationStatus == .verifyFailed)
+        #expect(outcome.ready == false)
+        #expect(outcome.integrationReason?.contains("signal 9") == true)
+    }
+
+    @Test("RelayVerifyRunner throws cliExitCode == 125 when integration worktree directory does not exist instead of running in caller cwd (§6, Item 6.4, R53)")
+    func verifyRunnerMissingWorkingDirectoryThrows125() async throws {
+        let tempRoot = try makeMktempDirectory(prefix: "relay-m2-vfmissing")
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let projectDir = tempRoot.appendingPathComponent("Proj.relayproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let missingWorktree = tempRoot.appendingPathComponent("nonexistent-worktree")
+        let fallbackMarker = tempRoot.appendingPathComponent("must-not-run.marker")
+
+        do {
+            _ = try await RelayVerifyRunner.runVerify(
+                runID: "20261117-060003-vfms",
+                projectBundlePath: projectDir.path,
+                integrationWorktreePath: missingWorktree.path,
+                command: "echo leaked > \"\(fallbackMarker.path)\"",
+                timeoutSec: 10
+            )
+            Issue.record("Expected RelayVerifyRunner.runVerify to throw 125 when working directory is missing")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+        #expect(!FileManager.default.fileExists(atPath: fallbackMarker.path))
+
+        // Regular file at integrationWorktreePath must also fail with 125
+        let regularFileURL = tempRoot.appendingPathComponent("not-a-dir.txt")
+        try "file\n".write(to: regularFileURL, atomically: true, encoding: .utf8)
+        do {
+            _ = try await RelayVerifyRunner.runVerify(
+                runID: "20261117-060004-vffl",
+                projectBundlePath: projectDir.path,
+                integrationWorktreePath: regularFileURL.path,
+                command: "true",
+                timeoutSec: 10
+            )
+            Issue.record("Expected RelayVerifyRunner.runVerify to throw 125 when working directory path is a regular file")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+    }
+
+    @Test("RelayVerifyRunner marks verify failed and lists modifiedTrackedFiles when exit 0 dirtied tracked files (§6, Item 6.5, Row 16)")
+    func verifyRunnerDetectsModifiedTrackedFilesAfterExit0() async throws {
+        let fx = try makeVerifyIntegrationFixture(prefix: "relay-m2-vfdirty")
+        defer { try? FileManager.default.removeItem(at: fx.tempRoot) }
+
+        // Modify tracked `src/a.txt` AND write an untracked `scratch.tmp` (`--untracked-files=no` ignores untracked files).
+        let cmd = """
+        printf 'mutated-by-verify\\n' >> src/a.txt
+        printf 'untracked\\n' > scratch.tmp
+        exit 0
+        """
+        let outcome = try await RelayVerifyRunner.runVerifyWithOutcome(
+            runID: fx.runID,
+            projectBundlePath: fx.projectDir.path,
+            integrationWorktreePath: fx.integrationWorktreePath,
+            command: cmd,
+            timeoutSec: 20,
+            gitEngine: fx.engine,
+            language: .en,
+            environment: fx.gitEnv
+        )
+        let record = outcome.verifyRecord
+        #expect(record.status == .failed)
+        #expect(record.exitCode == 0)
+        #expect(record.signal == nil)
+        #expect(record.modifiedTrackedFiles == ["src/a.txt"])
+        #expect(outcome.integrationStatus == .verifyFailed)
+        #expect(outcome.ready == false)
+        #expect(outcome.integrationReason?.contains("src/a.txt") == true)
+    }
+
+    @Test("RelayVerifyRunner redirects stdin from /dev/null so `cat` finishes immediately with EOF while keeping controlling TTY and git pager suppression (§6, Item 6.6, Row 10)")
+    func verifyRunnerCatStdinImmediatelyReceivesEOF() async throws {
+        let fx = try makeVerifyIntegrationFixture(prefix: "relay-m2-vfcat")
+        defer { try? FileManager.default.removeItem(at: fx.tempRoot) }
+
+        let stdinDumpURL = fx.tempRoot.appendingPathComponent("cat-stdin.bin")
+        let probeURL = fx.tempRoot.appendingPathComponent("tty-probe.txt")
+        let cmd = """
+        if test -t 0; then s0=1; else s0=0; fi
+        if test -t 1; then s1=1; else s1=0; fi
+        /usr/bin/git log -1 >/dev/null
+        /bin/cat > "\(stdinDumpURL.path)"
+        printf '%s|%s' "$s0" "$s1" > "\(probeURL.path)"
+        exit 0
+        """
+
+        let outcome = try await RelayVerifyRunner.runVerifyWithOutcome(
+            runID: fx.runID,
+            projectBundlePath: fx.projectDir.path,
+            integrationWorktreePath: fx.integrationWorktreePath,
+            command: cmd,
+            timeoutSec: 10,
+            gitEngine: fx.engine,
+            language: .en,
+            environment: fx.gitEnv
+        )
+        #expect(outcome.verifyRecord.status == .passed)
+        #expect(outcome.verifyRecord.exitCode == 0)
+        #expect(outcome.verifyRecord.signal == nil)
+        #expect(outcome.verifyRecord.modifiedTrackedFiles.isEmpty)
+        #expect(outcome.integrationStatus == .verified)
+        #expect(outcome.ready == true)
+
+        let catBytes = try Data(contentsOf: stdinDumpURL)
+        #expect(catBytes.isEmpty)
+        let probeText = try String(contentsOf: probeURL, encoding: .utf8)
+        #expect(probeText == "0|1")
+    }
+
+    @Test("RelayVerifyRunner preserves caller PATH verbatim without login-shell reordering, sets PAGER=cat & GIT_PAGER=cat, delivers PID/startedAt via onStarted, and emits bilingual stderr lines (§6, §10, Item 6.7, R51)")
+    func verifyRunnerPreservesCallerPathVerbatimAndInvokesStartCallback() async throws {
+        let fx = try makeVerifyIntegrationFixture(prefix: "relay-m2-vfpath")
+        defer { try? FileManager.default.removeItem(at: fx.tempRoot) }
+
+        let decoyDir = fx.tempRoot.appendingPathComponent("first-decoy-bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: decoyDir, withIntermediateDirectories: true)
+        let expectedPath = "\(decoyDir.path):/usr/bin:/bin"
+
+        var customEnv = fx.gitEnv
+        customEnv["PATH"] = expectedPath
+
+        let pathOutURL = fx.tempRoot.appendingPathComponent("observed-path.txt")
+        let pagerOutURL = fx.tempRoot.appendingPathComponent("observed-pagers.txt")
+        let cwdOutURL = fx.tempRoot.appendingPathComponent("observed-cwd.txt")
+
+        final class CallbackCapture: @unchecked Sendable {
+            var startedPID: Int32?
+            var startedAt: Date?
+            var runningRecord: RelayRunVerifyRecord?
+            var stderrLinesEN: [String] = []
+            var stderrLinesZH: [String] = []
+        }
+        let capture = CallbackCapture()
+
+        let cmd = """
+        printf '%s' "$PATH" > "\(pathOutURL.path)"
+        printf '%s|%s' "$PAGER" "$GIT_PAGER" > "\(pagerOutURL.path)"
+        pwd -P > "\(cwdOutURL.path)"
+        """
+
+        let recordEN = try await RelayVerifyRunner.runVerify(
+            runID: fx.runID,
+            projectBundlePath: fx.projectDir.path,
+            integrationWorktreePath: fx.integrationWorktreePath,
+            command: cmd,
+            timeoutSec: 45,
+            gitEngine: fx.engine,
+            language: .en,
+            environment: customEnv,
+            onStarted: { pid, startedAt, runningRec in
+                capture.startedPID = pid
+                capture.startedAt = startedAt
+                capture.runningRecord = runningRec
+            },
+            onStderrLine: { capture.stderrLinesEN.append($0) }
+        )
+
+        #expect(recordEN.status == .passed)
+        #expect(recordEN.exitCode == 0)
+        #expect(try String(contentsOf: pathOutURL, encoding: .utf8) == expectedPath)
+        #expect(try String(contentsOf: pagerOutURL, encoding: .utf8) == "cat|cat")
+        let expectedRealPtr = Darwin.realpath(fx.integrationWorktreePath, nil)
+        defer { if let p = expectedRealPtr { free(p) } }
+        let realExpectedWT = expectedRealPtr.map { String(cString: $0) } ?? fx.integrationWorktreePath
+        let realObservedWT = try String(contentsOf: cwdOutURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(realObservedWT == realExpectedWT)
+
+        let startedPID = try #require(capture.startedPID)
+        #expect(startedPID > 0)
+        #expect(recordEN.pid == startedPID)
+        #expect(capture.runningRecord?.status == .running)
+        #expect(capture.runningRecord?.pid == startedPID)
+        if let sAt = capture.startedAt, let fAt = recordEN.finishedAt {
+            #expect(fAt >= sAt)
+        } else {
+            Issue.record("Expected startedAt and finishedAt to be populated")
+        }
+
+        // Also run in ZH to verify bilingual verify start & finish stderr lines
+        let runZH = "20261117-060005-vfzh"
+        let wtZH = try fx.engine.createIntegrationWorktree(
+            repositoryPath: fx.repoDir.path,
+            projectBundlePath: fx.projectDir.path,
+            runID: runZH,
+            baseCommitOID: fx.baseOID,
+            environment: customEnv
+        )
+        _ = try await RelayVerifyRunner.runVerify(
+            runID: runZH,
+            projectBundlePath: fx.projectDir.path,
+            integrationWorktreePath: wtZH.worktreePath,
+            command: "true",
+            timeoutSec: 45,
+            gitEngine: fx.engine,
+            language: .zhHans,
+            environment: customEnv,
+            onStderrLine: { capture.stderrLinesZH.append($0) }
+        )
+
+        #expect(capture.stderrLinesEN.count == 2)
+        #expect(capture.stderrLinesZH.count == 2)
+        #expect(capture.stderrLinesEN[0] != capture.stderrLinesZH[0])
+        #expect(capture.stderrLinesEN[1] != capture.stderrLinesZH[1])
+        #expect(capture.stderrLinesEN[0].contains("\(startedPID)") && capture.stderrLinesEN[0].contains("45s"))
+        #expect(capture.stderrLinesEN[1].contains("passed") && capture.stderrLinesEN[1].contains("exit 0") && capture.stderrLinesEN[1].contains("verify.pty"))
+        #expect(capture.stderrLinesZH[0].contains("PID") && capture.stderrLinesZH[0].contains("45s"))
+        #expect(capture.stderrLinesZH[1].contains("通过") && capture.stderrLinesZH[1].contains("退出码 0") && capture.stderrLinesZH[1].contains("verify.pty"))
+        #expect(!capture.stderrLinesZH[0].contains("lane ") && !capture.stderrLinesZH[1].contains("lane "))
+    }
+
+    @Test("RelayVerifyRunner caps verify.pty at 16 MiB (16777216 bytes), continues reading 20 MiB output without blocking, and sets logTruncated == true (§6, Item 6.8, Row 13)")
+    func verifyRunnerTruncatesLogAtMaxBytesAndContinuesDraining() async throws {
+        let fx = try makeVerifyIntegrationFixture(prefix: "relay-m2-vf16m")
+        defer { try? FileManager.default.removeItem(at: fx.tempRoot) }
+
+        // Emit 20 MiB (320 * 65536 = 20,971,520 bytes) against the default 16 MiB (16,777,216 bytes) cap.
+        let cmd = """
+        /usr/bin/python3 -I -c '
+        import sys
+        chunk = b"v" * 65536
+        out = sys.stdout.buffer
+        for _ in range(320):
+            out.write(chunk)
+        out.flush()
+        '
+        exit 0
+        """
+
+        let record = try await RelayVerifyRunner.runVerify(
+            runID: fx.runID,
+            projectBundlePath: fx.projectDir.path,
+            integrationWorktreePath: fx.integrationWorktreePath,
+            command: cmd,
+            timeoutSec: 60,
+            gitEngine: fx.engine,
+            language: .en,
+            environment: fx.gitEnv
+        )
+
+        let expectedCap = Int(RelayVerifyRunner.defaultMaxLogBytes)
+        #expect(expectedCap == 16_777_216)
+        #expect(record.status == .passed)
+        #expect(record.exitCode == 0)
+        #expect(record.logTruncated == true)
+        #expect(record.logBytes == expectedCap)
+
+        let logPath = try #require(record.logPath)
+        let attrs = try FileManager.default.attributesOfItem(atPath: logPath)
+        let onDiskSize = (attrs[.size] as? NSNumber)?.intValue
+        #expect(onDiskSize == expectedCap)
+    }
 }

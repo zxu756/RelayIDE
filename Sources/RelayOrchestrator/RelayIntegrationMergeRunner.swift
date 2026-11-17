@@ -184,6 +184,58 @@ public enum RelayIntegrationStderrFormatter {
             return "[relay] integration finished · status \(statusLabel) · \(readyLabel)\(headSuffix)"
         }
     }
+
+    public static func formatVerifyStartedLine(
+        pid: Int32,
+        timeoutSec: Int,
+        language: RelayLanguage
+    ) -> String {
+        if language.isChinese {
+            return "[relay] 验证命令已启动 · PID \(pid) · 时限 \(timeoutSec)s"
+        } else {
+            return "[relay] verify started · pid \(pid) · timeout \(timeoutSec)s"
+        }
+    }
+
+    public static func formatVerifyFinishedLine(
+        verify: RelayRunVerifyRecord,
+        language: RelayLanguage
+    ) -> String {
+        let isZh = language.isChinese
+        let statusLabel = verify.status.localizedLabel(in: language)
+
+        let exitOrSignalPart: String
+        if let sig = verify.signal {
+            exitOrSignalPart = isZh ? "信号 \(sig)" : "signal \(sig)"
+        } else if let code = verify.exitCode {
+            exitOrSignalPart = isZh ? "退出码 \(code)" : "exit \(code)"
+        } else {
+            exitOrSignalPart = isZh ? "退出码 无" : "exit none"
+        }
+
+        let durationSeconds: TimeInterval
+        if let sAt = verify.startedAt, let fAt = verify.finishedAt {
+            durationSeconds = max(0, fAt.timeIntervalSince(sAt))
+        } else {
+            durationSeconds = 0
+        }
+        let durationStr = String(format: "%.2fs", durationSeconds)
+        let logStr = verify.logPath ?? (isZh ? "无" : "none")
+
+        let dirtySuffix: String
+        if !verify.modifiedTrackedFiles.isEmpty {
+            let filesJoined = verify.modifiedTrackedFiles.joined(separator: ", ")
+            dirtySuffix = isZh ? " · 已改跟踪文件 \(filesJoined)" : " · modified tracked files \(filesJoined)"
+        } else {
+            dirtySuffix = ""
+        }
+
+        if isZh {
+            return "[relay] 验证命令已结束 · 状态 \(statusLabel) · \(exitOrSignalPart) · 耗时 \(durationStr) · 日志 \(logStr)\(dirtySuffix)"
+        } else {
+            return "[relay] verify finished · status \(statusLabel) · \(exitOrSignalPart) · time \(durationStr) · log \(logStr)\(dirtySuffix)"
+        }
+    }
 }
 
 // MARK: - Per-Lane Git Merge & Overall Integration Merge Phase (`03-relayide.md` M2 §1, §5, §7; R55–R59)
