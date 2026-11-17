@@ -2260,4 +2260,70 @@ struct PTYAndTerminalMultiplexerTests {
         let remainingAfterR54 = try Self.listProcessesMatching(tempToken)
         #expect(remainingAfterR54.isEmpty)
     }
+
+    @Test("POSIXPseudoTerminalSession enforces rawOutputMaxBytes cap, continues draining master FD until exit, and records truncation while keeping unlimited default (§6, Item 3)")
+    func ptyRawTranscriptEnforcesMaxBytesContinuesDrainingAndRecordsTruncation() throws {
+        let tempDir = try Self.makeMktempDirectory(prefix: "relay-m2-cap")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let cap: UInt64 = 65_536
+
+        // 1. Output strictly exceeding `cap` (300,000 bytes): stops writing at `cap`, continues draining until exit 0, sets `rawTranscriptTruncated = true`.
+        let overCapURL = tempDir.appendingPathComponent("over-cap.pty")
+        let overSession = POSIXPseudoTerminalSession(laneID: "verify-over-cap", updatesScreenBuffer: false)
+        defer { overSession.terminate(signal: SIGKILL) }
+        try overSession.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: ["--repeat-bytes", "300000", "--exit", "0"],
+            workingDirectory: tempDir.path,
+            rawOutputFilePath: overCapURL.path,
+            rawOutputMaxBytes: cap,
+            preserveEnvironmentVerbatim: true
+        )
+        #expect(overSession.waitForExit(timeout: 10.0) == true)
+        let overMetrics = overSession.metrics()
+        #expect(overMetrics.exitReason == .exited(code: 0))
+        #expect(overMetrics.bytesReadFromPTY >= 300_000)
+        #expect(overMetrics.rawTranscriptTruncated == true)
+        #expect(overMetrics.rawTranscriptBytesWritten == cap)
+        let overData = try Data(contentsOf: overCapURL)
+        #expect(UInt64(overData.count) == cap)
+
+        // 2. Output equal to `cap` (65,536 raw ASCII bytes with no newlines): writes all bytes, `rawTranscriptTruncated = false`.
+        let exactCapURL = tempDir.appendingPathComponent("exact-cap.pty")
+        let exactSession = POSIXPseudoTerminalSession(laneID: "verify-exact-cap", updatesScreenBuffer: false)
+        defer { exactSession.terminate(signal: SIGKILL) }
+        try exactSession.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: ["--repeat-bytes", "\(cap)", "--exit", "0"],
+            workingDirectory: tempDir.path,
+            rawOutputFilePath: exactCapURL.path,
+            rawOutputMaxBytes: cap,
+            preserveEnvironmentVerbatim: true
+        )
+        #expect(exactSession.waitForExit(timeout: 10.0) == true)
+        let exactMetrics = exactSession.metrics()
+        #expect(exactMetrics.exitReason == .exited(code: 0))
+        #expect(exactMetrics.rawTranscriptTruncated == false)
+        #expect(exactMetrics.rawTranscriptBytesWritten == cap)
+        let exactData = try Data(contentsOf: exactCapURL)
+        #expect(UInt64(exactData.count) == cap)
+
+        // 3. Default `rawOutputMaxBytes == nil` (M1 lane behavior): writes all 300,000 bytes with `rawTranscriptTruncated == false`.
+        let unlimitedURL = tempDir.appendingPathComponent("unlimited.pty")
+        let unlimitedSession = POSIXPseudoTerminalSession(laneID: "lane-unlimited")
+        defer { unlimitedSession.terminate(signal: SIGKILL) }
+        try unlimitedSession.spawn(
+            executablePath: Self.fakeRelayPath,
+            arguments: ["--repeat-bytes", "300000", "--exit", "0"],
+            workingDirectory: tempDir.path,
+            rawOutputFilePath: unlimitedURL.path
+        )
+        #expect(unlimitedSession.waitForExit(timeout: 10.0) == true)
+        let unlimitedMetrics = unlimitedSession.metrics()
+        #expect(unlimitedMetrics.rawTranscriptTruncated == false)
+        #expect(unlimitedMetrics.rawTranscriptBytesWritten == 300_000)
+        let unlimitedData = try Data(contentsOf: unlimitedURL)
+        #expect(unlimitedData.count == 300_000)
+    }
 }

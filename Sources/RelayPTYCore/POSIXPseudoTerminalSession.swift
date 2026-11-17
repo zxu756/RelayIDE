@@ -398,11 +398,15 @@ public enum POSIXProcessTree: Sendable {
 private final class PTYSessionState: @unchecked Sendable {
     let laneID: String
     let screenBuffer: VT100TerminalScreenBuffer
+    let updatesScreenBuffer: Bool
     let ioQueue: DispatchQueue
     let condition = NSCondition()
 
     var masterFD: Int32 = -1
     var rawOutputFD: Int32 = -1
+    var rawOutputMaxBytes: UInt64? = nil
+    var rawTranscriptBytesWrittenCount: UInt64 = 0
+    var rawTranscriptTruncatedFlag: Bool = false
     var childPID: pid_t = -1
     var isRunningFlag: Bool = false
     var isSpawningFlag: Bool = false
@@ -415,16 +419,18 @@ private final class PTYSessionState: @unchecked Sendable {
     var readSource: DispatchSourceRead?
     var onOutputUpdate: (@Sendable (TerminalViewportSnapshot) -> Void)?
 
-    init(laneID: String, rows: Int, columns: Int) {
+    init(laneID: String, rows: Int, columns: Int, updatesScreenBuffer: Bool = true) {
         self.laneID = laneID
         self.screenBuffer = VT100TerminalScreenBuffer(laneID: laneID, rows: rows, columns: columns)
+        self.updatesScreenBuffer = updatesScreenBuffer
         self.ioQueue = DispatchQueue(label: "io.github.zxu756.RelayIDE.pty.\(laneID)", qos: .userInteractive)
     }
 
-    private static func writeAllVerbatim(fd: Int32, data: Data) {
-        guard fd >= 0, !data.isEmpty else { return }
-        data.withUnsafeBytes { rawBuf in
-            guard let base = rawBuf.baseAddress else { return }
+    @discardableResult
+    private static func writeAllVerbatim(fd: Int32, data: Data) -> Int {
+        guard fd >= 0, !data.isEmpty else { return 0 }
+        return data.withUnsafeBytes { rawBuf in
+            guard let base = rawBuf.baseAddress else { return 0 }
             var offset = 0
             while offset < data.count {
                 let n = Darwin.write(fd, base.advanced(by: offset), data.count - offset)
@@ -436,6 +442,7 @@ private final class PTYSessionState: @unchecked Sendable {
                     break
                 }
             }
+            return offset
         }
     }
 
@@ -443,6 +450,9 @@ private final class PTYSessionState: @unchecked Sendable {
         condition.lock()
         let fd = masterFD
         let rfd = rawOutputFD
+        let maxBytes = rawOutputMaxBytes
+        let alreadyWritten = rawTranscriptBytesWrittenCount
+        let alreadyTruncated = rawTranscriptTruncatedFlag
         condition.unlock()
         guard fd >= 0 else { return }
 
@@ -460,14 +470,43 @@ private final class PTYSessionState: @unchecked Sendable {
         }
 
         if !aggregated.isEmpty {
-            Self.writeAllVerbatim(fd: rfd, data: aggregated)
+            var writtenThisDrain = 0
+            var didTruncate = false
+            if rfd >= 0 {
+                if let cap = maxBytes {
+                    if alreadyTruncated || alreadyWritten >= cap {
+                        didTruncate = true
+                    } else {
+                        let remaining = cap - alreadyWritten
+                        if UInt64(aggregated.count) <= remaining {
+                            writtenThisDrain = Self.writeAllVerbatim(fd: rfd, data: aggregated)
+                        } else {
+                            let slice = Data(aggregated.prefix(Int(remaining)))
+                            writtenThisDrain = Self.writeAllVerbatim(fd: rfd, data: slice)
+                            didTruncate = true
+                        }
+                    }
+                } else {
+                    writtenThisDrain = Self.writeAllVerbatim(fd: rfd, data: aggregated)
+                }
+            }
+
             condition.lock()
             bytesReadCount += UInt64(aggregated.count)
+            if writtenThisDrain > 0 {
+                rawTranscriptBytesWrittenCount += UInt64(writtenThisDrain)
+            }
+            if didTruncate {
+                rawTranscriptTruncatedFlag = true
+            }
             let cb = onOutputUpdate
             condition.unlock()
-            screenBuffer.feed(aggregated)
-            if let cb {
-                cb(screenBuffer.snapshot())
+
+            if updatesScreenBuffer {
+                screenBuffer.feed(aggregated)
+                if let cb {
+                    cb(screenBuffer.snapshot())
+                }
             }
         }
     }
@@ -544,9 +583,9 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
         }
     }
 
-    public init(laneID: String, rows: Int = 28, columns: Int = 100) {
+    public init(laneID: String, rows: Int = 28, columns: Int = 100, updatesScreenBuffer: Bool = true) {
         self.laneID = laneID
-        self.state = PTYSessionState(laneID: laneID, rows: rows, columns: columns)
+        self.state = PTYSessionState(laneID: laneID, rows: rows, columns: columns, updatesScreenBuffer: updatesScreenBuffer)
     }
 
     deinit {
@@ -564,7 +603,9 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
         baseEnvironment: [String: String]? = nil,
         environmentOverrides: [String: String] = [:],
         unsetEnvironmentKeys: Set<String> = [],
-        rawOutputFilePath: String? = nil
+        rawOutputFilePath: String? = nil,
+        rawOutputMaxBytes: UInt64? = nil,
+        preserveEnvironmentVerbatim: Bool = false
     ) throws {
         state.condition.lock()
         if state.isRunningFlag || state.isSpawningFlag {
@@ -692,9 +733,11 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
         for k in unsetEnvironmentKeys {
             mergedEnv.removeValue(forKey: k)
         }
-        mergedEnv["TERM"] = "xterm-256color"
-        mergedEnv["COLORTERM"] = "truecolor"
-        mergedEnv["LANG"] = mergedEnv["LANG"] ?? "en_US.UTF-8"
+        if !preserveEnvironmentVerbatim {
+            mergedEnv["TERM"] = "xterm-256color"
+            mergedEnv["COLORTERM"] = "truecolor"
+            mergedEnv["LANG"] = mergedEnv["LANG"] ?? "en_US.UTF-8"
+        }
         for (k, v) in environmentOverrides {
             mergedEnv[k] = v
         }
@@ -735,9 +778,20 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
             Darwin.close(mfd)
         }
 
+        var initialRawBytes: UInt64 = 0
+        if openedRawFD >= 0 {
+            var st = Darwin.stat()
+            if Darwin.fstat(openedRawFD, &st) == 0 && st.st_size > 0 {
+                initialRawBytes = UInt64(st.st_size)
+            }
+        }
+
         capturedState.condition.lock()
         capturedState.masterFD = mfd
         capturedState.rawOutputFD = openedRawFD
+        capturedState.rawOutputMaxBytes = rawOutputMaxBytes
+        capturedState.rawTranscriptBytesWrittenCount = initialRawBytes
+        capturedState.rawTranscriptTruncatedFlag = (rawOutputMaxBytes != nil && initialRawBytes > rawOutputMaxBytes!)
         capturedState.childPID = pid
         capturedState.isRunningFlag = true
         capturedState.isSpawningFlag = false
@@ -1209,6 +1263,8 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
             terminationDescription: termDesc,
             bytesReadFromPTY: state.bytesReadCount,
             bytesWrittenToPTY: state.bytesWrittenCount,
+            rawTranscriptBytesWritten: state.rawTranscriptBytesWrittenCount,
+            rawTranscriptTruncated: state.rawTranscriptTruncatedFlag,
             startedAt: state.startedAtDate
         )
     }

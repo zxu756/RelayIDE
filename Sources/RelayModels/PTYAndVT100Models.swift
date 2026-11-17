@@ -172,6 +172,8 @@ public struct PTYProcessMetrics: Sendable, Codable, Hashable {
     public let terminationDescription: String?
     public let bytesReadFromPTY: UInt64
     public let bytesWrittenToPTY: UInt64
+    public let rawTranscriptBytesWritten: UInt64
+    public let rawTranscriptTruncated: Bool
     public let startedAt: Date
 
     public init(
@@ -185,6 +187,8 @@ public struct PTYProcessMetrics: Sendable, Codable, Hashable {
         terminationDescription: String? = nil,
         bytesReadFromPTY: UInt64 = 0,
         bytesWrittenToPTY: UInt64 = 0,
+        rawTranscriptBytesWritten: UInt64 = 0,
+        rawTranscriptTruncated: Bool = false,
         startedAt: Date = Date()
     ) {
         self.laneID = laneID
@@ -197,6 +201,8 @@ public struct PTYProcessMetrics: Sendable, Codable, Hashable {
         self.terminationDescription = terminationDescription
         self.bytesReadFromPTY = bytesReadFromPTY
         self.bytesWrittenToPTY = bytesWrittenToPTY
+        self.rawTranscriptBytesWritten = rawTranscriptBytesWritten
+        self.rawTranscriptTruncated = rawTranscriptTruncated
         self.startedAt = startedAt
     }
 }
