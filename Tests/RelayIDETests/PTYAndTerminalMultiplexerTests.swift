@@ -1944,4 +1944,320 @@ struct PTYAndTerminalMultiplexerTests {
         }
         #expect(Darwin.kill(subgroupPID, 0) != 0, "Separate-process-group descendant \(subgroupPID) survived SIGKILL escalation")
     }
+
+    // MARK: - M2 Stage 03: Verify PTY `exec </dev/null` Controlling Terminal & Hangup + Pre-SIGINT Descendant Escalation (R54)
+
+    private static func makeMktempDirectory(prefix: String = "relay-m2-pty") throws -> URL {
+        let base = FileManager.default.temporaryDirectory.path
+        let templateString = (base as NSString).appendingPathComponent("\(prefix)-XXXXXX")
+        var buffer = Array(templateString.utf8CString)
+        let createdPtr = buffer.withUnsafeMutableBufferPointer { buf -> UnsafeMutablePointer<CChar>? in
+            guard let baseAddress = buf.baseAddress else { return nil }
+            return Darwin.mkdtemp(baseAddress)
+        }
+        guard let createdPtr else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        return URL(fileURLWithPath: String(cString: createdPtr), isDirectory: true)
+    }
+
+    @Test("Verify shell wrapper `exec </dev/null; exec /bin/sh -c \"$1\"` in POSIXPseudoTerminalSession preserves controlling TTY, gives EOF on stdin, and terminates same-group children on master hangup (§6, Hypothesis 1a)")
+    func ptyVerifyExecDevNullAndMasterHangup() async throws {
+        let tempDir = try Self.makeMktempDirectory(prefix: "relay-m2-h1a")
+        let tempToken = tempDir.lastPathComponent
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let homeDir = tempDir.appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir, withIntermediateDirectories: true)
+        let profileMarker = tempDir.appendingPathComponent("profile-ran.marker")
+        try "echo ran > \"\(profileMarker.path)\"\n".write(
+            to: homeDir.appendingPathComponent(".profile"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        // 1. Check `test -t 0` (false), `cat` stdin EOF (0 bytes), `test -t 1` (true), `/dev/tty` openable, and `ps -o tty=`.
+        let reportURL = tempDir.appendingPathComponent("probe-report.txt")
+        let probeCommand = """
+        if test -t 0; then s0=1; else s0=0; fi
+        if test -t 1; then s1=1; else s1=0; fi
+        if test -t 2; then s2=1; else s2=0; fi
+        if (: >/dev/tty) 2>/dev/null; then ctty=1; else ctty=0; fi
+        tty_name=$(/bin/ps -o tty= -p $$ | /usr/bin/tr -d ' \\t\\n')
+        cat_out=$(/bin/cat)
+        cat_rc=$?
+        cat_len=$(printf '%s' "$cat_out" | /usr/bin/wc -c | /usr/bin/tr -d ' \\t\\n')
+        printf 'stdin_tty=%s\\nstdout_tty=%s\\nstderr_tty=%s\\nctty_open=%s\\nps_tty=%s\\ncat_rc=%s\\ncat_bytes=%s\\n' \
+          "$s0" "$s1" "$s2" "$ctty" "$tty_name" "$cat_rc" "$cat_len" > "\(reportURL.path)"
+        """
+
+        let probeSession = POSIXPseudoTerminalSession(laneID: "verify-h1a-probe")
+        defer { probeSession.terminate(signal: SIGKILL) }
+        try probeSession.spawn(
+            executablePath: "/bin/sh",
+            arguments: ["-c", "exec </dev/null; exec /bin/sh -c \"$1\"", "relayide-verify", probeCommand],
+            workingDirectory: tempDir.path,
+            baseEnvironment: [
+                "HOME": homeDir.path,
+                "CFFIXED_USER_HOME": homeDir.path,
+                "PATH": "/usr/bin:/bin",
+                "PAGER": "cat",
+                "GIT_PAGER": "cat"
+            ]
+        )
+        #expect(probeSession.waitForExit(timeout: 5.0) == true)
+        #expect(probeSession.metrics().exitReason == .exited(code: 0))
+        #expect(!FileManager.default.fileExists(atPath: profileMarker.path))
+
+        let reportText = try String(contentsOf: reportURL, encoding: .utf8)
+        var kv: [String: String] = [:]
+        for line in reportText.split(separator: "\n") {
+            let parts = line.split(separator: "=", maxSplits: 1)
+            if parts.count == 2 {
+                kv[String(parts[0])] = String(parts[1])
+            }
+        }
+        #expect(kv["stdin_tty"] == "0", "Expected test -t 0 to be false (0), report: \(reportText)")
+        #expect(kv["stdout_tty"] == "1", "Expected test -t 1 to be true (1), report: \(reportText)")
+        #expect(kv["stderr_tty"] == "1", "Expected test -t 2 to be true (1), report: \(reportText)")
+        #expect(kv["ctty_open"] == "1", "Expected /dev/tty to be openable, report: \(reportText)")
+        #expect(kv["ps_tty"] != nil && kv["ps_tty"] != "??" && !(kv["ps_tty"] ?? "").isEmpty, "Expected real controlling tty, got: \(reportText)")
+        #expect(kv["cat_rc"] == "0")
+        #expect(kv["cat_bytes"] == "0")
+
+        // 2. Simulate `kill -9` on RelayIDE by closing the master FD: both `verify` and its same-group child must die via SIGHUP.
+        let readyURL = tempDir.appendingPathComponent("hangup-ready")
+        let childPIDURL = tempDir.appendingPathComponent("same-group-child.pid")
+        let hangupSession = POSIXPseudoTerminalSession(laneID: "verify-h1a-hangup")
+        var trackedVerifyPID: pid_t = -1
+        var trackedChildPID: pid_t = -1
+        defer {
+            if trackedChildPID > 0 { _ = Darwin.kill(trackedChildPID, SIGKILL) }
+            if trackedVerifyPID > 0 { _ = Darwin.kill(-trackedVerifyPID, SIGKILL); _ = Darwin.kill(trackedVerifyPID, SIGKILL) }
+            hangupSession.terminate(signal: SIGKILL)
+            if let leftovers = try? Self.listProcessesMatching(tempToken) {
+                for p in leftovers { _ = Darwin.kill(p.pid, SIGKILL) }
+            }
+        }
+
+        let hangupCommand = """
+        /usr/bin/perl -e 'select(undef, undef, undef, 30);' "\(tempToken)-samepgrp-child" &
+        child_pid=$!
+        printf '%s\\n' "$child_pid" > "\(childPIDURL.path)"
+        : > "\(readyURL.path)"
+        wait "$child_pid"
+        """
+        try hangupSession.spawn(
+            executablePath: "/bin/sh",
+            arguments: ["-c", "exec </dev/null; exec /bin/sh -c \"$1\"", "relayide-verify", hangupCommand],
+            workingDirectory: tempDir.path,
+            baseEnvironment: [
+                "HOME": homeDir.path,
+                "CFFIXED_USER_HOME": homeDir.path,
+                "PATH": "/usr/bin:/bin",
+                "PAGER": "cat",
+                "GIT_PAGER": "cat"
+            ]
+        )
+
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: readyURL.path) { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: readyURL.path))
+
+        trackedVerifyPID = hangupSession.metrics().pid
+        let rawChildPID = try String(contentsOf: childPIDURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        trackedChildPID = try #require(pid_t(rawChildPID))
+        #expect(trackedVerifyPID > 0 && trackedChildPID > 0)
+        #expect(Darwin.kill(trackedVerifyPID, 0) == 0)
+        #expect(Darwin.kill(trackedChildPID, 0) == 0)
+        #expect(Darwin.getpgid(trackedChildPID) == trackedVerifyPID)
+
+        hangupSession.closeMasterFDSimulatingCrash()
+
+        #expect(hangupSession.waitForExit(timeout: 3.0) == true)
+        let hangupMetrics = hangupSession.metrics()
+        #expect(hangupMetrics.isRunning == false)
+        #expect(hangupMetrics.exitStatus == nil)
+        #expect(hangupMetrics.terminationSignal == SIGHUP)
+
+        for _ in 0..<100 {
+            let matching = try Self.listProcessesMatching(tempToken)
+            if Darwin.kill(trackedChildPID, 0) != 0 && matching.isEmpty {
+                break
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(Darwin.kill(trackedVerifyPID, 0) != 0)
+        #expect(Darwin.kill(trackedChildPID, 0) != 0, "Same-group child \(trackedChildPID) survived PTY master hangup")
+        let remainingAfterHangup = try Self.listProcessesMatching(tempToken)
+        #expect(remainingAfterHangup.isEmpty)
+    }
+
+    @Test("terminateWithEscalation collects all descendants BEFORE SIGINT and waits at every step until all collected process groups are empty, killing setpgrp child + grandchild after leader shell dies on SIGINT (R54, Hypothesis 1b)")
+    func ptyEscalationCollectsStubbornSubgroupAndGrandchildBeforeSIGINT() async throws {
+        let tempDir = try Self.makeMktempDirectory(prefix: "relay-m2-r54")
+        let tempToken = tempDir.lastPathComponent
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let readyURL = tempDir.appendingPathComponent("stubborn-ready")
+        let childPIDURL = tempDir.appendingPathComponent("sub-child.pid")
+        let grandchildPIDURL = tempDir.appendingPathComponent("sub-grandchild.pid")
+
+        let session = POSIXPseudoTerminalSession(laneID: "verify-r54-stubborn")
+        var verifyPID: pid_t = -1
+        var stubbornChildPID: pid_t = -1
+        var stubbornGrandchildPID: pid_t = -1
+        defer {
+            if stubbornGrandchildPID > 0 {
+                _ = Darwin.kill(-stubbornGrandchildPID, SIGKILL)
+                _ = Darwin.kill(stubbornGrandchildPID, SIGKILL)
+            }
+            if stubbornChildPID > 0 {
+                _ = Darwin.kill(-stubbornChildPID, SIGKILL)
+                _ = Darwin.kill(stubbornChildPID, SIGKILL)
+            }
+            if verifyPID > 0 {
+                _ = Darwin.kill(-verifyPID, SIGKILL)
+                _ = Darwin.kill(verifyPID, SIGKILL)
+            }
+            session.terminate(signal: SIGKILL)
+            if let leftovers = try? Self.listProcessesMatching(tempToken) {
+                for p in leftovers { _ = Darwin.kill(p.pid, SIGKILL) }
+            }
+        }
+
+        // Outer `/bin/sh` does NOT ignore INT/TERM (so it dies immediately on Step 1 SIGINT and reparents its child to launchd PID 1!).
+        // Meanwhile its child calls `setpgid(0,0)`, ignores INT/TERM/HUP, and forks a grandchild in yet another nested layer.
+        let verifyScript = """
+        /usr/bin/perl -MPOSIX=setpgid -e '
+            my ($cfile, $gcfile, $rfile, $tok) = @ARGV;
+            setpgid(0, 0) or die "setpgid: $!";
+            $SIG{INT} = $SIG{TERM} = $SIG{HUP} = "IGNORE";
+            my $gc = fork();
+            die "fork: $!" unless defined $gc;
+            if ($gc == 0) {
+                $SIG{INT} = $SIG{TERM} = $SIG{HUP} = "IGNORE";
+                open(my $gfh, ">", $gcfile) or die $!;
+                print $gfh "$$\\n";
+                close($gfh);
+                select(undef, undef, undef, 30);
+                exit 0;
+            }
+            for (1..200) {
+                last if -s $gcfile;
+                select(undef, undef, undef, 0.01);
+            }
+            open(my $cfh, ">", $cfile) or die $!;
+            print $cfh "$$\\n";
+            close($cfh);
+            open(my $rfh, ">", $rfile) or die $!;
+            print $rfh "ready\\n";
+            close($rfh);
+            select(undef, undef, undef, 30);
+        ' "\(childPIDURL.path)" "\(grandchildPIDURL.path)" "\(readyURL.path)" "\(tempToken)" </dev/null >/dev/null 2>&1 &
+        while [ ! -s "\(readyURL.path)" ]; do /bin/sleep 0.02; done
+        /usr/bin/perl -e 'select(undef, undef, undef, 30);' "\(tempToken)-leader-wait"
+        """
+
+        try session.spawn(
+            executablePath: "/bin/sh",
+            arguments: ["-c", "exec </dev/null; exec /bin/sh -c \"$1\"", "relayide-verify", verifyScript],
+            workingDirectory: tempDir.path,
+            baseEnvironment: [
+                "HOME": tempDir.path,
+                "CFFIXED_USER_HOME": tempDir.path,
+                "PATH": "/usr/bin:/bin",
+                "PAGER": "cat",
+                "GIT_PAGER": "cat"
+            ]
+        )
+
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: readyURL.path) { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: readyURL.path))
+        // Wait briefly for the leader shell to enter its 30s perl wait as well
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        verifyPID = session.metrics().pid
+        stubbornChildPID = try #require(pid_t(try String(contentsOf: childPIDURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        stubbornGrandchildPID = try #require(pid_t(try String(contentsOf: grandchildPIDURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+
+        #expect(verifyPID > 0)
+        #expect(stubbornChildPID > 0 && stubbornChildPID != verifyPID)
+        #expect(stubbornGrandchildPID > 0 && stubbornGrandchildPID != stubbornChildPID)
+        #expect(Darwin.getpgid(stubbornChildPID) == stubbornChildPID)
+        #expect(Darwin.getpgid(stubbornGrandchildPID) == stubbornChildPID)
+
+        // Verify both `proc_listchildpids` and `sysctl(KERN_PROC_ALL)` discover the nested `setpgrp` child + grandchild,
+        // and verify fallback + PID-reuse filtering (`03-relayide.md` Hypothesis 1b).
+        let procListEnum = POSIXProcessTree.allDescendantsViaProcListChildPIDs(of: verifyPID)
+        #expect(procListEnum.succeeded == true)
+        #expect(procListEnum.pids.contains(stubbornChildPID) && procListEnum.pids.contains(stubbornGrandchildPID))
+
+        let sysctlEnum = POSIXProcessTree.allDescendantsViaSysctl(of: verifyPID)
+        #expect(sysctlEnum.succeeded == true)
+        #expect(sysctlEnum.pids.contains(stubbornChildPID) && sysctlEnum.pids.contains(stubbornGrandchildPID))
+
+        let fallbackEnum = POSIXProcessTree.enumerateDescendantsWithFallback(
+            of: verifyPID,
+            procListImpl: { _ in ([], false) }
+        )
+        #expect(fallbackEnum.succeeded == true)
+        #expect(fallbackEnum.pids.contains(stubbornChildPID) && fallbackEnum.pids.contains(stubbornGrandchildPID))
+
+        let bothFailedEnum = POSIXProcessTree.enumerateDescendantsWithFallback(
+            of: verifyPID,
+            procListImpl: { _ in ([], false) },
+            sysctlImpl: { _ in ([], false) }
+        )
+        #expect(bothFailedEnum.succeeded == false)
+
+        // PID-reuse guard: a recycled PID (different startTime or moved out of collected groups) is excluded from signaling.
+        let fakeTracked: [pid_t: POSIXProcessIdentity] = [
+            50001: POSIXProcessIdentity(pid: 50001, ppid: 1, pgid: 50001, startTimeSec: 1000, startTimeUsec: 0),
+            50002: POSIXProcessIdentity(pid: 50002, ppid: 1, pgid: 50002, startTimeSec: 1000, startTimeUsec: 0)
+        ]
+        let filteredGroups = POSIXProcessTree.activeVerifiedProcessGroups(
+            collectedGroups: [50001, 50002],
+            trackedMembers: fakeTracked,
+            excludingProcessGroup: 99999,
+            identityProvider: { p in
+                if p == 50001 {
+                    // Recycled PID with newer startTime -> MUST NOT be signaled
+                    return POSIXProcessIdentity(pid: 50001, ppid: 1, pgid: 50001, startTimeSec: 2000, startTimeUsec: 0)
+                }
+                if p == 50002 {
+                    // Same process, still in collected group 50002 -> safe to signal
+                    return POSIXProcessIdentity(pid: 50002, ppid: 1, pgid: 50002, startTimeSec: 1000, startTimeUsec: 0)
+                }
+                return nil
+            }
+        )
+        #expect(filteredGroups == [50002])
+
+        let report = session.terminateWithEscalationReport(sigintGraceSeconds: 0.2, sigtermGraceSeconds: 0.2)
+        let steps = report.steps
+
+        #expect(report.enumerationSucceeded == true)
+        #expect(report.initialDescendantPIDs.contains(stubbornChildPID))
+        #expect(report.initialDescendantPIDs.contains(stubbornGrandchildPID))
+        #expect(report.initialProcessGroupIDs.contains(stubbornChildPID))
+        #expect(report.survivingPIDs.isEmpty)
+        #expect(steps.count == 3, "Expected all 3 escalation steps (SIGINT -> SIGTERM -> SIGKILL) when subgroup ignores INT & TERM, got: \(steps)")
+        for _ in 0..<50 {
+            if Darwin.kill(stubbornChildPID, 0) != 0 && Darwin.kill(stubbornGrandchildPID, 0) != 0 {
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(Darwin.kill(verifyPID, 0) != 0)
+        #expect(Darwin.kill(stubbornChildPID, 0) != 0, "Stubborn setpgrp child \(stubbornChildPID) survived terminateWithEscalation (R54)")
+        #expect(Darwin.kill(stubbornGrandchildPID, 0) != 0, "Stubborn grandchild \(stubbornGrandchildPID) survived terminateWithEscalation (R54)")
+        let remainingAfterR54 = try Self.listProcessesMatching(tempToken)
+        #expect(remainingAfterR54.isEmpty)
+    }
 }

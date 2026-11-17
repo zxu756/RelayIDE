@@ -65,20 +65,149 @@ public enum PTYTerminationEscalationStep: Sendable, Equatable {
     case sentSIGKILL(pid: pid_t, descendantPIDs: [pid_t], processGroupIDs: [pid_t])
 }
 
+public struct PTYTerminationEscalationReport: Sendable, Equatable {
+    public let steps: [PTYTerminationEscalationStep]
+    public let initialDescendantPIDs: [pid_t]
+    public let initialProcessGroupIDs: [pid_t]
+    public let survivingPIDs: [pid_t]
+    public let enumerationSucceeded: Bool
+
+    public init(
+        steps: [PTYTerminationEscalationStep],
+        initialDescendantPIDs: [pid_t],
+        initialProcessGroupIDs: [pid_t],
+        survivingPIDs: [pid_t],
+        enumerationSucceeded: Bool
+    ) {
+        self.steps = steps
+        self.initialDescendantPIDs = initialDescendantPIDs
+        self.initialProcessGroupIDs = initialProcessGroupIDs
+        self.survivingPIDs = survivingPIDs
+        self.enumerationSucceeded = enumerationSucceeded
+    }
+}
+
+public struct POSIXProcessIdentity: Sendable, Hashable, Equatable {
+    public let pid: pid_t
+    public let ppid: pid_t
+    public let pgid: pid_t
+    public let startTimeSec: Int
+    public let startTimeUsec: Int32
+    public let isZombie: Bool
+
+    public init(
+        pid: pid_t,
+        ppid: pid_t,
+        pgid: pid_t,
+        startTimeSec: Int,
+        startTimeUsec: Int32,
+        isZombie: Bool = false
+    ) {
+        self.pid = pid
+        self.ppid = ppid
+        self.pgid = pgid
+        self.startTimeSec = startTimeSec
+        self.startTimeUsec = startTimeUsec
+        self.isZombie = isZombie
+    }
+
+    public func matchesProcess(_ other: POSIXProcessIdentity) -> Bool {
+        pid == other.pid
+            && startTimeSec == other.startTimeSec
+            && startTimeUsec == other.startTimeUsec
+    }
+}
+
 public enum POSIXProcessTree: Sendable {
-    /// Lists immediate child PIDs of `ppid` via Darwin's `proc_listchildpids` (which returns element count, not bytes).
-    public static func directChildren(of ppid: pid_t) -> [pid_t] {
-        guard ppid > 1 else { return [] }
+    private static let zombieProcessStat: Int8 = 5 // SZOMB in <sys/proc.h>
+
+    /// Queries kernel `kinfo_proc` identity for a single `pid` via `sysctl(KERN_PROC_PID)` for PID-reuse verification.
+    public static func processIdentity(for pid: pid_t) -> POSIXProcessIdentity? {
+        guard pid > 0 else { return nil }
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        let rc = Darwin.sysctl(&mib, 4, &info, &size, nil, 0)
+        guard rc == 0, size >= MemoryLayout<kinfo_proc>.stride, info.kp_proc.p_pid == pid else {
+            return nil
+        }
+        let pgid = Darwin.getpgid(pid)
+        let effectivePGID = pgid > 0 ? pgid : info.kp_eproc.e_pgid
+        return POSIXProcessIdentity(
+            pid: pid,
+            ppid: info.kp_eproc.e_ppid,
+            pgid: effectivePGID,
+            startTimeSec: info.kp_proc.p_starttime.tv_sec,
+            startTimeUsec: info.kp_proc.p_starttime.tv_usec,
+            isZombie: info.kp_proc.p_stat == zombieProcessStat
+        )
+    }
+
+    /// Queries all current members of process group `pgid` via `sysctl(KERN_PROC_PGRP)`.
+    public static func membersOfProcessGroup(_ pgid: pid_t) -> [POSIXProcessIdentity] {
+        guard pgid > 1 else { return [] }
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PGRP, pgid]
+        var neededBytes: Int = 0
+        guard Darwin.sysctl(&mib, 4, nil, &neededBytes, nil, 0) == 0, neededBytes > 0 else {
+            return []
+        }
+        let stride = MemoryLayout<kinfo_proc>.stride
+        let capacity = max(16, (neededBytes / stride) + 16)
+        var buffer = [kinfo_proc](repeating: kinfo_proc(), count: capacity)
+        var actualBytes = capacity * stride
+        let rc = buffer.withUnsafeMutableBytes { raw -> Int32 in
+            Darwin.sysctl(&mib, 4, raw.baseAddress, &actualBytes, nil, 0)
+        }
+        guard rc == 0, actualBytes >= stride else { return [] }
+        let count = actualBytes / stride
+        var results: [POSIXProcessIdentity] = []
+        results.reserveCapacity(count)
+        for idx in 0..<count {
+            let kp = buffer[idx]
+            let p = kp.kp_proc.p_pid
+            guard p > 1 else { continue }
+            let livePGID = Darwin.getpgid(p)
+            let effPGID = livePGID > 0 ? livePGID : kp.kp_eproc.e_pgid
+            results.append(
+                POSIXProcessIdentity(
+                    pid: p,
+                    ppid: kp.kp_eproc.e_ppid,
+                    pgid: effPGID,
+                    startTimeSec: kp.kp_proc.p_starttime.tv_sec,
+                    startTimeUsec: kp.kp_proc.p_starttime.tv_usec,
+                    isZombie: kp.kp_proc.p_stat == zombieProcessStat
+                )
+            )
+        }
+        return results
+    }
+
+    /// Lists immediate child PIDs of `ppid` via Darwin's `proc_listchildpids` (which returns element count, not bytes),
+    /// distinguishing `< 0` failure from `0` children.
+    public static func directChildrenWithStatus(of ppid: pid_t) -> (pids: [pid_t], succeeded: Bool) {
+        guard ppid > 1 else { return ([], true) }
         let hint = darwinProcListChildPIDs(ppid, nil, 0)
-        var capacity = max(256, Int(max(0, hint)) + 64)
+        if hint < 0 {
+            if Darwin.kill(ppid, 0) != 0 && errno == ESRCH {
+                return ([], true)
+            }
+            return ([], false)
+        }
+        var capacity = max(256, Int(hint) + 64)
         while capacity <= 65_536 {
             var buffer = [pid_t](repeating: 0, count: capacity)
             let byteSize = Int32(clamping: capacity * MemoryLayout<pid_t>.stride)
             let count = buffer.withUnsafeMutableBytes { raw -> Int32 in
                 darwinProcListChildPIDs(ppid, raw.baseAddress, byteSize)
             }
-            if count <= 0 {
-                return []
+            if count < 0 {
+                if Darwin.kill(ppid, 0) != 0 && errno == ESRCH {
+                    return ([], true)
+                }
+                return ([], false)
+            }
+            if count == 0 {
+                return ([], true)
             }
             if Int(count) >= capacity {
                 capacity *= 2
@@ -92,14 +221,70 @@ public enum POSIXProcessTree: Sendable {
                     result.append(child)
                 }
             }
-            return result
+            return (result, true)
         }
-        return []
+        return ([], false)
     }
 
-    /// Recursively enumerates all descendants of `rootPID` (across `setsid` and `setpgid` boundaries) via BFS.
-    public static func allDescendants(of rootPID: pid_t) -> [pid_t] {
-        guard rootPID > 1 else { return [] }
+    /// Lists immediate child PIDs of `ppid` via Darwin's `proc_listchildpids` (which returns element count, not bytes).
+    public static func directChildren(of ppid: pid_t) -> [pid_t] {
+        directChildrenWithStatus(of: ppid).pids
+    }
+
+    /// Enumerates all descendants of `rootPID` via `proc_listchildpids` BFS, reporting whether every query succeeded.
+    public static func allDescendantsViaProcListChildPIDs(of rootPID: pid_t) -> (pids: [pid_t], succeeded: Bool) {
+        guard rootPID > 1 else { return ([], true) }
+        var visited: Set<pid_t> = [rootPID]
+        var queue: [pid_t] = [rootPID]
+        var descendants: [pid_t] = []
+        var allSucceeded = true
+        var head = 0
+        while head < queue.count {
+            let current = queue[head]
+            head += 1
+            let step = directChildrenWithStatus(of: current)
+            if !step.succeeded {
+                allSucceeded = false
+            }
+            for child in step.pids {
+                if visited.insert(child).inserted {
+                    descendants.append(child)
+                    queue.append(child)
+                }
+            }
+        }
+        return (descendants, allSucceeded)
+    }
+
+    /// Fallback descendant enumeration via `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_ALL)` parent-to-children BFS tree (`03-relayide.md` M2 Hypothesis 1b).
+    public static func allDescendantsViaSysctl(of rootPID: pid_t) -> (pids: [pid_t], succeeded: Bool) {
+        guard rootPID > 1 else { return ([], true) }
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        var neededBytes: Int = 0
+        guard Darwin.sysctl(&mib, 3, nil, &neededBytes, nil, 0) == 0, neededBytes > 0 else {
+            return ([], false)
+        }
+        let stride = MemoryLayout<kinfo_proc>.stride
+        let capacity = max(64, (neededBytes / stride) + (neededBytes / stride) / 3 + 128)
+        var buffer = [kinfo_proc](repeating: kinfo_proc(), count: capacity)
+        var actualBytes = capacity * stride
+        let rc = buffer.withUnsafeMutableBytes { raw -> Int32 in
+            Darwin.sysctl(&mib, 3, raw.baseAddress, &actualBytes, nil, 0)
+        }
+        guard rc == 0, actualBytes >= stride else {
+            return ([], false)
+        }
+
+        let count = actualBytes / stride
+        var childrenByParent: [pid_t: [pid_t]] = [:]
+        for idx in 0..<count {
+            let kp = buffer[idx]
+            let pid = kp.kp_proc.p_pid
+            let ppid = kp.kp_eproc.e_ppid
+            guard pid > 1, ppid > 0, pid != ppid else { continue }
+            childrenByParent[ppid, default: []].append(pid)
+        }
+
         var visited: Set<pid_t> = [rootPID]
         var queue: [pid_t] = [rootPID]
         var descendants: [pid_t] = []
@@ -107,14 +292,60 @@ public enum POSIXProcessTree: Sendable {
         while head < queue.count {
             let current = queue[head]
             head += 1
-            for child in directChildren(of: current) {
+            for child in (childrenByParent[current] ?? []).sorted() {
                 if visited.insert(child).inserted {
                     descendants.append(child)
                     queue.append(child)
                 }
             }
         }
-        return descendants
+        return (descendants, true)
+    }
+
+    /// Primary `proc_listchildpids` enumeration with `sysctl(KERN_PROC_ALL)` tree fallback when `proc_listchildpids` fails or is incomplete.
+    public static func enumerateDescendantsWithFallback(
+        of rootPID: pid_t,
+        procListImpl: ((pid_t) -> (pids: [pid_t], succeeded: Bool))? = nil,
+        sysctlImpl: ((pid_t) -> (pids: [pid_t], succeeded: Bool))? = nil
+    ) -> (pids: [pid_t], succeeded: Bool) {
+        guard rootPID > 1 else { return ([], true) }
+        let procFn = procListImpl ?? { allDescendantsViaProcListChildPIDs(of: $0) }
+        let sysctlFn = sysctlImpl ?? { allDescendantsViaSysctl(of: $0) }
+
+        let primary = procFn(rootPID)
+        if primary.succeeded {
+            // If `proc_listchildpids` succeeded, also check sysctl when using default implementations only if primary returned empty
+            // or union seamlessly when fallback is triggered.
+            if procListImpl == nil && sysctlImpl == nil {
+                let secondary = sysctlFn(rootPID)
+                if secondary.succeeded && secondary.pids.count > primary.pids.count {
+                    var seen = Set<pid_t>(primary.pids)
+                    var merged = primary.pids
+                    for p in secondary.pids where seen.insert(p).inserted {
+                        merged.append(p)
+                    }
+                    return (merged, true)
+                }
+            }
+            return (primary.pids, true)
+        }
+
+        let fallback = sysctlFn(rootPID)
+        if fallback.succeeded {
+            var seen = Set<pid_t>(primary.pids)
+            var merged = primary.pids
+            for p in fallback.pids where seen.insert(p).inserted {
+                merged.append(p)
+            }
+            return (merged, true)
+        }
+
+        return (primary.pids, false)
+    }
+
+    /// Recursively enumerates all descendants of `rootPID` (across `setsid` and `setpgid` boundaries) via BFS + `sysctl` fallback.
+    public static func allDescendants(of rootPID: pid_t) -> [pid_t] {
+        enumerateDescendantsWithFallback(of: rootPID).pids
     }
 
     /// Collects unique process group IDs (`getpgid`) for `pids`, excluding `<= 1` and `excludingProcessGroup`.
@@ -131,6 +362,34 @@ public enum POSIXProcessTree: Sendable {
             }
         }
         return groups
+    }
+
+    /// Filters candidate process groups against PID reuse: only retains groups in `collectedGroups` that STILL contain
+    /// at least one non-zombie process whose `(pid, startTime)` matches a recorded `POSIXProcessIdentity` and whose current
+    /// `pgid` is still in `collectedGroups`.
+    public static func activeVerifiedProcessGroups(
+        collectedGroups: [pid_t],
+        trackedMembers: [pid_t: POSIXProcessIdentity],
+        excludingProcessGroup: pid_t = Darwin.getpgrp(),
+        identityProvider: (pid_t) -> POSIXProcessIdentity? = { processIdentity(for: $0) }
+    ) -> [pid_t] {
+        let allowedSet = Set(collectedGroups.filter { $0 > 1 && $0 != excludingProcessGroup })
+        guard !allowedSet.isEmpty else { return [] }
+
+        var verifiedLiveGroups = Set<pid_t>()
+        for (pid, recorded) in trackedMembers {
+            guard let live = identityProvider(pid),
+                  !live.isZombie,
+                  recorded.matchesProcess(live),
+                  live.pgid > 1,
+                  live.pgid != excludingProcessGroup,
+                  allowedSet.contains(live.pgid)
+            else {
+                continue
+            }
+            verifiedLiveGroups.insert(live.pgid)
+        }
+        return collectedGroups.filter { verifiedLiveGroups.contains($0) }
     }
 }
 
@@ -628,84 +887,267 @@ public final class POSIXPseudoTerminalSession: @unchecked Sendable {
         }
     }
 
-    /// Escalates `SIGINT -> wait(sigintGraceSeconds) -> SIGTERM -> wait(sigtermGraceSeconds) -> descendant-PGID SIGKILL` (R42).
+    /// Escalates `SIGINT -> wait(sigintGraceSeconds) -> SIGTERM -> wait(sigtermGraceSeconds) -> SIGKILL`,
+    /// collecting all descendants and their process groups BEFORE sending the first signal (`03-relayide.md` M2 §6, R42, R54).
     @discardableResult
     public func terminateWithEscalation(
         sigintGraceSeconds: TimeInterval = 10.0,
         sigtermGraceSeconds: TimeInterval = 5.0,
         onStep: (@Sendable (PTYTerminationEscalationStep) -> Void)? = nil
     ) -> [PTYTerminationEscalationStep] {
+        terminateWithEscalationReport(
+            sigintGraceSeconds: sigintGraceSeconds,
+            sigtermGraceSeconds: sigtermGraceSeconds,
+            onStep: onStep
+        ).steps
+    }
+
+    /// Full escalation ladder returning step trace, collected groups/descendants, enumeration status, and any surviving PIDs.
+    @discardableResult
+    public func terminateWithEscalationReport(
+        sigintGraceSeconds: TimeInterval = 10.0,
+        sigtermGraceSeconds: TimeInterval = 5.0,
+        descendantEnumerator: ((pid_t) -> (pids: [pid_t], succeeded: Bool))? = nil,
+        onStep: (@Sendable (PTYTerminationEscalationStep) -> Void)? = nil
+    ) -> PTYTerminationEscalationReport {
         state.condition.lock()
         let pid = state.childPID
         let running = state.isRunningFlag
         state.condition.unlock()
 
-        guard running, pid > 0 else { return [] }
-        var steps: [PTYTerminationEscalationStep] = []
-        let callerPGID = Darwin.getpgrp()
+        guard running, pid > 0 else {
+            return PTYTerminationEscalationReport(
+                steps: [],
+                initialDescendantPIDs: [],
+                initialProcessGroupIDs: [],
+                survivingPIDs: [],
+                enumerationSucceeded: true
+            )
+        }
 
-        // 1. SIGINT to relay.sh's process group (-pid), wait sigintGraceSeconds
+        let callerPGID = Darwin.getpgrp()
+        let selfPID = Darwin.getpid()
+
+        // R54: Collect ALL descendants and their process groups BEFORE sending the very first signal (`SIGINT`),
+        // because `pid` (e.g. `/bin/sh` in `verify`) may exit immediately on `SIGINT`, reparenting any `setpgrp`
+        // descendant to `launchd` (PID 1) before `SIGKILL` would ever be reached.
+        let enumResult = (descendantEnumerator ?? { POSIXProcessTree.enumerateDescendantsWithFallback(of: $0) })(pid)
+        let enumerationSucceeded = enumResult.succeeded
+        var allDiscoveredDescendants: [pid_t] = enumResult.pids
+        var discoveredDescendantSet = Set<pid_t>(allDiscoveredDescendants)
+
+        var collectedGroups = POSIXProcessTree.processGroupIDs(
+            for: [pid] + allDiscoveredDescendants,
+            excludingProcessGroup: callerPGID
+        )
+        if pid > 1 && pid != callerPGID && Darwin.getpgid(pid) == pid && !collectedGroups.contains(pid) {
+            collectedGroups.insert(pid, at: 0)
+        }
+
+        var trackedMembers: [pid_t: POSIXProcessIdentity] = [:]
+        for candidate in [pid] + allDiscoveredDescendants where candidate > 1 && candidate != selfPID {
+            if let identity = POSIXProcessTree.processIdentity(for: candidate) {
+                trackedMembers[candidate] = identity
+            }
+        }
+        for pgid in collectedGroups {
+            for member in POSIXProcessTree.membersOfProcessGroup(pgid) where member.pid != selfPID {
+                if trackedMembers[member.pid] == nil {
+                    trackedMembers[member.pid] = member
+                }
+                if member.pid != pid && discoveredDescendantSet.insert(member.pid).inserted {
+                    allDiscoveredDescendants.append(member.pid)
+                }
+            }
+        }
+
+        let initialDescendantPIDs = allDiscoveredDescendants
+        let initialProcessGroupIDs = collectedGroups
+
+        func refreshTrackedTree() {
+            let currentlyVerified = POSIXProcessTree.activeVerifiedProcessGroups(
+                collectedGroups: collectedGroups,
+                trackedMembers: trackedMembers,
+                excludingProcessGroup: callerPGID
+            )
+            for pgid in currentlyVerified {
+                for member in POSIXProcessTree.membersOfProcessGroup(pgid) where member.pid != selfPID {
+                    if trackedMembers[member.pid] == nil {
+                        trackedMembers[member.pid] = member
+                    }
+                    if member.pid != pid && discoveredDescendantSet.insert(member.pid).inserted {
+                        allDiscoveredDescendants.append(member.pid)
+                    }
+                }
+            }
+            for (memberPID, recorded) in Array(trackedMembers) {
+                guard let live = POSIXProcessTree.processIdentity(for: memberPID),
+                      !live.isZombie,
+                      recorded.matchesProcess(live)
+                else {
+                    continue
+                }
+                if live.pgid > 1 && live.pgid != callerPGID && !collectedGroups.contains(live.pgid) {
+                    collectedGroups.append(live.pgid)
+                }
+                let childStep = POSIXProcessTree.directChildrenWithStatus(of: memberPID)
+                for childPID in childStep.pids where childPID > 1 && childPID != selfPID {
+                    if trackedMembers[childPID] == nil,
+                       let childID = POSIXProcessTree.processIdentity(for: childPID) {
+                        trackedMembers[childPID] = childID
+                        if childPID != pid && discoveredDescendantSet.insert(childPID).inserted {
+                            allDiscoveredDescendants.append(childPID)
+                        }
+                        if childID.pgid > 1 && childID.pgid != callerPGID && !collectedGroups.contains(childID.pgid) {
+                            collectedGroups.append(childID.pgid)
+                        }
+                    }
+                }
+            }
+        }
+
+        func sendSignalToVerifiedGroups(_ sig: Int32) {
+            refreshTrackedTree()
+            let activeGroups = POSIXProcessTree.activeVerifiedProcessGroups(
+                collectedGroups: collectedGroups,
+                trackedMembers: trackedMembers,
+                excludingProcessGroup: callerPGID
+            )
+            for pgid in activeGroups {
+                if Darwin.kill(-pgid, sig) != 0 && errno == ESRCH && pgid == pid {
+                    state.condition.lock()
+                    let stillRunning = state.isRunningFlag
+                    state.condition.unlock()
+                    if stillRunning {
+                        _ = Darwin.kill(pid, sig)
+                    }
+                }
+            }
+            if activeGroups.isEmpty {
+                state.condition.lock()
+                let stillRunning = state.isRunningFlag
+                state.condition.unlock()
+                if stillRunning && pid != callerPGID && pid != selfPID {
+                    if Darwin.kill(-pid, sig) != 0 && errno == ESRCH {
+                        _ = Darwin.kill(pid, sig)
+                    }
+                }
+            }
+        }
+
+        func waitUntilSessionAndAllCollectedGroupsEmpty(timeout: TimeInterval) -> Bool {
+            let deadline = Date(timeIntervalSinceNow: max(0.0, timeout))
+            while true {
+                refreshTrackedTree()
+                let activeGroups = POSIXProcessTree.activeVerifiedProcessGroups(
+                    collectedGroups: collectedGroups,
+                    trackedMembers: trackedMembers,
+                    excludingProcessGroup: callerPGID
+                )
+                state.condition.lock()
+                let sessionStillRunning = state.isRunningFlag
+                state.condition.unlock()
+
+                if !sessionStillRunning && activeGroups.isEmpty {
+                    // Confirm kernel group table drain for any group that just emptied
+                    for pgid in collectedGroups {
+                        Self.waitBrieflyForProcessGroupDrain(pgid: pgid, trackedMembers: trackedMembers)
+                    }
+                    return true
+                }
+                if Date() >= deadline {
+                    return false
+                }
+                usleep(10_000)
+            }
+        }
+
+        var steps: [PTYTerminationEscalationStep] = []
+
+        // 1. SIGINT to all verified collected process groups (leader's group first), wait `sigintGraceSeconds` for ALL groups to empty
         let step1 = PTYTerminationEscalationStep.sentSIGINT(pid: pid)
         steps.append(step1)
         onStep?(step1)
-        if Darwin.kill(-pid, SIGINT) != 0 && errno == ESRCH {
-            _ = Darwin.kill(pid, SIGINT)
-        }
-        if state.waitForExit(timeout: max(0.0, sigintGraceSeconds)) {
-            Self.waitBrieflyForProcessGroupDrain(pgid: pid)
-            return steps
+        sendSignalToVerifiedGroups(SIGINT)
+        if waitUntilSessionAndAllCollectedGroupsEmpty(timeout: sigintGraceSeconds) {
+            return PTYTerminationEscalationReport(
+                steps: steps,
+                initialDescendantPIDs: initialDescendantPIDs,
+                initialProcessGroupIDs: initialProcessGroupIDs,
+                survivingPIDs: [],
+                enumerationSucceeded: enumerationSucceeded
+            )
         }
 
-        // 2. SIGTERM to relay.sh's process group (-pid), wait sigtermGraceSeconds
+        // 2. SIGTERM to all verified still-active collected process groups, wait `sigtermGraceSeconds` for ALL groups to empty
         let step2 = PTYTerminationEscalationStep.sentSIGTERM(pid: pid)
         steps.append(step2)
         onStep?(step2)
-        if Darwin.kill(-pid, SIGTERM) != 0 && errno == ESRCH {
-            _ = Darwin.kill(pid, SIGTERM)
-        }
-        if state.waitForExit(timeout: max(0.0, sigtermGraceSeconds)) {
-            Self.waitBrieflyForProcessGroupDrain(pgid: pid)
-            return steps
+        sendSignalToVerifiedGroups(SIGTERM)
+        if waitUntilSessionAndAllCollectedGroupsEmpty(timeout: sigtermGraceSeconds) {
+            return PTYTerminationEscalationReport(
+                steps: steps,
+                initialDescendantPIDs: initialDescendantPIDs,
+                initialProcessGroupIDs: initialProcessGroupIDs,
+                survivingPIDs: [],
+                enumerationSucceeded: enumerationSucceeded
+            )
         }
 
-        // 3. Snapshot all descendants and their process groups BEFORE sending SIGKILL, because
-        //    killing `pid` first reparents its children to PID 1 and the agent runs in its own pgid.
-        let descendants = POSIXProcessTree.allDescendants(of: pid)
-        let pgids = POSIXProcessTree.processGroupIDs(
-            for: [pid] + descendants,
-            excludingProcessGroup: callerPGID
-        )
+        // 3. SIGKILL to all verified still-active collected process groups and verified surviving members
+        refreshTrackedTree()
         let step3 = PTYTerminationEscalationStep.sentSIGKILL(
             pid: pid,
-            descendantPIDs: descendants,
-            processGroupIDs: pgids
+            descendantPIDs: allDiscoveredDescendants,
+            processGroupIDs: collectedGroups
         )
         steps.append(step3)
         onStep?(step3)
 
-        if pid != callerPGID {
-            _ = Darwin.kill(-pid, SIGKILL)
-        }
-        _ = Darwin.kill(pid, SIGKILL)
-        for pgid in pgids {
-            _ = Darwin.kill(-pgid, SIGKILL)
-        }
-        for descPID in descendants where descPID > 1 && descPID != Darwin.getpid() {
-            _ = Darwin.kill(descPID, SIGKILL)
+        sendSignalToVerifiedGroups(SIGKILL)
+        for (memberPID, recorded) in trackedMembers where memberPID > 1 && memberPID != selfPID {
+            if let live = POSIXProcessTree.processIdentity(for: memberPID),
+               !live.isZombie,
+               recorded.matchesProcess(live),
+               live.pgid != callerPGID {
+                _ = Darwin.kill(memberPID, SIGKILL)
+            }
         }
 
-        _ = state.waitForExit(timeout: 5.0)
-        Self.waitBrieflyForProcessGroupDrain(pgid: pid)
-        for pgid in pgids {
-            Self.waitBrieflyForProcessGroupDrain(pgid: pgid)
+        _ = waitUntilSessionAndAllCollectedGroupsEmpty(timeout: 5.0)
+
+        var survivors: [pid_t] = []
+        for (memberPID, recorded) in trackedMembers where memberPID > 1 && memberPID != selfPID {
+            if let live = POSIXProcessTree.processIdentity(for: memberPID),
+               !live.isZombie,
+               recorded.matchesProcess(live) {
+                survivors.append(memberPID)
+            }
         }
-        return steps
+        survivors.sort()
+
+        return PTYTerminationEscalationReport(
+            steps: steps,
+            initialDescendantPIDs: initialDescendantPIDs,
+            initialProcessGroupIDs: initialProcessGroupIDs,
+            survivingPIDs: survivors,
+            enumerationSucceeded: enumerationSucceeded
+        )
     }
 
-    private static func waitBrieflyForProcessGroupDrain(pgid: pid_t) {
+    private static func waitBrieflyForProcessGroupDrain(
+        pgid: pid_t,
+        trackedMembers: [pid_t: POSIXProcessIdentity]
+    ) {
         guard pgid > 1, pgid != Darwin.getpgrp() else { return }
         var checks = 0
-        while Darwin.kill(-pgid, 0) == 0 && checks < 100 {
+        while Darwin.kill(-pgid, 0) == 0 && checks < 50 {
+            // Stop waiting immediately if `pgid` was recycled by an unrelated process
+            if let recordedLeader = trackedMembers[pgid],
+               let liveLeader = POSIXProcessTree.processIdentity(for: pgid),
+               !recordedLeader.matchesProcess(liveLeader) {
+                break
+            }
             checks += 1
             usleep(5_000)
         }
