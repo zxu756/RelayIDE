@@ -2142,14 +2142,22 @@ run_full_suite() {
     echo "relay.sh sha256 (end):        ${sha_sh_after}"
     echo "relay_util.py sha256 (end):   ${sha_util_after}"
     echo "================================================================"
-    if [[ "${fail_log_nonempty}" -eq 0 && "${FAIL_COUNT}" -eq 0 ]]; then
-        echo "M2 ACCEPTANCE SUITE PASSED (passed=${PASS_COUNT}, skipped_not_run=${SKIP_COUNT}, failed=0)"
-        echo "================================================================"
-        return 0
-    else
-        echo "M2 ACCEPTANCE SUITE FAILED (passed=${PASS_COUNT}, skipped_not_run=${SKIP_COUNT}, failed=${FAIL_COUNT})"
+    if [[ "${fail_log_nonempty}" -ne 0 || "${FAIL_COUNT}" -gt 0 ]]; then
+        if [[ "${SKIP_COUNT}" -gt 0 ]]; then
+            echo "M2 ACCEPTANCE SUITE FAILED (passed=${PASS_COUNT}, 没跑 ${SKIP_COUNT} 行, failed=${FAIL_COUNT})"
+        else
+            echo "M2 ACCEPTANCE SUITE FAILED (passed=${PASS_COUNT}, skipped_not_run=0, failed=${FAIL_COUNT})"
+        fi
         echo "================================================================"
         return 1
+    elif [[ "${SKIP_COUNT}" -gt 0 ]]; then
+        echo "M2 ACCEPTANCE SUITE INCOMPLETE: 没跑 ${SKIP_COUNT} 行 (passed=${PASS_COUNT}, skipped_not_run=${SKIP_COUNT}, failed=0)"
+        echo "================================================================"
+        return 2
+    else
+        echo "M2 ACCEPTANCE SUITE PASSED (passed=${PASS_COUNT}, skipped_not_run=0, failed=0)"
+        echo "================================================================"
+        return 0
     fi
 }
 
