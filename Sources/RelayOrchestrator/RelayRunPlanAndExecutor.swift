@@ -895,8 +895,9 @@ public struct RelayRunExecutor: Sendable {
             // 1. Execute all DAG lanes (`relay_runs.status` remains `.running` in SQLite, R61).
             let laneSummary = try await scheduler.executeLanesPhase()
 
-            // 2. Post-lane integration merge & optional `verify` phase (`03-relayide.md` M2 §1, §6, §9, §10, D1–D3).
+            // 2. Post-lane integration merge & optional `verify` phase (`03-relayide.md` M2 §1, §6, §7, §9, §10, D1–D3).
             let hasVerify = validatedPlan.verifyCommand != nil
+            let isRunCancelled: @Sendable () -> Bool = { registry.cancellationSignal != nil }
             var integration = try RelayIntegrationMergeRunner.runIntegrationMergePhase(
                 runID: runID,
                 repositoryPath: validatedPlan.resolvedRepoURL.path,
@@ -908,53 +909,83 @@ public struct RelayRunExecutor: Sendable {
                 gitEngine: gitEngine,
                 language: language,
                 environment: environment,
+                isCancelled: isRunCancelled,
                 emitSummaryLineOnMerged: !hasVerify,
                 onStderrLine: emitStderrLine
             )
 
             if integration.status == .merged, let verifyCommand = validatedPlan.verifyCommand {
-                guard let integrationWorktreePath = integration.worktreePath, !integrationWorktreePath.isEmpty else {
-                    throw RelayIDEError.relayEnvironmentFailure(
-                        "Integration worktree path missing before verify for run '\(runID)'"
+                if isRunCancelled() {
+                    integration.status = .cancelled
+                    integration.reason = "cancelled"
+                    integration.ready = false
+                    integration.verify = nil
+                    try database.upsertRunIntegration(runID: runID, integration)
+                    emitStderrLine(
+                        RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
+                            integration: integration,
+                            language: language
+                        )
+                    )
+                } else {
+                    guard let integrationWorktreePath = integration.worktreePath, !integrationWorktreePath.isEmpty else {
+                        throw RelayIDEError.relayEnvironmentFailure(
+                            "Integration worktree path missing before verify for run '\(runID)'"
+                        )
+                    }
+                    let timeoutSec = validatedPlan.verifyTimeoutSec ?? RelayRunPlan.defaultVerifyTimeoutSeconds
+                    let baseIntegrationSnapshot = integration
+                    let verifyOutcome = try await RelayVerifyRunner.runVerifyWithOutcome(
+                        runID: runID,
+                        projectBundlePath: projectBundleURL.path,
+                        integrationWorktreePath: integrationWorktreePath,
+                        command: verifyCommand,
+                        timeoutSec: timeoutSec,
+                        sigintGraceSeconds: cancellationPolicy.sigintGraceSeconds,
+                        sigtermGraceSeconds: cancellationPolicy.sigtermGraceSeconds,
+                        gitEngine: gitEngine,
+                        language: language,
+                        environment: environment,
+                        isCancelled: isRunCancelled,
+                        onStarted: { _, _, runningVerifyRecord in
+                            var verifyingIntegration = baseIntegrationSnapshot
+                            verifyingIntegration.status = .verifying
+                            verifyingIntegration.reason = nil
+                            verifyingIntegration.ready = false
+                            verifyingIntegration.verify = runningVerifyRecord
+                            try database.upsertRunIntegration(runID: runID, verifyingIntegration)
+                        },
+                        onStderrLine: emitStderrLine
+                    )
+                    let spawnedVerify = !(verifyOutcome.verifyRecord.status == .cancelled
+                        && verifyOutcome.verifyRecord.pid == nil
+                        && verifyOutcome.verifyRecord.logPath == nil)
+                    integration.verify = spawnedVerify ? verifyOutcome.verifyRecord : nil
+                    integration.status = verifyOutcome.integrationStatus
+                    integration.reason = verifyOutcome.integrationReason
+                    integration.ready = verifyOutcome.ready
+                    try database.upsertRunIntegration(runID: runID, integration)
+                    emitStderrLine(
+                        RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
+                            integration: integration,
+                            language: language
+                        )
                     )
                 }
-                let timeoutSec = validatedPlan.verifyTimeoutSec ?? RelayRunPlan.defaultVerifyTimeoutSeconds
-                let baseIntegrationSnapshot = integration
-                let verifyOutcome = try await RelayVerifyRunner.runVerifyWithOutcome(
-                    runID: runID,
-                    projectBundlePath: projectBundleURL.path,
-                    integrationWorktreePath: integrationWorktreePath,
-                    command: verifyCommand,
-                    timeoutSec: timeoutSec,
-                    sigintGraceSeconds: cancellationPolicy.sigintGraceSeconds,
-                    sigtermGraceSeconds: cancellationPolicy.sigtermGraceSeconds,
-                    gitEngine: gitEngine,
-                    language: language,
-                    environment: environment,
-                    onStarted: { _, _, runningVerifyRecord in
-                        var verifyingIntegration = baseIntegrationSnapshot
-                        verifyingIntegration.status = .verifying
-                        verifyingIntegration.reason = nil
-                        verifyingIntegration.ready = false
-                        verifyingIntegration.verify = runningVerifyRecord
-                        try database.upsertRunIntegration(runID: runID, verifyingIntegration)
-                    },
-                    onStderrLine: emitStderrLine
-                )
-                integration.verify = verifyOutcome.verifyRecord
-                integration.status = verifyOutcome.integrationStatus
-                integration.reason = verifyOutcome.integrationReason
-                integration.ready = verifyOutcome.ready
-                try database.upsertRunIntegration(runID: runID, integration)
-                emitStderrLine(
-                    RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
-                        integration: integration,
-                        language: language
-                    )
-                )
             }
 
             // 3. Persist terminal `relay_runs` status strictly AFTER the integration & verify phase (R61).
+            if let cancelSig = registry.cancellationSignal ?? laneSummary.cancellationSignal {
+                let sigName = RelayDAGRunScheduler.signalDisplayName(cancelSig)
+                let cancelReason = laneSummary.runReason ?? "cancelled (received \(sigName))"
+                let signalExitCode: Int32 = (cancelSig == SIGTERM) ? 143 : 130
+                return try scheduler.persistTerminalRunStatus(
+                    afterIntegration: laneSummary,
+                    overrideStatus: .cancelled,
+                    overrideReason: cancelReason,
+                    cliExitCodeOverride: signalExitCode
+                )
+            }
             return try scheduler.persistTerminalRunStatus(afterIntegration: laneSummary)
         } catch let relayErr as RelayIDEError {
             scheduler.persistFatalErrorRunStatus(relayErr)

@@ -1103,7 +1103,7 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
 
     // MARK: - Escalating Cancellation (`SIGINT -> SIGTERM -> descendant-PGID SIGKILL`, R42) & Fatal Error Helpers
 
-    private static func signalDisplayName(_ sig: Int32) -> String {
+    public static func signalDisplayName(_ sig: Int32) -> String {
         switch sig {
         case SIGINT:
             return "SIGINT"

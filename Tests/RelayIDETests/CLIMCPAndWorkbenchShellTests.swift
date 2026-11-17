@@ -5,6 +5,7 @@ import RelayOrchestrator
 import RelaySemanticMerge
 import RelayWorkbenchShell
 import RelayWorkspaceStore
+import RelayWorktreeGit
 import Testing
 
 // `.serialized`: many tests here run git and a compiler and block their thread while they wait. Run all at once they
@@ -4272,5 +4273,384 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(persistedAfterRecover.integration?.status == .interrupted)
         #expect(persistedAfterRecover.integration?.verify?.status == .interrupted)
         #expect(persistedAfterRecover.integration?.verify?.finishedAt != nil)
+    }
+
+    // MARK: - 40. M2 Stage 4 Item 2: Three-Phase `SIGINT` (130) / `SIGTERM` (143) Cancellation (Lane, Merge + `MERGE_HEAD` Abort, Pre-Merge / Between-Merge / Pre-Verify Checks, and `verify` Escalation Ladder, §7, Rows 18, 19, 21)
+
+    @Test("RelayCLIRunner run handles SIGINT (130) and SIGTERM (143) across lane, merge (aborting MERGE_HEAD cleanly), pre-merge/between-merge/pre-verify boundaries, and verify escalation ladder while preserving completed merges")
+    func cliRunHandlesSIGINTSIGTERMAcrossLaneMergeAndVerifyPhases() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-m2-s4-item2")
+        let tempToken = fx.rootURL.lastPathComponent
+        var trackedPIDs: [pid_t] = []
+        defer {
+            for pid in trackedPIDs where pid > 0 {
+                _ = Darwin.kill(-pid, SIGKILL)
+                _ = Darwin.kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: fx.rootURL)
+        }
+
+        let gatesDir = fx.rootURL.appendingPathComponent("gates", isDirectory: true)
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        let promptsDir = plansDir.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: gatesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+
+        let fastPolicy = RelayCancellationPolicy(sigintGraceSeconds: 0.2, sigtermGraceSeconds: 0.2)
+
+        // 1. Lane-phase SIGINT (Row 21): lane blocked -> exit 130, run cancelled, integration skipped, no integration branch/worktree.
+        do {
+            let ready1 = gatesDir.appendingPathComponent("p1-lane-ready")
+            let never1 = gatesDir.appendingPathComponent("p1-never")
+            let verifyMarker1 = gatesDir.appendingPathComponent("p1-verify-ran")
+            try """
+            STUB WRITE src/p1.txt wip
+            FAKE_RELAY ARM_READY \(ready1.path)
+            STUB WAIT \(never1.path) 10
+            """.write(to: promptsDir.appendingPathComponent("p1.md"), atomically: true, encoding: .utf8)
+
+            let plan1URL = plansDir.appendingPathComponent("p1-lane-sigint.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/p1.md", "after": []]],
+                    "verify": ": > \"\(verifyMarker1.path)\""
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan1URL, options: .atomic)
+
+            let reg1 = RelayActiveLaneRegistry()
+            let run1ID = "20261117-080000-0001"
+            let cli1 = RelayCLIRunner(runIDProvider: { run1ID }, activeLaneRegistry: reg1, cancellationPolicy: fastPolicy)
+            let task1 = Task {
+                await cli1.executeCommand(
+                    arguments: ["run", plan1URL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                    environment: fx.baseEnvironment
+                )
+            }
+            for _ in 0..<250 where !FileManager.default.fileExists(atPath: ready1.path) {
+                try await Task.sleep(nanoseconds: 15_000_000)
+            }
+            #expect(FileManager.default.fileExists(atPath: ready1.path))
+            reg1.requestCancellation(signal: SIGINT)
+            let res1 = await task1.value
+
+            #expect(res1.exitCode == 130)
+            let rec1 = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res1.stdout)
+            #expect(rec1.status == .cancelled)
+            #expect(rec1.integration?.status == .skipped)
+            #expect(rec1.integration?.ready == false)
+            #expect(rec1.integration?.branch == nil)
+            #expect(rec1.integration?.worktreePath == nil)
+            #expect(rec1.integration?.verify == nil)
+            #expect(!FileManager.default.fileExists(atPath: verifyMarker1.path))
+            let intRefCheck = try runTool(
+                "/usr/bin/git",
+                ["show-ref", "--verify", "--quiet", "refs/heads/relay/\(run1ID)/integration"],
+                environment: fx.baseEnvironment,
+                currentDirectory: fx.repoURL
+            )
+            #expect(intRefCheck.exitCode != 0)
+        }
+
+        // 2a. Pre-merge boundary check: signal arrives right as last lane finishes, before merge phase creates integration branch/worktree.
+        do {
+            try "STUB WRITE src/p2a.txt v1\n".write(to: promptsDir.appendingPathComponent("p2a.md"), atomically: true, encoding: .utf8)
+            let plan2aURL = plansDir.appendingPathComponent("p2a-premerge.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/p2a.md", "after": []]]
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan2aURL, options: .atomic)
+
+            let reg2a = RelayActiveLaneRegistry()
+            let run2aID = "20261117-080001-0002"
+            let cli2a = RelayCLIRunner(runIDProvider: { run2aID }, activeLaneRegistry: reg2a, cancellationPolicy: fastPolicy)
+            let res2a = await cli2a.executeCommand(
+                arguments: ["run", plan2aURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment,
+                onLiveStderrLine: { line in
+                    if line.contains("[relay] lane a (claude)") && line.contains("succeeded") {
+                        reg2a.requestCancellation(signal: SIGINT)
+                    }
+                }
+            )
+            #expect(res2a.exitCode == 130)
+            let rec2a = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res2a.stdout)
+            #expect(rec2a.status == .cancelled)
+            #expect(rec2a.integration?.status == .cancelled)
+            #expect(rec2a.integration?.ready == false)
+            #expect(rec2a.integration?.branch == nil)
+            #expect(rec2a.integration?.worktreePath == nil)
+        }
+
+        // 2b. Between-merge boundary check (SIGTERM -> 143): signal arrives after lane `a` merges, before lane `b` merges.
+        do {
+            try "STUB WRITE src/p2b_a.txt va\n".write(to: promptsDir.appendingPathComponent("p2b_a.md"), atomically: true, encoding: .utf8)
+            try "STUB WRITE src/p2b_b.txt vb\n".write(to: promptsDir.appendingPathComponent("p2b_b.md"), atomically: true, encoding: .utf8)
+            let plan2bURL = plansDir.appendingPathComponent("p2b-between-merges.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [
+                        ["id": "a", "agent": "claude", "prompt": "prompts/p2b_a.md", "after": []],
+                        ["id": "b", "agent": "codex", "prompt": "prompts/p2b_b.md", "after": []]
+                    ]
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan2bURL, options: .atomic)
+
+            let reg2b = RelayActiveLaneRegistry()
+            let run2bID = "20261117-080002-0003"
+            let cli2b = RelayCLIRunner(runIDProvider: { run2bID }, activeLaneRegistry: reg2b, cancellationPolicy: fastPolicy)
+            let res2b = await cli2b.executeCommand(
+                arguments: ["run", plan2bURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment,
+                onLiveStderrLine: { line in
+                    if line.contains("[relay] merge lane a") {
+                        reg2b.requestCancellation(signal: SIGTERM)
+                    }
+                }
+            )
+            #expect(res2b.exitCode == 143)
+            let rec2b = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res2b.stdout)
+            #expect(rec2b.status == .cancelled)
+            #expect(rec2b.integration?.status == .cancelled)
+            #expect(rec2b.integration?.ready == false)
+            #expect(rec2b.integration?.merges.map(\.status) == [.merged, .notAttempted])
+            #expect(rec2b.integration?.headCommitOID == rec2b.integration?.merges[0].mergeCommitOID)
+        }
+
+        // 2c. Mid-merge SIGINT during in-flight `git merge` with `MERGE_HEAD` (Row 19):
+        // Configure a custom git merge driver on `shared.txt` that signals `driverReady`, waits for `driverRelease`, and exits 1.
+        do {
+            let mergeRepoFx = try makeIsolatedRunFixture(prefix: "relay-m2-s4-mergesig")
+            defer { try? FileManager.default.removeItem(at: mergeRepoFx.rootURL) }
+
+            try "baseline-shared\n".write(to: mergeRepoFx.repoURL.appendingPathComponent("shared.txt"), atomically: true, encoding: .utf8)
+            try "shared.txt merge=slowconflict\n".write(to: mergeRepoFx.repoURL.appendingPathComponent(".gitattributes"), atomically: true, encoding: .utf8)
+            _ = try runTool("/usr/bin/git", ["add", "shared.txt", ".gitattributes"], environment: mergeRepoFx.baseEnvironment, currentDirectory: mergeRepoFx.repoURL)
+            _ = try runTool("/usr/bin/git", ["commit", "-m", "add shared.txt and .gitattributes"], environment: mergeRepoFx.baseEnvironment, currentDirectory: mergeRepoFx.repoURL)
+
+            let driverReady = gatesDir.appendingPathComponent("merge-driver-ready")
+            let driverRelease = gatesDir.appendingPathComponent("merge-driver-release")
+            let verifyRan2c = gatesDir.appendingPathComponent("p2c-verify-ran")
+            let driverScriptURL = gatesDir.appendingPathComponent("slow-merge-driver.sh")
+            try """
+            #!/bin/sh
+            : > "\(driverReady.path)"
+            i=0
+            while [ ! -e "\(driverRelease.path)" ] && [ "$i" -lt 250 ]; do
+                /usr/bin/perl -e 'select(undef, undef, undef, 0.02);' "\(tempToken)-mergedrv"
+                i=$((i + 1))
+            done
+            printf '<<<<<<< HEAD\\nconflict\\n=======\\nother\\n>>>>>>> branch\\n' > "$2"
+            exit 1
+            """.write(to: driverScriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: driverScriptURL.path)
+
+            _ = try runTool(
+                "/usr/bin/git",
+                ["config", "merge.slowconflict.name", "Slow conflict test driver"],
+                environment: mergeRepoFx.baseEnvironment,
+                currentDirectory: mergeRepoFx.repoURL
+            )
+            _ = try runTool(
+                "/usr/bin/git",
+                ["config", "merge.slowconflict.driver", "\"\(driverScriptURL.path)\" %O %A %B"],
+                environment: mergeRepoFx.baseEnvironment,
+                currentDirectory: mergeRepoFx.repoURL
+            )
+
+            try "STUB WRITE shared.txt side-a\n".write(to: promptsDir.appendingPathComponent("p2c_a.md"), atomically: true, encoding: .utf8)
+            try "STUB WRITE shared.txt side-b\n".write(to: promptsDir.appendingPathComponent("p2c_b.md"), atomically: true, encoding: .utf8)
+            let plan2cURL = plansDir.appendingPathComponent("p2c-midmerge-sigint.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": mergeRepoFx.repoURL.path,
+                    "base": "main",
+                    "lanes": [
+                        ["id": "a", "agent": "claude", "prompt": "prompts/p2c_a.md", "after": []],
+                        ["id": "b", "agent": "codex", "prompt": "prompts/p2c_b.md", "after": []]
+                    ],
+                    "verify": ": > \"\(verifyRan2c.path)\""
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan2cURL, options: .atomic)
+
+            let reg2c = RelayActiveLaneRegistry()
+            let run2cID = "20261117-080003-0004"
+            let cli2c = RelayCLIRunner(runIDProvider: { run2cID }, activeLaneRegistry: reg2c, cancellationPolicy: fastPolicy)
+            let task2c = Task {
+                await cli2c.executeCommand(
+                    arguments: ["run", plan2cURL.path, "--project", mergeRepoFx.projectURL.path, "--relay-sh", mergeRepoFx.fakeRelayShURL.path, "--lang", "en"],
+                    environment: mergeRepoFx.baseEnvironment
+                )
+            }
+
+            for _ in 0..<300 where !FileManager.default.fileExists(atPath: driverReady.path) {
+                try await Task.sleep(nanoseconds: 15_000_000)
+            }
+            #expect(FileManager.default.fileExists(atPath: driverReady.path))
+            reg2c.requestCancellation(signal: SIGINT)
+            try Data().write(to: driverRelease)
+            let res2c = await task2c.value
+
+            #expect(res2c.exitCode == 130)
+            #expect(!FileManager.default.fileExists(atPath: verifyRan2c.path))
+            let rec2c = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res2c.stdout)
+            #expect(rec2c.status == .cancelled)
+            #expect(rec2c.integration?.status == .cancelled)
+            #expect(rec2c.integration?.ready == false)
+            #expect(rec2c.integration?.verify == nil)
+            let aMergeOID = try #require(rec2c.integration?.merges.first?.mergeCommitOID)
+            #expect(rec2c.integration?.headCommitOID == aMergeOID)
+
+            let intWTPath = try #require(rec2c.integration?.worktreePath)
+            let gitEngine = GitWorktreePlumbingEngine()
+            #expect(try gitEngine.hasMergeHead(in: intWTPath, environment: mergeRepoFx.baseEnvironment) == false)
+            let wtHead = try gitEngine.runGit(["rev-parse", "HEAD"], cwd: intWTPath, environment: mergeRepoFx.baseEnvironment)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            #expect(wtHead == aMergeOID)
+            let wtPorcelain = try gitEngine.runGit(
+                ["status", "--porcelain=v1", "-uall", "--ignored"],
+                cwd: intWTPath,
+                environment: mergeRepoFx.baseEnvironment
+            )
+            #expect(wtPorcelain.isEmpty)
+        }
+
+        // 3. Pre-verify boundary check: all merges succeed, signal arrives right before `verify` spawns -> `verify` never runs, merges preserved.
+        do {
+            let preVerifyMarker = gatesDir.appendingPathComponent("p3-verify-should-not-run")
+            try "STUB WRITE src/p3.txt v3\n".write(to: promptsDir.appendingPathComponent("p3.md"), atomically: true, encoding: .utf8)
+            let plan3URL = plansDir.appendingPathComponent("p3-preverify.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/p3.md", "after": []]],
+                    "verify": ": > \"\(preVerifyMarker.path)\""
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan3URL, options: .atomic)
+
+            let reg3 = RelayActiveLaneRegistry()
+            let run3ID = "20261117-080004-0005"
+            let cli3 = RelayCLIRunner(runIDProvider: { run3ID }, activeLaneRegistry: reg3, cancellationPolicy: fastPolicy)
+            let res3 = await cli3.executeCommand(
+                arguments: ["run", plan3URL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment,
+                onLiveStderrLine: { line in
+                    if line.contains("[relay] merge lane a") {
+                        reg3.requestCancellation(signal: SIGINT)
+                    }
+                }
+            )
+            #expect(res3.exitCode == 130)
+            #expect(!FileManager.default.fileExists(atPath: preVerifyMarker.path))
+            let rec3 = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res3.stdout)
+            #expect(rec3.status == .cancelled)
+            #expect(rec3.integration?.status == .cancelled)
+            #expect(rec3.integration?.ready == false)
+            #expect(rec3.integration?.verify == nil)
+            let mergedOID3 = try #require(rec3.integration?.merges.first?.mergeCommitOID)
+            #expect(rec3.integration?.headCommitOID == mergedOID3)
+        }
+
+        // 4. Mid-verify SIGINT (130) and SIGTERM (143) (Row 18): escalates INT -> TERM -> KILL across stubborn setpgrp child,
+        // marks run/integration/verify `cancelled`, preserves completed merges & worktree, and matches `status --run` JSON.
+        for (idx, pair) in [(SIGINT, Int32(130)), (SIGTERM, Int32(143))].enumerated() {
+            let (sig, expectedCode) = pair
+            let vReady = gatesDir.appendingPathComponent("p4-vready-\(idx)")
+            let vSubPIDFile = gatesDir.appendingPathComponent("p4-vsubpid-\(idx)")
+            try "STUB WRITE src/p4_\(idx).txt merged-content-\(idx)\n".write(
+                to: promptsDir.appendingPathComponent("p4_\(idx).md"),
+                atomically: true,
+                encoding: .utf8
+            )
+
+            let verifyCmd4 = """
+            /usr/bin/perl -MPOSIX=setpgid -e '
+                my ($pfile, $tok) = @ARGV;
+                setpgid(0, 0) or die $!;
+                $SIG{INT} = $SIG{TERM} = $SIG{HUP} = "IGNORE";
+                open(my $fh, ">", $pfile) or die $!;
+                print $fh "$$\\n";
+                close($fh);
+                select(undef, undef, undef, 30);
+            ' "\(vSubPIDFile.path)" "\(tempToken)-vsub-\(idx)" </dev/null >/dev/null 2>&1 &
+            while [ ! -s "\(vSubPIDFile.path)" ]; do /bin/sleep 0.02; done
+            : > "\(vReady.path)"
+            /usr/bin/perl -e 'select(undef, undef, undef, 3.5);' "\(tempToken)-vhold-\(idx)"
+            """
+
+            let plan4URL = plansDir.appendingPathComponent("p4-verify-sig-\(idx).json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/p4_\(idx).md", "after": []]],
+                    "verify": verifyCmd4,
+                    "verify_timeout": 60
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan4URL, options: .atomic)
+
+            let reg4 = RelayActiveLaneRegistry()
+            let run4ID = "20261117-08001\(idx)-000\(6 + idx)"
+            let cli4 = RelayCLIRunner(runIDProvider: { run4ID }, activeLaneRegistry: reg4, cancellationPolicy: fastPolicy)
+            let task4 = Task {
+                await cli4.executeCommand(
+                    arguments: ["run", plan4URL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "zh"],
+                    environment: fx.baseEnvironment
+                )
+            }
+
+            for _ in 0..<300 where !FileManager.default.fileExists(atPath: vReady.path) {
+                try await Task.sleep(nanoseconds: 15_000_000)
+            }
+            #expect(FileManager.default.fileExists(atPath: vReady.path))
+            if let rawSub = try? String(contentsOf: vSubPIDFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+               let spid = pid_t(rawSub) {
+                trackedPIDs.append(spid)
+            }
+
+            reg4.requestCancellation(signal: sig)
+            let res4 = await task4.value
+            #expect(res4.exitCode == expectedCode)
+
+            let rec4 = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: res4.stdout)
+            #expect(rec4.status == .cancelled)
+            #expect(rec4.integration?.status == .cancelled)
+            #expect(rec4.integration?.ready == false)
+            #expect(rec4.integration?.verify?.status == .cancelled)
+
+            // Completed merge and integration worktree must still be intact!
+            let mergeOID4 = try #require(rec4.integration?.merges.first?.mergeCommitOID)
+            #expect(rec4.integration?.headCommitOID == mergeOID4)
+            let wtPath4 = try #require(rec4.integration?.worktreePath)
+            #expect(FileManager.default.fileExists(atPath: wtPath4))
+            #expect(FileManager.default.fileExists(atPath: (wtPath4 as NSString).appendingPathComponent("src/p4_\(idx).txt")))
+
+            if let rawSub = try? String(contentsOf: vSubPIDFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+               let spid = pid_t(rawSub) {
+                #expect(Darwin.kill(spid, 0) != 0, "Stubborn subgroup PID \(spid) survived verify signal cancellation")
+            }
+
+            let status4 = await cli4.executeCommand(
+                arguments: ["status", "--project", fx.projectURL.path, "--run", run4ID, "--lang", "zh"],
+                environment: fx.baseEnvironment
+            )
+            #expect(status4.exitCode == 0)
+            #expect(status4.stdout == res4.stdout)
+            #expect(!status4.stdout.contains("\"running\""))
+            #expect(!status4.stdout.contains("\"verifying\""))
+        }
     }
 }
