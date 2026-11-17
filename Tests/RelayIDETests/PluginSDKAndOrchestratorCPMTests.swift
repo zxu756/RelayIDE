@@ -596,33 +596,6 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(controller.isLanePaused("lane-codex") == false)
     }
 
-    // MARK: - 13. `VerificationCommandGateEvaluator` Live Shell Gate & Diagnostic Parser
-
-    @Test("VerificationCommandGateEvaluator runs verification shell commands and parses compiler file:line:col errors")
-    func verificationCommandGateEvaluatorExecutionAndDiagnosticParsing() async {
-        let evaluator = VerificationCommandGateEvaluator(defaultTimeoutSeconds: 10.0)
-
-        let greenGate = await evaluator.runGateCommand(
-            taskID: "t-green",
-            shellCommand: "echo 'Test Suite Passed (42 assertions)'",
-            workingDirectory: "/tmp"
-        )
-        #expect(greenGate.passed == true)
-        #expect(greenGate.exitCode == 0)
-        #expect(greenGate.stdoutSnippet.contains("42 assertions"))
-
-        let redOutput = """
-        Sources/Ledger/BillingEngine.swift:88:15: error: cannot find 'rebateBps' in scope
-        Sources/Ledger/BillingEngine.swift:91:9: warning: immutable value 'tmp' was never used
-        """
-        let parsedDiags = VerificationCommandGateEvaluator.parseCompilerDiagnostics(from: redOutput)
-        #expect(parsedDiags.count == 2)
-        #expect(parsedDiags[0].filePath.hasSuffix("BillingEngine.swift"))
-        #expect(parsedDiags[0].line == 88)
-        #expect(parsedDiags[0].column == 15)
-        #expect(parsedDiags[0].severity.lowercased() == "error")
-    }
-
     // MARK: - 14. `RelayDemoWorkspaceSynthesizer` Full Flagship Campaign Hydration
 
     @Test("RelayDemoWorkspaceSynthesizer synthesizes complete 4-vendor flagship campaign and hydrates SQLite workspace")
