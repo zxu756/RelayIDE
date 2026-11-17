@@ -1375,8 +1375,146 @@ struct PluginSDKAndOrchestratorCPMTests {
         let persisted2 = try #require(try db.fetchRun(runID: run2, reconcileWithLock: false)?.integration)
         #expect(persisted2.status == .error)
         #expect(persisted2.ready == false)
-        #expect(persisted2.reason == "Merge with strategy ort failed.")
+        #expect(persisted2.reason == "error: The following untracked working tree files would be overwritten by merge:")
+        #expect(persisted2.reason != "Merge with strategy ort failed.")
         #expect(persisted2.reason?.contains("\n") == false)
+
+        // 4b. Non-conflict `git merge` failure reason selection: first `fatal:` line when present, else last non-empty stderr line.
+        let fatalWrapperURL = tempRoot.appendingPathComponent("git-fatal-no-mh.sh")
+        let fatalWrapperScript = """
+        #!/bin/sh
+        case "$*" in
+          *"merge --no-ff"*)
+            printf 'warning: preliminary note\\nfatal: refusing to merge unrelated histories\\nMerge with strategy ort failed.\\n' >&2
+            exit 128
+            ;;
+        esac
+        exec /usr/bin/git "$@"
+        """
+        try fatalWrapperScript.write(to: fatalWrapperURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fatalWrapperURL.path)
+        let fatalEngine = GitWorktreePlumbingEngine(gitExecutablePath: fatalWrapperURL.path)
+
+        let run2Fatal = "20261117-030001-002f"
+        let laneCFatal = RelayRunLaneRecord(runID: run2Fatal, laneID: "c", ordinal: 0, agent: .vibe, promptPath: "p.md", status: .succeeded, branch: "relay/\(run2Fatal)/c", commitOID: cOID)
+        try db.createRun(
+            RelayRunRecord(
+                runID: run2Fatal,
+                repoPath: repoDir.path,
+                planCopyPath: tempRoot.appendingPathComponent("plan.json").path,
+                baseRef: "main",
+                baseCommitOID: baseOID,
+                verifyCommand: nil,
+                relayShPath: "/usr/bin/true",
+                relayShSHA256: String(repeating: "0", count: 64),
+                startedAt: Date(),
+                status: .running,
+                relayidePID: getpid(),
+                lanes: [laneCFatal]
+            )
+        )
+        let wt2Fatal = try fatalEngine.createIntegrationWorktree(
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            runID: run2Fatal,
+            baseCommitOID: baseOID,
+            environment: gitEnv
+        )
+        var integration2Fatal = RelayRunIntegrationRecord(
+            branch: wt2Fatal.branchName,
+            worktreePath: wt2Fatal.worktreePath,
+            baseCommitOID: baseOID,
+            headCommitOID: baseOID,
+            status: .merging,
+            ready: false,
+            merges: [RelayRunMergeRecord(ordinal: 0, laneID: "c", laneCommitOID: cOID, status: .notAttempted)]
+        )
+        try db.upsertRunIntegration(runID: run2Fatal, integration2Fatal)
+        do {
+            _ = try RelayIntegrationMergeRunner.mergeSingleLaneStep(
+                runID: run2Fatal,
+                stepIndex: 0,
+                lane: laneCFatal,
+                integration: &integration2Fatal,
+                database: db,
+                gitEngine: fatalEngine,
+                environment: gitEnv
+            )
+            Issue.record("Expected non-conflict fatal merge failure to throw 125")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+        let persisted2Fatal = try #require(try db.fetchRun(runID: run2Fatal, reconcileWithLock: false)?.integration)
+        #expect(persisted2Fatal.status == .error)
+        #expect(persisted2Fatal.reason == "fatal: refusing to merge unrelated histories")
+
+        let fallbackWrapperURL = tempRoot.appendingPathComponent("git-fallback-no-mh.sh")
+        let fallbackWrapperScript = """
+        #!/bin/sh
+        case "$*" in
+          *"merge --no-ff"*)
+            printf 'preliminary diagnostic line\\ncustom final failure line\\n' >&2
+            exit 2
+            ;;
+        esac
+        exec /usr/bin/git "$@"
+        """
+        try fallbackWrapperScript.write(to: fallbackWrapperURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fallbackWrapperURL.path)
+        let fallbackEngine = GitWorktreePlumbingEngine(gitExecutablePath: fallbackWrapperURL.path)
+
+        let run2Fallback = "20261117-030001-002b"
+        let laneCFallback = RelayRunLaneRecord(runID: run2Fallback, laneID: "c", ordinal: 0, agent: .vibe, promptPath: "p.md", status: .succeeded, branch: "relay/\(run2Fallback)/c", commitOID: cOID)
+        try db.createRun(
+            RelayRunRecord(
+                runID: run2Fallback,
+                repoPath: repoDir.path,
+                planCopyPath: tempRoot.appendingPathComponent("plan.json").path,
+                baseRef: "main",
+                baseCommitOID: baseOID,
+                verifyCommand: nil,
+                relayShPath: "/usr/bin/true",
+                relayShSHA256: String(repeating: "0", count: 64),
+                startedAt: Date(),
+                status: .running,
+                relayidePID: getpid(),
+                lanes: [laneCFallback]
+            )
+        )
+        let wt2Fallback = try fallbackEngine.createIntegrationWorktree(
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            runID: run2Fallback,
+            baseCommitOID: baseOID,
+            environment: gitEnv
+        )
+        var integration2Fallback = RelayRunIntegrationRecord(
+            branch: wt2Fallback.branchName,
+            worktreePath: wt2Fallback.worktreePath,
+            baseCommitOID: baseOID,
+            headCommitOID: baseOID,
+            status: .merging,
+            ready: false,
+            merges: [RelayRunMergeRecord(ordinal: 0, laneID: "c", laneCommitOID: cOID, status: .notAttempted)]
+        )
+        try db.upsertRunIntegration(runID: run2Fallback, integration2Fallback)
+        do {
+            _ = try RelayIntegrationMergeRunner.mergeSingleLaneStep(
+                runID: run2Fallback,
+                stepIndex: 0,
+                lane: laneCFallback,
+                integration: &integration2Fallback,
+                database: db,
+                gitEngine: fallbackEngine,
+                environment: gitEnv
+            )
+            Issue.record("Expected non-conflict fallback merge failure to throw 125")
+        } catch let err as RelayIDEError {
+            #expect(err.cliExitCode == 125)
+        }
+        let persisted2Fallback = try #require(try db.fetchRun(runID: run2Fallback, reconcileWithLock: false)?.integration)
+        #expect(persisted2Fallback.status == .error)
+        #expect(persisted2Fallback.reason == "custom final failure line")
 
         // 5. Post-abort cleanliness check failure -> throws 125 and marks integration `.error`
         let dirtyAbortWrapperURL = tempRoot.appendingPathComponent("git-dirty-abort.sh")

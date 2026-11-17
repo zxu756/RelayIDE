@@ -599,7 +599,8 @@ public enum RelayIntegrationMergeRunner {
     internal static func extractIntegrationErrorReason(from error: RelayIDEError) -> String {
         switch error {
         case .gitPlumbingFailure(_, _, let stderr):
-            return GitWorktreePlumbingEngine.lastNonEmptyLine(of: stderr) ?? error.localizedDescription(in: .en)
+            return GitWorktreePlumbingEngine.preferredErrorReasonLine(stderr: stderr)
+                ?? error.localizedDescription(in: .en)
         case .relayEnvironmentFailure(let message):
             return message
         default:

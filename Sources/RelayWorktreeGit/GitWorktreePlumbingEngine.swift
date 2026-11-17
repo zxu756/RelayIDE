@@ -101,12 +101,13 @@ public struct GitWorktreePlumbingEngine: Sendable {
         if ancestorCheck.exitCode == 0 {
             return .noChanges
         } else if ancestorCheck.exitCode != 1 {
-            let lastLine = Self.lastNonEmptyLine(of: ancestorCheck.stderr)
-                ?? Self.lastNonEmptyLine(of: ancestorCheck.stdout)
-                ?? "git merge-base --is-ancestor exited with \(ancestorCheck.exitCode)"
+            let reasonLine = Self.preferredErrorReasonLine(
+                stderr: ancestorCheck.stderr,
+                stdout: ancestorCheck.stdout
+            ) ?? "git merge-base --is-ancestor exited with \(ancestorCheck.exitCode)"
             return .nonConflictError(
                 exitCode: ancestorCheck.exitCode,
-                lastStderrLine: lastLine,
+                lastStderrLine: reasonLine,
                 command: "git merge-base --is-ancestor \(rawCommitOID) HEAD"
             )
         }
@@ -182,12 +183,13 @@ public struct GitWorktreePlumbingEngine: Sendable {
                 headCommitOID: preMergeHead
             )
         } else {
-            let lastStderr = Self.lastNonEmptyLine(of: mergeResult.stderr)
-                ?? Self.lastNonEmptyLine(of: mergeResult.stdout)
-                ?? "git merge exited with \(mergeResult.exitCode)"
+            let reasonLine = Self.preferredErrorReasonLine(
+                stderr: mergeResult.stderr,
+                stdout: mergeResult.stdout
+            ) ?? "git merge exited with \(mergeResult.exitCode)"
             return .nonConflictError(
                 exitCode: mergeResult.exitCode,
-                lastStderrLine: lastStderr,
+                lastStderrLine: reasonLine,
                 command: "git " + mergeArgs.joined(separator: " ")
             )
         }
@@ -340,6 +342,25 @@ public struct GitWorktreePlumbingEngine: Sendable {
             }
         }
         return lines
+    }
+
+    public static func preferredErrorReasonLine(stderr: String, stdout: String = "") -> String? {
+        let normalizedStderr = stderr
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var nonEmptyStderrLines: [String] = []
+        for rawLine in normalizedStderr.split(separator: "\n", omittingEmptySubsequences: true) {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if trimmed.hasPrefix("error:") || trimmed.hasPrefix("fatal:") {
+                return trimmed
+            }
+            nonEmptyStderrLines.append(trimmed)
+        }
+        if let lastStderr = nonEmptyStderrLines.last {
+            return lastStderr
+        }
+        return lastNonEmptyLine(of: stdout)
     }
 
     public static func lastNonEmptyLine(of text: String) -> String? {
