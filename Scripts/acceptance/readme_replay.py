@@ -10,6 +10,7 @@ The commands are taken from the ```bash blocks of the two files, not from a copy
 
 Classification:
   RUN             executed as written
+  SKIP-AGENTS     `RelayIDE run ...` (launches coding agents via agent-relay; covered with stub agents by m1-run.sh and m2-merge.sh)
   SKIP-GUI        would open the desktop window (app bundle path, or a RelayIDE invocation whose first argument
                   is not a headless subcommand); never executed, the default UI state is covered by headless tests
   SKIP-RECURSIVE  ./Scripts/test.sh ... (this replay is itself part of that script)
@@ -111,6 +112,7 @@ def classify(command):
         return "UNKNOWN", "empty command"
     relay_positions = [i for i, token in enumerate(tokens) if is_relay_executable(token)]
     if relay_positions:
+        saw_skip_agents = None
         for position in relay_positions:
             executable = tokens[position]
             if ".app/Contents/MacOS/" in executable:
@@ -129,11 +131,16 @@ def classify(command):
                     continue
                 subcommand = token
                 break
-            if subcommand not in HEADLESS_SUBCOMMANDS:
-                return "SKIP-GUI", "first argument %r is not a headless subcommand" % (subcommand,)
             for token in tokens[position + 1:]:
                 if token == "--export-screenshots" or token.startswith("--export-screenshots="):
                     return "SKIP-GUI", "--export-screenshots renders the desktop UI"
+            if subcommand == "run":
+                saw_skip_agents = "launches coding agents via agent-relay (covered with stub agents by m1-run.sh and m2-merge.sh)"
+                continue
+            if subcommand not in HEADLESS_SUBCOMMANDS:
+                return "SKIP-GUI", "first argument %r is not a headless subcommand" % (subcommand,)
+        if saw_skip_agents is not None:
+            return "SKIP-AGENTS", saw_skip_agents
         return "RUN", "headless RelayIDE subcommand"
     head = tokens[0]
     if head in ("./Scripts/test.sh", "Scripts/test.sh"):
