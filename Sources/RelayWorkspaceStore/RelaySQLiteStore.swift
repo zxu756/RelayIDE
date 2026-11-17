@@ -899,6 +899,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
             if let integration = run.integration {
                 let (reconciledInt, didMutateInt) = Self.reconcileOrphanedIntegration(
                     integration,
+                    hasConfiguredVerify: !(run.verifyCommand?.isEmpty ?? true),
                     finishedAtIfPersisting: now
                 )
                 if didMutateInt {
@@ -1009,6 +1010,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
 
     private static func reconcileOrphanedIntegration(
         _ integration: RelayRunIntegrationRecord,
+        hasConfiguredVerify: Bool = false,
         finishedAtIfPersisting: Date?
     ) -> (reconciled: RelayRunIntegrationRecord, didMutate: Bool) {
         var updated = integration
@@ -1027,6 +1029,13 @@ public final class RelayProjectDatabase: @unchecked Sendable {
             updated.ready = false
             if updated.reason == nil {
                 updated.reason = "interrupted during verify (owner process exited without releasing run)"
+            }
+            mutated = true
+        case .merged where hasConfiguredVerify && updated.verify == nil:
+            updated.status = .interrupted
+            updated.ready = false
+            if updated.reason == nil {
+                updated.reason = "interrupted before verify started (owner process exited without releasing run)"
             }
             mutated = true
         case .pending:
@@ -1094,6 +1103,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
         if let integration = reconciled.integration {
             reconciled.integration = reconcileOrphanedIntegration(
                 integration,
+                hasConfiguredVerify: !(reconciled.verifyCommand?.isEmpty ?? true),
                 finishedAtIfPersisting: nil
             ).reconciled
         }

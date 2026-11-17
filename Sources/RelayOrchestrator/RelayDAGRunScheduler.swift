@@ -1283,7 +1283,8 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
                     existingInt.reason = "skipped: run aborted due to RelayIDE error"
                 }
                 didMutate = true
-            } else if !existingInt.status.isTerminal {
+            } else if !existingInt.status.isTerminal
+                || (validatedPlan.verifyCommand != nil && existingInt.status == .merged) {
                 existingInt.status = .error
                 existingInt.ready = false
                 if existingInt.reason == nil {

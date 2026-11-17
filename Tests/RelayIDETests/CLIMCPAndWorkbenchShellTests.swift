@@ -4653,4 +4653,641 @@ struct CLIMCPAndWorkbenchShellTests {
             #expect(!status4.stdout.contains("\"verifying\""))
         }
     }
+
+    // MARK: - 41. M2 Stage 4 Items 3 & 4: Exit Code Table (`0` / `1`), `ready` Invariant, `stdout == status --run` Byte Parity, `--lang zh`/`en` JSON Parity & Localized Stderr Summary Last Line (§8, §10, Rows 1, 3, 5, 7, 9, 10, 11, 14, 16, 27, 28)
+
+    @Test("RelayCLIRunner run enforces M2 exit code table (0 vs 1), ready==(all lanes succeeded && verified), byte-identical status --run JSON, and --lang zh/en JSON parity with localized stderr ending in integration summary")
+    func cliRunExitCodeTableReadyFlagStdoutParityAndBilingualOutput() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-m2-s4-items34")
+        let tempToken = fx.rootURL.lastPathComponent
+        var trackedPIDs: [pid_t] = []
+        defer {
+            for pid in trackedPIDs where pid > 0 {
+                _ = Darwin.kill(-pid, SIGKILL)
+                _ = Darwin.kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: fx.rootURL)
+        }
+
+        try "line-1\n".write(to: fx.repoURL.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+        _ = try runTool("/usr/bin/git", ["add", "f.txt"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        _ = try runTool("/usr/bin/git", ["commit", "-m", "add f.txt"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        let promptsDir = plansDir.appendingPathComponent("prompts", isDirectory: true)
+        let markersDir = fx.rootURL.appendingPathComponent("markers", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: markersDir, withIntermediateDirectories: true)
+
+        func writePrompt(_ name: String, _ content: String) throws {
+            try content.write(to: promptsDir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        try writePrompt("a_ok.md", "STUB WRITE src/a.txt ok-a\n")
+        try writePrompt("b_ok.md", "STUB WRITE src/b.txt ok-b\n")
+        try writePrompt("noop.md", "STUB MESSAGE nothing changed\n")
+        try writePrompt("fail3.md", "STUB WRITE dirty.txt x\nSTUB EXIT 3\n")
+        try writePrompt("partial.md", "STUB WRITE src/part.txt half\nSTUB STATUS partial\n")
+        try writePrompt("conf_a.md", "STUB WRITE f.txt from-a\n")
+        try writePrompt("conf_b.md", "STUB WRITE f.txt from-b\n")
+        try writePrompt("c_ok.md", "STUB WRITE src/c.txt ok-c\n")
+
+        func lastNonEmptyLine(_ text: String) -> String {
+            text.split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
+        }
+
+        func assertStdoutMatchesStatusByteForByte(_ runRes: RelayCLIExecutionResult, runID: String) async throws -> RelayRunRecord {
+            let cliCheck = RelayCLIRunner()
+            let stEN = await cliCheck.executeCommand(
+                arguments: ["status", "--project", fx.projectURL.path, "--run", runID, "--lang", "en"],
+                environment: fx.baseEnvironment
+            )
+            let stZH = await cliCheck.executeCommand(
+                arguments: ["status", "--project", fx.projectURL.path, "--run", runID, "--lang", "zh"],
+                environment: fx.baseEnvironment
+            )
+            #expect(stEN.exitCode == 0)
+            #expect(stZH.exitCode == 0)
+            #expect(stEN.stdout == runRes.stdout)
+            #expect(stZH.stdout == runRes.stdout)
+            return try RelayRunJSONCodec.decode(RelayRunRecord.self, from: runRes.stdout)
+        }
+
+        // Helper normalizing per-run volatile identifiers/timestamps/OIDs/paths so `--lang zh` and `--lang en` JSON can be compared structurally & lexically.
+        func canonicalizeForLangComparison(_ record: RelayRunRecord) throws -> String {
+            var copy = record
+            let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
+            copy = RelayRunRecord(
+                runID: "RUN",
+                repoPath: "<repo>",
+                planCopyPath: "<plan>",
+                baseRef: copy.baseRef,
+                baseCommitOID: "<base>",
+                verifyCommand: copy.verifyCommand,
+                relayShPath: "<relay>",
+                relayShSHA256: copy.relayShSHA256,
+                startedAt: fixedDate,
+                finishedAt: copy.finishedAt.map { _ in fixedDate },
+                status: copy.status,
+                reason: copy.reason,
+                relayidePID: 1,
+                lanes: copy.lanes.map { l in
+                    RelayRunLaneRecord(
+                        runID: "RUN",
+                        laneID: l.laneID,
+                        ordinal: l.ordinal,
+                        agent: l.agent,
+                        promptPath: "<prompt>/\(l.laneID)",
+                        after: l.after,
+                        status: l.status,
+                        exitCode: l.exitCode,
+                        signal: l.signal,
+                        reason: l.reason,
+                        startedAt: l.startedAt.map { _ in fixedDate },
+                        finishedAt: l.finishedAt.map { _ in fixedDate },
+                        pid: l.pid.map { _ in 10 },
+                        costUSD: l.costUSD,
+                        tokens: l.tokens,
+                        costSource: l.costSource,
+                        branch: l.branch.map { _ in "relay/RUN/\(l.laneID)" },
+                        commitOID: l.commitOID.map { _ in "<lane-oid-\(l.laneID)>" },
+                        worktreePath: l.worktreePath.map { _ in "<wt>/\(l.laneID)" },
+                        uncommittedFiles: l.uncommittedFiles
+                    )
+                },
+                integration: copy.integration.map { integ in
+                    RelayRunIntegrationRecord(
+                        branch: integ.branch.map { _ in "relay/RUN/integration" },
+                        worktreePath: integ.worktreePath.map { _ in "<wt>/integration" },
+                        baseCommitOID: "<base>",
+                        headCommitOID: integ.headCommitOID.map { _ in "<int-head>" },
+                        status: integ.status,
+                        reason: integ.reason,
+                        ready: integ.ready,
+                        merges: integ.merges.map { m in
+                            RelayRunMergeRecord(
+                                ordinal: m.ordinal,
+                                laneID: m.laneID,
+                                laneCommitOID: m.laneCommitOID.map { _ in "<lane-oid-\(m.laneID)>" },
+                                status: m.status,
+                                mergeCommitOID: m.mergeCommitOID.map { _ in "<merge-oid-\(m.laneID)>" },
+                                conflicts: m.conflicts,
+                                conflictLines: m.conflictLines.map { _ in "CONFLICT" },
+                                startedAt: m.startedAt.map { _ in fixedDate },
+                                finishedAt: m.finishedAt.map { _ in fixedDate }
+                            )
+                        },
+                        verify: integ.verify.map { v in
+                            RelayRunVerifyRecord(
+                                command: v.command,
+                                timeoutSec: v.timeoutSec,
+                                status: v.status,
+                                exitCode: v.exitCode,
+                                signal: v.signal,
+                                pid: v.pid.map { _ in 20 },
+                                startedAt: v.startedAt.map { _ in fixedDate },
+                                finishedAt: v.finishedAt.map { _ in fixedDate },
+                                logPath: v.logPath.map { _ in "<verify.pty>" },
+                                logBytes: v.logBytes > 0 ? 1 : 0,
+                                logTruncated: v.logTruncated,
+                                modifiedTrackedFiles: v.modifiedTrackedFiles
+                            )
+                        }
+                    )
+                }
+            )
+            return try RelayRunJSONCodec.encode(copy)
+        }
+
+        // A. Two clean lanes WITHOUT verify (D2): exit 0, merged, ready == false, verify == nil.
+        do {
+            let planA = plansDir.appendingPathComponent("a-no-verify.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [
+                        ["id": "a", "agent": "claude", "prompt": "prompts/a_ok.md", "after": []],
+                        ["id": "b", "agent": "vibe", "prompt": "prompts/b_ok.md", "after": []]
+                    ]
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: planA, options: .atomic)
+
+            let runID = "20261117-090000-0001"
+            let res = await RelayCLIRunner(runIDProvider: { runID }).executeCommand(
+                arguments: ["run", planA.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment
+            )
+            #expect(res.exitCode == 0)
+            let rec = try await assertStdoutMatchesStatusByteForByte(res, runID: runID)
+            #expect(rec.status == .succeeded)
+            #expect(rec.integration?.status == .merged)
+            #expect(rec.integration?.ready == false)
+            #expect(rec.integration?.verify == nil)
+            #expect(lastNonEmptyLine(res.stderr).hasPrefix("[relay] integration finished · status merged · ready no"))
+        }
+
+        // B. Two clean lanes WITH passing verify: exit 0, verified, ready == true (ONLY ready==true case!).
+        do {
+            let planB = plansDir.appendingPathComponent("b-pass-verify.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [
+                        ["id": "a", "agent": "claude", "prompt": "prompts/a_ok.md", "after": []],
+                        ["id": "b", "agent": "vibe", "prompt": "prompts/b_ok.md", "after": []]
+                    ],
+                    "verify": "test -f src/a.txt && test -f src/b.txt"
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: planB, options: .atomic)
+
+            let runID = "20261117-090001-0002"
+            let res = await RelayCLIRunner(runIDProvider: { runID }).executeCommand(
+                arguments: ["run", planB.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "zh"],
+                environment: fx.baseEnvironment
+            )
+            #expect(res.exitCode == 0)
+            let rec = try await assertStdoutMatchesStatusByteForByte(res, runID: runID)
+            #expect(rec.status == .succeeded)
+            #expect(rec.integration?.status == .verified)
+            #expect(rec.integration?.ready == true)
+            #expect(rec.integration?.verify?.status == .passed)
+            #expect(lastNonEmptyLine(res.stderr).hasPrefix("[relay] 集成结果 · 状态 已验证 · 可合入 是"))
+        }
+
+        // C. All lanes succeeded-no-changes (with verify configured, Row 7): exit 0, nothing-to-merge, ready == false, no integration branch/worktree, verify skipped.
+        do {
+            let markerC = markersDir.appendingPathComponent("c-verify-should-not-run")
+            let planC = plansDir.appendingPathComponent("c-noop.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [
+                        ["id": "a", "agent": "claude", "prompt": "prompts/noop.md", "after": []],
+                        ["id": "b", "agent": "codex", "prompt": "prompts/noop.md", "after": []]
+                    ],
+                    "verify": ": > \"\(markerC.path)\""
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: planC, options: .atomic)
+
+            let runID = "20261117-090002-0003"
+            let res = await RelayCLIRunner(runIDProvider: { runID }).executeCommand(
+                arguments: ["run", planC.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment
+            )
+            #expect(res.exitCode == 0)
+            #expect(!FileManager.default.fileExists(atPath: markerC.path))
+            let rec = try await assertStdoutMatchesStatusByteForByte(res, runID: runID)
+            #expect(rec.status == .succeeded)
+            #expect(rec.integration?.status == .nothingToMerge)
+            #expect(rec.integration?.ready == false)
+            #expect(rec.integration?.branch == nil)
+            #expect(rec.integration?.worktreePath == nil)
+            #expect(rec.integration?.verify == nil)
+            let refCheck = try runTool(
+                "/usr/bin/git",
+                ["show-ref", "--verify", "--quiet", "refs/heads/relay/\(runID)/integration"],
+                environment: fx.baseEnvironment,
+                currentDirectory: fx.repoURL
+            )
+            #expect(refCheck.exitCode != 0)
+            #expect(lastNonEmptyLine(res.stderr).hasPrefix("[relay] integration finished · status nothing to merge · ready no"))
+        }
+
+        // D. Non-succeeded lane (`failed` exit 3 and `partial` exit 5, Row 9): exit 1, integration skipped, ready == false, no branch/worktree, verify skipped.
+        for (idx, promptName) in ["prompts/fail3.md", "prompts/partial.md"].enumerated() {
+            let markerD = markersDir.appendingPathComponent("d-verify-\(idx)")
+            let planD = plansDir.appendingPathComponent("d-nonsucc-\(idx).json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [
+                        ["id": "a", "agent": "claude", "prompt": promptName, "after": []],
+                        ["id": "b", "agent": "vibe", "prompt": "prompts/b_ok.md", "after": []]
+                    ],
+                    "verify": ": > \"\(markerD.path)\""
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: planD, options: .atomic)
+
+            let runID = "20261117-09001\(idx)-000\(4 + idx)"
+            let res = await RelayCLIRunner(runIDProvider: { runID }).executeCommand(
+                arguments: ["run", planD.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "zh"],
+                environment: fx.baseEnvironment
+            )
+            #expect(res.exitCode == 1)
+            #expect(!FileManager.default.fileExists(atPath: markerD.path))
+            let rec = try await assertStdoutMatchesStatusByteForByte(res, runID: runID)
+            #expect(rec.integration?.status == .skipped)
+            #expect(rec.integration?.ready == false)
+            #expect(rec.integration?.branch == nil)
+            #expect(rec.integration?.worktreePath == nil)
+            #expect(rec.integration?.verify == nil)
+            #expect(lastNonEmptyLine(res.stderr).hasPrefix("[relay] 集成结果 · 状态 已跳过 · 可合入 否"))
+        }
+
+        // E. Same-line conflict across [a, b, c] with verify configured, replayed in ZH and EN (Rows 3, 5, 27, 28):
+        // exit 1, merges=[merged, conflict, not-attempted], verify==nil, ready==false, ZH/EN JSON identical & stderr localized.
+        do {
+            let markerE = markersDir.appendingPathComponent("e-conflict-verify")
+            let planE = plansDir.appendingPathComponent("e-conflict.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [
+                        ["id": "a", "agent": "claude", "prompt": "prompts/conf_a.md", "after": []],
+                        ["id": "b", "agent": "codex", "prompt": "prompts/conf_b.md", "after": []],
+                        ["id": "c", "agent": "vibe", "prompt": "prompts/c_ok.md", "after": []]
+                    ],
+                    "verify": ": > \"\(markerE.path)\""
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: planE, options: .atomic)
+
+            let resZH = await RelayCLIRunner(runIDProvider: { "20261117-090020-0010" }).executeCommand(
+                arguments: ["run", planE.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "zh"],
+                environment: fx.baseEnvironment
+            )
+            let resEN = await RelayCLIRunner(runIDProvider: { "20261117-090021-0011" }).executeCommand(
+                arguments: ["run", planE.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment
+            )
+            #expect(resZH.exitCode == 1)
+            #expect(resEN.exitCode == 1)
+            #expect(!FileManager.default.fileExists(atPath: markerE.path))
+
+            let recZH = try await assertStdoutMatchesStatusByteForByte(resZH, runID: "20261117-090020-0010")
+            let recEN = try await assertStdoutMatchesStatusByteForByte(resEN, runID: "20261117-090021-0011")
+            #expect(recZH.status == .succeeded)
+            #expect(recZH.integration?.status == .conflict)
+            #expect(recZH.integration?.ready == false)
+            #expect(recZH.integration?.verify == nil)
+            #expect(recZH.integration?.merges.map(\.status) == [.merged, .conflict, .notAttempted])
+            #expect(recZH.integration?.merges[1].conflicts == [RelayMergeConflictItem(path: "f.txt", code: "UU")])
+
+            #expect(try canonicalizeForLangComparison(recZH) == canonicalizeForLangComparison(recEN))
+            #expect(resZH.stderr != resEN.stderr)
+            #expect(!resZH.stderr.contains("lane "))
+            #expect(!resEN.stderr.contains("通道 "))
+            #expect(lastNonEmptyLine(resZH.stderr).hasPrefix("[relay] 集成结果 · 状态 冲突 · 可合入 否"))
+            #expect(lastNonEmptyLine(resEN.stderr).hasPrefix("[relay] integration finished · status conflict · ready no"))
+        }
+
+        // F. `verify` exit 3 (replayed in ZH & EN), `verify` dirty tracked file, and `verify` timeout (Rows 11, 14, 16, 27, 28) -> all exit 1, ready == false!
+        do {
+            let planFExit = plansDir.appendingPathComponent("f-verify-exit3.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/a_ok.md", "after": []]],
+                    "verify": "exit 3"
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: planFExit, options: .atomic)
+
+            let fZH = await RelayCLIRunner(runIDProvider: { "20261117-090030-0020" }).executeCommand(
+                arguments: ["run", planFExit.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "zh"],
+                environment: fx.baseEnvironment
+            )
+            let fEN = await RelayCLIRunner(runIDProvider: { "20261117-090031-0021" }).executeCommand(
+                arguments: ["run", planFExit.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment
+            )
+            #expect(fZH.exitCode == 1)
+            #expect(fEN.exitCode == 1)
+            let recFZH = try await assertStdoutMatchesStatusByteForByte(fZH, runID: "20261117-090030-0020")
+            let recFEN = try await assertStdoutMatchesStatusByteForByte(fEN, runID: "20261117-090031-0021")
+            #expect(recFZH.integration?.status == .verifyFailed)
+            #expect(recFZH.integration?.ready == false)
+            #expect(recFZH.integration?.verify?.status == .failed)
+            #expect(recFZH.integration?.verify?.exitCode == 3)
+            #expect(try canonicalizeForLangComparison(recFZH) == canonicalizeForLangComparison(recFEN))
+            #expect(fZH.stderr != fEN.stderr)
+            #expect(lastNonEmptyLine(fZH.stderr).hasPrefix("[relay] 集成结果 · 状态 验证失败 · 可合入 否"))
+            #expect(lastNonEmptyLine(fEN.stderr).hasPrefix("[relay] integration finished · status verify failed · ready no"))
+
+            // F2: verify modifies tracked file src/a.txt and exits 0 -> exit 1, verify-failed, modifiedTrackedFiles == ["src/a.txt"]
+            let planFDirty = plansDir.appendingPathComponent("f-verify-dirty.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/a_ok.md", "after": []]],
+                    "verify": "printf 'mutated\\n' >> src/a.txt && exit 0"
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: planFDirty, options: .atomic)
+
+            let fDirty = await RelayCLIRunner(runIDProvider: { "20261117-090032-0022" }).executeCommand(
+                arguments: ["run", planFDirty.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment
+            )
+            #expect(fDirty.exitCode == 1)
+            let recDirty = try await assertStdoutMatchesStatusByteForByte(fDirty, runID: "20261117-090032-0022")
+            #expect(recDirty.integration?.status == .verifyFailed)
+            #expect(recDirty.integration?.ready == false)
+            #expect(recDirty.integration?.verify?.modifiedTrackedFiles == ["src/a.txt"])
+
+            // F3: verify timeout with stubborn setpgrp child -> exit 1, verify-timeout, ready == false, zero leftover processes
+            let subPIDURL = markersDir.appendingPathComponent("f-timeout-sub.pid")
+            let timeoutCmd = """
+            /usr/bin/perl -MPOSIX=setpgid -e '
+                my ($pfile, $tok) = @ARGV;
+                setpgid(0, 0) or die $!;
+                $SIG{INT} = $SIG{TERM} = $SIG{HUP} = "IGNORE";
+                open(my $fh, ">", $pfile) or die $!;
+                print $fh "$$\\n";
+                close($fh);
+                select(undef, undef, undef, 30);
+            ' "\(subPIDURL.path)" "\(tempToken)-tmosub" </dev/null >/dev/null 2>&1 &
+            while [ ! -s "\(subPIDURL.path)" ]; do /bin/sleep 0.02; done
+            /usr/bin/perl -e 'select(undef, undef, undef, 30);' "\(tempToken)-tmohold"
+            """
+            let planFTmo = plansDir.appendingPathComponent("f-verify-timeout.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/a_ok.md", "after": []]],
+                    "verify": timeoutCmd,
+                    "verify_timeout": 1
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: planFTmo, options: .atomic)
+
+            let fastCancel = RelayCancellationPolicy(sigintGraceSeconds: 0.2, sigtermGraceSeconds: 0.2)
+            let fTmo = await RelayCLIRunner(runIDProvider: { "20261117-090033-0023" }, cancellationPolicy: fastCancel).executeCommand(
+                arguments: ["run", planFTmo.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment
+            )
+            if let rawSub = try? String(contentsOf: subPIDURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+               let spid = pid_t(rawSub) {
+                trackedPIDs.append(spid)
+                #expect(Darwin.kill(spid, 0) != 0)
+            }
+            #expect(fTmo.exitCode == 1)
+            let recTmo = try await assertStdoutMatchesStatusByteForByte(fTmo, runID: "20261117-090033-0023")
+            #expect(recTmo.integration?.status == .verifyTimeout)
+            #expect(recTmo.integration?.ready == false)
+            #expect(recTmo.integration?.verify?.status == .timeout)
+            #expect(recTmo.integration?.verify?.exitCode == nil)
+            #expect(lastNonEmptyLine(fTmo.stderr).hasPrefix("[relay] integration finished · status verify timeout · ready no"))
+        }
+    }
+
+    // MARK: - 42. M2 Stage 4 Item 3: All Five `125` Integration/Verify Error Classes Emit Empty `stdout` and Persist `.error` (§8, Row 22)
+
+    @Test("RelayCLIRunner run exits 125 with empty stdout across integration worktree failure, non-conflict git merge failure, dirty abort, verify start failure, and SQLite write failure")
+    func cliRunMergeAndVerify125ErrorsEmitEmptyStdoutAndPersistErrorState() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-m2-s4-125errors")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        let promptsDir = plansDir.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "STUB WRITE src/a.txt ok-a\n".write(to: promptsDir.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+        try "STUB WRITE src/b.txt ok-b\n".write(to: promptsDir.appendingPathComponent("b.md"), atomically: true, encoding: .utf8)
+
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
+
+        // 1. Integration worktree creation fails (obstructed by regular file, Row 22) -> 125, empty stdout, integration.status == .error.
+        do {
+            let runID = "20261117-100000-0101"
+            let plan1 = plansDir.appendingPathComponent("e1-wt-fail.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []]]
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan1, options: .atomic)
+
+            let res = await RelayCLIRunner(runIDProvider: { runID }).executeCommand(
+                arguments: ["run", plan1.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment,
+                onLiveStderrLine: { line in
+                    if line.contains("[relay] lane a (claude)") && line.contains("succeeded") {
+                        let blocker = fx.projectURL.appendingPathComponent("runs/\(runID)/worktrees/integration")
+                        try? FileManager.default.createDirectory(at: blocker.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try? "blocker\n".write(to: blocker, atomically: true, encoding: .utf8)
+                    }
+                }
+            )
+            #expect(res.exitCode == 125)
+            #expect(res.stdout.isEmpty)
+            #expect(!res.stderr.isEmpty)
+            let rec = try #require(try db.fetchRun(runID: runID, reconcileWithLock: true))
+            #expect(rec.status == .interrupted)
+            #expect(rec.integration?.status == .error)
+            #expect(rec.integration?.ready == false)
+        }
+
+        // 2. Non-conflict `git merge` failure (untracked file blocking merge in integration worktree, no MERGE_HEAD) -> 125, empty stdout, integration.status == .error.
+        do {
+            let runID = "20261117-100001-0102"
+            let plan2 = plansDir.appendingPathComponent("e2-nonconflict-merge.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []]]
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan2, options: .atomic)
+
+            let res = await RelayCLIRunner(runIDProvider: { runID }).executeCommand(
+                arguments: ["run", plan2.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment,
+                onLiveStderrLine: { line in
+                    if line.contains("[relay] created integration branch") {
+                        let untrk = fx.projectURL.appendingPathComponent("runs/\(runID)/worktrees/integration/src/a.txt")
+                        try? FileManager.default.createDirectory(at: untrk.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try? "untracked-blocker\n".write(to: untrk, atomically: true, encoding: .utf8)
+                    }
+                }
+            )
+            #expect(res.exitCode == 125)
+            #expect(res.stdout.isEmpty)
+            #expect(!res.stderr.isEmpty)
+            let rec = try #require(try db.fetchRun(runID: runID, reconcileWithLock: true))
+            #expect(rec.status == .interrupted)
+            #expect(rec.integration?.status == .error)
+            #expect(rec.integration?.reason?.hasPrefix("error:") == true)
+        }
+
+        // 3. Unclean state after `git merge --abort` (custom merge driver leaves an ignored file detected by `status --porcelain=v1 -uall --ignored`) -> 125, empty stdout, integration.status == .error.
+        do {
+            let dirtyAbortFx = try makeIsolatedRunFixture(prefix: "relay-m2-s4-dirtyabort")
+            defer { try? FileManager.default.removeItem(at: dirtyAbortFx.rootURL) }
+
+            try "base\n".write(to: dirtyAbortFx.repoURL.appendingPathComponent("conflict.txt"), atomically: true, encoding: .utf8)
+            try "conflict.txt merge=dirtydrv\n".write(to: dirtyAbortFx.repoURL.appendingPathComponent(".gitattributes"), atomically: true, encoding: .utf8)
+            _ = try runTool("/usr/bin/git", ["add", "conflict.txt", ".gitattributes"], environment: dirtyAbortFx.baseEnvironment, currentDirectory: dirtyAbortFx.repoURL)
+            _ = try runTool("/usr/bin/git", ["commit", "-m", "setup dirtydrv"], environment: dirtyAbortFx.baseEnvironment, currentDirectory: dirtyAbortFx.repoURL)
+            let excludeURL = dirtyAbortFx.repoURL.appendingPathComponent(".git/info/exclude")
+            try ".leftover-ignored\n".write(to: excludeURL, atomically: true, encoding: .utf8)
+
+            let drvScript = dirtyAbortFx.rootURL.appendingPathComponent("dirty-drv.sh")
+            try """
+            #!/bin/sh
+            : > .leftover-ignored
+            exit 1
+            """.write(to: drvScript, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: drvScript.path)
+            _ = try runTool("/usr/bin/git", ["config", "merge.dirtydrv.driver", "\"\(drvScript.path)\" %O %A %B"], environment: dirtyAbortFx.baseEnvironment, currentDirectory: dirtyAbortFx.repoURL)
+
+            let dPrompts = dirtyAbortFx.rootURL.appendingPathComponent("prompts", isDirectory: true)
+            try FileManager.default.createDirectory(at: dPrompts, withIntermediateDirectories: true)
+            try "STUB WRITE conflict.txt a\n".write(to: dPrompts.appendingPathComponent("ca.md"), atomically: true, encoding: .utf8)
+            try "STUB WRITE conflict.txt b\n".write(to: dPrompts.appendingPathComponent("cb.md"), atomically: true, encoding: .utf8)
+            let plan3 = dirtyAbortFx.rootURL.appendingPathComponent("plan3.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": dirtyAbortFx.repoURL.path,
+                    "base": "main",
+                    "lanes": [
+                        ["id": "a", "agent": "claude", "prompt": "prompts/ca.md", "after": []],
+                        ["id": "b", "agent": "codex", "prompt": "prompts/cb.md", "after": []]
+                    ]
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan3, options: .atomic)
+
+            let runID = "20261117-100002-0103"
+            let res = await RelayCLIRunner(runIDProvider: { runID }).executeCommand(
+                arguments: ["run", plan3.path, "--project", dirtyAbortFx.projectURL.path, "--relay-sh", dirtyAbortFx.fakeRelayShURL.path, "--lang", "en"],
+                environment: dirtyAbortFx.baseEnvironment
+            )
+            #expect(res.exitCode == 125)
+            #expect(res.stdout.isEmpty)
+            #expect(!res.stderr.isEmpty)
+            let dirtyDB = try RelayProjectDatabase.openExisting(bundleDirectoryURL: dirtyAbortFx.projectURL)
+            let rec = try #require(try dirtyDB.fetchRun(runID: runID, reconcileWithLock: true))
+            #expect(rec.integration?.status == .error)
+        }
+
+        // 4. `verify` fails to start (`verify.pty` obstructed by a directory -> `rawTranscriptOpenFailed`) -> 125, empty stdout, integration.status == .error (not `.merged`!).
+        do {
+            let runID = "20261117-100003-0104"
+            let plan4 = plansDir.appendingPathComponent("e4-verify-start-fail.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []]],
+                    "verify": "exit 0"
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan4, options: .atomic)
+
+            let res = await RelayCLIRunner(runIDProvider: { runID }).executeCommand(
+                arguments: ["run", plan4.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+                environment: fx.baseEnvironment,
+                onLiveStderrLine: { line in
+                    if line.contains("[relay] merge lane a") {
+                        let ptyDir = fx.projectURL.appendingPathComponent("runs/\(runID)/verify.pty", isDirectory: true)
+                        try? FileManager.default.createDirectory(at: ptyDir, withIntermediateDirectories: true)
+                    }
+                }
+            )
+            #expect(res.exitCode == 125)
+            #expect(res.stdout.isEmpty)
+            #expect(!res.stderr.isEmpty)
+            let rec = try #require(try db.fetchRun(runID: runID, reconcileWithLock: true))
+            #expect(rec.status == .interrupted)
+            #expect(rec.integration?.status == .error)
+            #expect(rec.integration?.ready == false)
+        }
+
+        // 5. Database write failure (`sqlite3` trigger aborting update to `verifying`) -> 125, empty stdout, verify child terminated cleanly!
+        do {
+            let dbFailFx = try makeIsolatedRunFixture(prefix: "relay-m2-s4-dbfail")
+            let dbFailToken = dbFailFx.rootURL.lastPathComponent
+            defer { try? FileManager.default.removeItem(at: dbFailFx.rootURL) }
+
+            let sqliteURL = dbFailFx.projectURL.appendingPathComponent("workspace.sqlite")
+            _ = try runTool(
+                "/usr/bin/sqlite3",
+                [
+                    sqliteURL.path,
+                    "CREATE TRIGGER abort_verify_write BEFORE UPDATE ON relay_run_integration WHEN NEW.status = 'verifying' BEGIN SELECT RAISE(ABORT, 'simulated sqlite write failure'); END;"
+                ],
+                environment: dbFailFx.baseEnvironment
+            )
+
+            let dPrompts = dbFailFx.rootURL.appendingPathComponent("prompts", isDirectory: true)
+            try FileManager.default.createDirectory(at: dPrompts, withIntermediateDirectories: true)
+            try "STUB WRITE src/a.txt ok\n".write(to: dPrompts.appendingPathComponent("a.md"), atomically: true, encoding: .utf8)
+            let plan5 = dbFailFx.rootURL.appendingPathComponent("plan5.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": dbFailFx.repoURL.path,
+                    "base": "main",
+                    "lanes": [["id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []]],
+                    "verify": "/usr/bin/perl -e 'select(undef, undef, undef, 20);' \"\(dbFailToken)-dbhold\""
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: plan5, options: .atomic)
+
+            let fastCancel = RelayCancellationPolicy(sigintGraceSeconds: 0.15, sigtermGraceSeconds: 0.15)
+            let res = await RelayCLIRunner(runIDProvider: { "20261117-100004-0105" }, cancellationPolicy: fastCancel).executeCommand(
+                arguments: ["run", plan5.path, "--project", dbFailFx.projectURL.path, "--relay-sh", dbFailFx.fakeRelayShURL.path, "--lang", "en"],
+                environment: dbFailFx.baseEnvironment
+            )
+            #expect(res.exitCode == 125)
+            #expect(res.stdout.isEmpty)
+            #expect(!res.stderr.isEmpty)
+
+            let psOut = try runTool("/bin/ps", ["-axo", "pid=,command="], environment: dbFailFx.baseEnvironment).stdout
+            #expect(!psOut.contains("\(dbFailToken)-dbhold"))
+        }
+    }
 }
