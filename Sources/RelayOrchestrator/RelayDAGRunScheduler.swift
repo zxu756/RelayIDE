@@ -1274,6 +1274,36 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
     private func reconcileAbortedRunOnFatalError(_ error: RelayIDEError) {
         let now = Date()
         let fatalReason = reconcileNonTerminalLanesOnFatalError(error, now: now)
+        if var existingInt = try? database.fetchRun(runID: runID, reconcileWithLock: false)?.integration {
+            var didMutate = false
+            if existingInt.status == .pending {
+                existingInt.status = .skipped
+                existingInt.ready = false
+                if existingInt.reason == nil {
+                    existingInt.reason = "skipped: run aborted due to RelayIDE error"
+                }
+                didMutate = true
+            } else if !existingInt.status.isTerminal {
+                existingInt.status = .error
+                existingInt.ready = false
+                if existingInt.reason == nil {
+                    existingInt.reason = RelayIntegrationMergeRunner.extractIntegrationErrorReason(from: error)
+                }
+                didMutate = true
+            }
+            if var v = existingInt.verify, !v.status.isTerminal {
+                v.status = .interrupted
+                if v.finishedAt == nil {
+                    v.finishedAt = now
+                }
+                existingInt.verify = v
+                existingInt.ready = false
+                didMutate = true
+            }
+            if didMutate {
+                try? database.upsertRunIntegration(runID: runID, existingInt)
+            }
+        }
         try? database.updateRunStatus(
             runID: runID,
             status: .interrupted,

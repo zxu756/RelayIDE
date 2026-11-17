@@ -539,14 +539,19 @@ PY
     local run_id=""
     run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${qdir}/run.stdout" 2>/dev/null || true)"
 
-    # Row 3 subset (single lane): main repo clean, main OID unchanged, only relay/<runID>/q added
-    local status_porcelain head_after branches_sorted expected_branches
+    # Row 3 subset (single lane): main repo clean, main OID unchanged, only relay/<runID>/q (+ relay/<runID>/integration when integrated) added
+    local status_porcelain head_after branches_sorted expected_branches int_status
+    int_status="$(/usr/bin/python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print((d.get("integration") or {}).get("status") or "")' "${qdir}/run.stdout" 2>/dev/null || true)"
     status_porcelain="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" status --porcelain)"
     head_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" rev-parse main)"
     branches_sorted="$(HOME="${WORK_TMP}/empty-git-home" git -C "${qrepo}" for-each-ref --format='%(refname:short)' refs/heads/ | sort | paste -sd ',' -)"
-    expected_branches="$(printf 'main\nrelay/%s/q\n' "${run_id}" | sort | paste -sd ',' -)"
+    if [[ -n "${int_status}" && "${int_status}" != "skipped" && "${int_status}" != "nothing-to-merge" ]]; then
+        expected_branches="$(printf 'main\nrelay/%s/q\nrelay/%s/integration\n' "${run_id}" "${run_id}" | sort | paste -sd ',' -)"
+    else
+        expected_branches="$(printf 'main\nrelay/%s/q\n' "${run_id}" | sort | paste -sd ',' -)"
+    fi
     if [[ -n "${run_id}" && -z "${status_porcelain}" && "${head_after}" == "${base_oid}" && "${branches_sorted}" == "${expected_branches}" ]]; then
-        record_pass "3" "(--quick, 1 lane) main working tree clean, main OID unchanged, only branch relay/${run_id}/q added"
+        record_pass "3" "(--quick, 1 lane) main working tree clean, main OID unchanged, only branches relay/${run_id}/q and relay/${run_id}/integration added"
     else
         record_fail "3" "(--quick, 1 lane) status='${status_porcelain}', head=${head_after} vs ${base_oid}, branches='${branches_sorted}'"
     fi
@@ -748,14 +753,19 @@ PY
     fi
 
     echo ""
-    echo "--- Row 3: Main repository clean, main OID unchanged, only relay/<runID>/a and relay/<runID>/b added ---"
-    local st_porcelain main_after actual_branches expected_branches
+    echo "--- Row 3: Main repository clean, main OID unchanged, only relay/<runID>/a, relay/<runID>/b, and relay/<runID>/integration added ---"
+    local st_porcelain main_after actual_branches expected_branches s1_int_status
+    s1_int_status="$(/usr/bin/python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print((d.get("integration") or {}).get("status") or "")' "${s1}/run.stdout" 2>/dev/null || true)"
     st_porcelain="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" status --porcelain)"
     main_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
     actual_branches="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" for-each-ref --format='%(refname:short)' refs/heads/ | sort | paste -sd ',' -)"
-    expected_branches="$(printf 'main\nrelay/%s/a\nrelay/%s/b\n' "${run_id}" "${run_id}" | sort | paste -sd ',' -)"
+    if [[ -n "${s1_int_status}" && "${s1_int_status}" != "skipped" && "${s1_int_status}" != "nothing-to-merge" ]]; then
+        expected_branches="$(printf 'main\nrelay/%s/a\nrelay/%s/b\nrelay/%s/integration\n' "${run_id}" "${run_id}" "${run_id}" | sort | paste -sd ',' -)"
+    else
+        expected_branches="$(printf 'main\nrelay/%s/a\nrelay/%s/b\n' "${run_id}" "${run_id}" | sort | paste -sd ',' -)"
+    fi
     if [[ -n "${run_id}" && -z "${st_porcelain}" && "${main_after}" == "${base_oid}" && "${actual_branches}" == "${expected_branches}" ]]; then
-        record_pass "3" "main git status empty, main OID unchanged, only branches relay/${run_id}/a and relay/${run_id}/b added"
+        record_pass "3" "main git status empty, main OID unchanged, only branches relay/${run_id}/a, relay/${run_id}/b, and relay/${run_id}/integration added"
     else
         record_fail "3" "status='${st_porcelain}', main=${main_after} vs ${base_oid}, branches='${actual_branches}'"
     fi

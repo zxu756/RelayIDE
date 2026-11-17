@@ -360,7 +360,10 @@ public final class RelayProjectDatabase: @unchecked Sendable {
 
     // MARK: - M1 Run & Lane Persistence (Schema v5)
 
-    public func createRun(_ run: RelayRunRecord) throws {
+    public func createRun(
+        _ run: RelayRunRecord,
+        configuredVerifyTimeoutSec: Int? = nil
+    ) throws {
         try withLockedHandle { db in
             try Self.execImmediateSQL(db, sql: "BEGIN IMMEDIATE TRANSACTION;")
             do {
@@ -437,7 +440,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
                         runID: run.runID,
                         integration: integration,
                         configuredVerifyCommand: run.verifyCommand,
-                        configuredVerifyTimeoutSec: integration.verify?.timeoutSec
+                        configuredVerifyTimeoutSec: integration.verify?.timeoutSec ?? configuredVerifyTimeoutSec
                     )
                 }
 

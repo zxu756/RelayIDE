@@ -2300,7 +2300,7 @@ struct CLIMCPAndWorkbenchShellTests {
             {"id": "api", "agent": "claude", "prompt": "prompts/api.md", "after": []},
             {"id": "docs", "agent": "agy", "prompt": "prompts/docs.md", "after": ["api"]}
           ],
-          "verify": "swift test"
+          "verify": "test -f api.txt && test -f docs.txt"
         }
         """
         try rawPlanText.write(to: planURL, atomically: true, encoding: .utf8)
@@ -2317,7 +2317,7 @@ struct CLIMCPAndWorkbenchShellTests {
 
         #expect(runRes.exitCode == 0)
         #expect(!runRes.stdout.isEmpty)
-        #expect(runRes.stderr.contains("M2"))
+        #expect(!runRes.stderr.contains("将在 M2 执行"))
 
         // Lock must have been cleanly released before returning!
         #expect(RelayProjectRunLock.inspectActiveHolder(bundleDirectoryURL: fx.projectURL).isHeld == false)
@@ -2329,8 +2329,10 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(recorded.status == .succeeded)
         #expect(recorded.baseRef == "main")
         #expect(recorded.baseCommitOID == fx.baseCommitOID)
-        #expect(recorded.verifyCommand == "swift test")
+        #expect(recorded.verifyCommand == "test -f api.txt && test -f docs.txt")
         #expect(recorded.relayShSHA256 == fx.fakeRelaySHA256)
+        #expect(recorded.integration?.status == .verified)
+        #expect(recorded.integration?.ready == true)
 
         // Copied plan.json at <project>/runs/<runID>/plan.json must match input byte-for-byte
         let expectedCopyURL = fx.projectURL
@@ -3685,25 +3687,57 @@ struct CLIMCPAndWorkbenchShellTests {
         }
         """.write(to: planURL, atomically: true, encoding: .utf8)
 
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
+
+        // 1. M1-era run row without `relay_run_integration` row must still emit `"integration" : null`.
+        let legacyRunID = "20261117-015959-0000"
+        try db.createRun(
+            RelayRunRecord(
+                runID: legacyRunID,
+                repoPath: fx.repoURL.path,
+                planCopyPath: planURL.path,
+                baseRef: "main",
+                baseCommitOID: fx.baseCommitOID,
+                verifyCommand: nil,
+                relayShPath: fx.fakeRelayShURL.path,
+                relayShSHA256: fx.fakeRelaySHA256,
+                startedAt: Date(timeIntervalSince1970: 1_763_309_900),
+                finishedAt: Date(timeIntervalSince1970: 1_763_309_905),
+                status: .succeeded,
+                reason: nil,
+                relayidePID: 1001,
+                lanes: [],
+                integration: nil
+            )
+        )
         let cli = RelayCLIRunner(runIDProvider: { "20261117-020000-0001" })
+        let statusNullRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", legacyRunID],
+            environment: fx.baseEnvironment
+        )
+        #expect(statusNullRes.exitCode == 0)
+        #expect(statusNullRes.stdout.contains("\"integration\" : null"))
+        let decodedNull = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: statusNullRes.stdout)
+        #expect(decodedNull.integration == nil)
+
+        // 2. Live M2 `run` emits populated `integration` object (`merged`, `ready: false`) matching `status --run`.
         let runRes = await cli.executeCommand(
             arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
             environment: fx.baseEnvironment
         )
         #expect(runRes.exitCode == 0)
-        #expect(runRes.stdout.contains("\"integration\" : null"))
-
-        let statusNullRes = await cli.executeCommand(
+        #expect(runRes.stdout.contains("\"integration\" : {"))
+        let statusMergedRes = await cli.executeCommand(
             arguments: ["status", "--project", fx.projectURL.path, "--run", "20261117-020000-0001"],
             environment: fx.baseEnvironment
         )
-        #expect(statusNullRes.exitCode == 0)
-        #expect(statusNullRes.stdout == runRes.stdout)
-        let decodedNull = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: statusNullRes.stdout)
-        #expect(decodedNull.integration == nil)
+        #expect(statusMergedRes.exitCode == 0)
+        #expect(statusMergedRes.stdout == runRes.stdout)
+        let decodedMerged = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: statusMergedRes.stdout)
+        #expect(decodedMerged.integration?.status == .merged)
+        #expect(decodedMerged.integration?.ready == false)
 
-        // Persist an M2 integration + merge + verify record and verify `status --run` JSON under EN and ZH.
-        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
+        // 3. Persist an M2 integration + merge + verify record and verify `status --run` JSON under EN and ZH.
         let t0 = Date(timeIntervalSince1970: 1_763_310_000)
         let t1 = Date(timeIntervalSince1970: 1_763_310_012)
         let expectedIntegration = RelayRunIntegrationRecord(
@@ -3718,7 +3752,7 @@ struct CLIMCPAndWorkbenchShellTests {
                 RelayRunMergeRecord(
                     ordinal: 0,
                     laneID: "api",
-                    laneCommitOID: decodedNull.lanes.first?.commitOID,
+                    laneCommitOID: decodedMerged.lanes.first?.commitOID,
                     status: .merged,
                     mergeCommitOID: "4444444444444444444444444444444444444444",
                     conflicts: [],
@@ -4055,5 +4089,188 @@ struct CLIMCPAndWorkbenchShellTests {
             #expect(!multiRes.stderr.contains("M1"), "(\(lang)): stale M1 found in multi-after error: '\(multiRes.stderr)'")
             #expect(!multiRes.stderr.contains("M2"), "(\(lang)): stale M2 promise found in multi-after error: '\(multiRes.stderr)'")
         }
+    }
+
+    // MARK: - 39. M2 Stage 4 Item 1: `pending` Integration Row, Merge + `verify` Execution, Live `onStarted` PID Persistence (`kill -9` Reconciliation), Deferred Terminal Run Status, and M1 Note Removal
+
+    @Test("RelayCLIRunner run writes pending integration row with verify command & timeout at start, runs merge + verify, persists running verify PID for kill -9 reconciliation, writes terminal run status last, and removes M1 verify note")
+    func cliRunWritesPendingIntegrationExecutesMergeAndVerifyPersistsRunningPIDAndRemovesM1Note() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "relay-m2-s4-item1")
+        let tempToken = fx.rootURL.lastPathComponent
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let gatesDir = fx.rootURL.appendingPathComponent("gates", isDirectory: true)
+        let plansDir = fx.rootURL.appendingPathComponent("plans", isDirectory: true)
+        let promptsDir = plansDir.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: gatesDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+
+        let laneReady = gatesDir.appendingPathComponent("lane-ready")
+        let laneRelease = gatesDir.appendingPathComponent("lane-release")
+        let verifyReady = gatesDir.appendingPathComponent("verify-ready")
+        let verifyRelease = gatesDir.appendingPathComponent("verify-release")
+        let verifyObservedFiles = gatesDir.appendingPathComponent("verify-files.txt")
+
+        try """
+        STUB WRITE src/api.txt api-v1
+        STUB READY \(laneReady.path)
+        STUB WAIT \(laneRelease.path) 30
+        """.write(to: promptsDir.appendingPathComponent("api.md"), atomically: true, encoding: .utf8)
+        try "STUB WRITE src/docs.txt docs-v1\n".write(
+            to: promptsDir.appendingPathComponent("docs.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let verifyCmd = """
+        test -f src/api.txt && test -f src/docs.txt
+        printf '%s|%s' "$(cat src/api.txt | tr -d '\\n')" "$(cat src/docs.txt | tr -d '\\n')" > "\(verifyObservedFiles.path)"
+        : > "\(verifyReady.path)"
+        while [ ! -e "\(verifyRelease.path)" ]; do /usr/bin/perl -e 'select(undef, undef, undef, 0.02);' "\(tempToken)-v1"; done
+        exit 0
+        """
+
+        let planObj: [String: Any] = [
+            "repo": fx.repoURL.path,
+            "base": "main",
+            "lanes": [
+                ["id": "api", "agent": "claude", "prompt": "prompts/api.md", "after": []],
+                ["id": "docs", "agent": "agy", "prompt": "prompts/docs.md", "after": ["api"]]
+            ],
+            "verify": verifyCmd,
+            "verify_timeout": 45
+        ]
+        let planURL = plansDir.appendingPathComponent("plan1.json")
+        try JSONSerialization.data(withJSONObject: planObj, options: [.prettyPrinted, .sortedKeys])
+            .write(to: planURL, options: .atomic)
+
+        let run1ID = "20261117-070000-0001"
+        let cli1 = RelayCLIRunner(runIDProvider: { run1ID })
+        final class DoneBox: @unchecked Sendable { var done = false }
+        let done1 = DoneBox()
+        let run1Task = Task {
+            let res = await cli1.executeCommand(
+                arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "zh"],
+                environment: fx.baseEnvironment
+            )
+            done1.done = true
+            return res
+        }
+
+        // 1. While `api` lane is blocked on `laneRelease`, verify `pending` integration row (with verify cmd & timeout 45) is in SQLite!
+        let laneWaitDeadline = Date().addingTimeInterval(20.0)
+        while !FileManager.default.fileExists(atPath: laneReady.path) && !done1.done && Date() < laneWaitDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: laneReady.path))
+
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
+        let configuredSpec = try #require(try db.configuredIntegrationVerifySpec(runID: run1ID))
+        #expect(configuredSpec.command == verifyCmd)
+        #expect(configuredSpec.timeoutSec == 45)
+
+        let midLaneStatusRes = await cli1.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", run1ID],
+            environment: fx.baseEnvironment
+        )
+        #expect(midLaneStatusRes.exitCode == 0)
+        let midLaneDecoded = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: midLaneStatusRes.stdout)
+        #expect(midLaneDecoded.status == .running)
+        #expect(midLaneDecoded.finishedAt == nil)
+        #expect(midLaneDecoded.integration?.status == .pending)
+        #expect(midLaneDecoded.integration?.ready == false)
+        #expect(midLaneDecoded.integration?.verify == nil)
+
+        // 2. Release `laneRelease` and wait for `verifyReady`: verify `onStarted` persisted `verifying` + `running` + live `pid`, while `run.status` is STILL `.running`!
+        try Data().write(to: laneRelease)
+        let verifyWaitDeadline = Date().addingTimeInterval(20.0)
+        while !FileManager.default.fileExists(atPath: verifyReady.path) && !done1.done && Date() < verifyWaitDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(FileManager.default.fileExists(atPath: verifyReady.path))
+
+        let midVerifyStatusRes = await cli1.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", run1ID],
+            environment: fx.baseEnvironment
+        )
+        #expect(midVerifyStatusRes.exitCode == 0)
+        let midVerifyDecoded = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: midVerifyStatusRes.stdout)
+        #expect(midVerifyDecoded.status == .running)
+        #expect(midVerifyDecoded.finishedAt == nil)
+        #expect(midVerifyDecoded.integration?.status == .verifying)
+        #expect(midVerifyDecoded.integration?.ready == false)
+        #expect(midVerifyDecoded.integration?.merges.map(\.laneID) == ["api", "docs"])
+        #expect(midVerifyDecoded.integration?.merges.map(\.status) == [.merged, .merged])
+        let liveVerifyPID = try #require(midVerifyDecoded.integration?.verify?.pid)
+        #expect(liveVerifyPID > 0)
+        #expect(Darwin.kill(liveVerifyPID, 0) == 0)
+        #expect(midVerifyDecoded.integration?.verify?.status == .running)
+        #expect(midVerifyDecoded.integration?.verify?.timeoutSec == 45)
+
+        // Snapshot exact raw SQLite rows during live `verify` to also verify `kill -9` crash reconciliation below.
+        let rawMidVerifySnapshot = try #require(try db.fetchRun(runID: run1ID, reconcileWithLock: false))
+
+        // 3. Release `verifyRelease`: verify `run` exits 0, M1 note is gone, `verified`, `ready == true`, and terminal `run.status == .succeeded` persisted!
+        try Data().write(to: verifyRelease)
+        let run1Res = await run1Task.value
+        #expect(run1Res.exitCode == 0)
+        #expect(!run1Res.stderr.contains("将在 M2 执行"))
+        #expect(!run1Res.stderr.contains("scheduled for M2"))
+        #expect(try String(contentsOf: verifyObservedFiles, encoding: .utf8) == "api-v1|docs-v1")
+
+        let final1 = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: run1Res.stdout)
+        #expect(final1.status == .succeeded)
+        #expect(final1.finishedAt != nil)
+        #expect(final1.integration?.status == .verified)
+        #expect(final1.integration?.ready == true)
+        #expect(final1.integration?.verify?.status == .passed)
+        #expect(final1.integration?.verify?.exitCode == 0)
+        #expect(final1.integration?.verify?.pid == liveVerifyPID)
+
+        // 4. Verify `kill -9` mid-verify reconciliation (`onStarted` persisted `verifying` + `verify.status == .running` + `pid`):
+        // Restore the exact mid-verify DB state with `run.lock` unheld -> `status --run` reconciles run, integration, and verify to `interrupted`,
+        // and a subsequent small `run` persists the interrupted rows and exits 0!
+        if let snapInt = rawMidVerifySnapshot.integration {
+            try db.upsertRunIntegration(
+                runID: run1ID,
+                snapInt,
+                configuredVerifyCommand: verifyCmd,
+                configuredVerifyTimeoutSec: 45
+            )
+        }
+        try db.updateRunStatus(runID: run1ID, status: .running, reason: nil, finishedAt: nil)
+
+        let crashedStatusRes = await cli1.executeCommand(
+            arguments: ["status", "--project", fx.projectURL.path, "--run", run1ID],
+            environment: fx.baseEnvironment
+        )
+        #expect(crashedStatusRes.exitCode == 0)
+        let crashedDecoded = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: crashedStatusRes.stdout)
+        #expect(crashedDecoded.status == .interrupted)
+        #expect(crashedDecoded.integration?.status == .interrupted)
+        #expect(crashedDecoded.integration?.ready == false)
+        #expect(crashedDecoded.integration?.verify?.status == .interrupted)
+
+        let smallPlanURL = plansDir.appendingPathComponent("small.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [{"id": "recover", "agent": "claude", "prompt": "prompts/docs.md", "after": []}]
+        }
+        """.write(to: smallPlanURL, atomically: true, encoding: .utf8)
+
+        let run2ID = "20261117-070001-0002"
+        let cli2 = RelayCLIRunner(runIDProvider: { run2ID })
+        let recoverRes = await cli2.executeCommand(
+            arguments: ["run", smallPlanURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path],
+            environment: fx.baseEnvironment
+        )
+        #expect(recoverRes.exitCode == 0)
+        let persistedAfterRecover = try #require(try db.fetchRun(runID: run1ID, reconcileWithLock: false))
+        #expect(persistedAfterRecover.status == .interrupted)
+        #expect(persistedAfterRecover.integration?.status == .interrupted)
+        #expect(persistedAfterRecover.integration?.verify?.status == .interrupted)
+        #expect(persistedAfterRecover.integration?.verify?.finishedAt != nil)
     }
 }

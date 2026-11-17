@@ -170,15 +170,18 @@ public struct RelayCLIRunner: Sendable {
     public let runIDProvider: (@Sendable () -> String)?
     public let activeLaneRegistry: RelayActiveLaneRegistry?
     public let cancellationPolicy: RelayCancellationPolicy
+    public let gitEngine: GitWorktreePlumbingEngine
 
     public init(
         runIDProvider: (@Sendable () -> String)? = nil,
         activeLaneRegistry: RelayActiveLaneRegistry? = nil,
-        cancellationPolicy: RelayCancellationPolicy = .default
+        cancellationPolicy: RelayCancellationPolicy = .default,
+        gitEngine: GitWorktreePlumbingEngine = GitWorktreePlumbingEngine()
     ) {
         self.runIDProvider = runIDProvider
         self.activeLaneRegistry = activeLaneRegistry
         self.cancellationPolicy = cancellationPolicy
+        self.gitEngine = gitEngine
     }
 
     public static func makeSignalForwardedRunContext(
@@ -326,7 +329,8 @@ public struct RelayCLIRunner: Sendable {
                 let outcome = await RelayRunExecutor(
                     runIDProvider: runIDProvider,
                     activeLaneRegistry: activeLaneRegistry,
-                    cancellationPolicy: cancellationPolicy
+                    cancellationPolicy: cancellationPolicy,
+                    gitEngine: gitEngine
                 ).execute(
                     planPath: parsedRun.planPath,
                     projectBundlePath: parsedRun.projectPath,

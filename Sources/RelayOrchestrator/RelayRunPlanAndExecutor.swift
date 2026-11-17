@@ -561,15 +561,18 @@ public struct RelayRunExecutor: Sendable {
     public let runIDProvider: (@Sendable () -> String)?
     public let activeLaneRegistry: RelayActiveLaneRegistry?
     public let cancellationPolicy: RelayCancellationPolicy
+    public let gitEngine: GitWorktreePlumbingEngine
 
     public init(
         runIDProvider: (@Sendable () -> String)? = nil,
         activeLaneRegistry: RelayActiveLaneRegistry? = nil,
-        cancellationPolicy: RelayCancellationPolicy = .default
+        cancellationPolicy: RelayCancellationPolicy = .default,
+        gitEngine: GitWorktreePlumbingEngine = GitWorktreePlumbingEngine()
     ) {
         self.runIDProvider = runIDProvider
         self.activeLaneRegistry = activeLaneRegistry
         self.cancellationPolicy = cancellationPolicy
+        self.gitEngine = gitEngine
     }
 
     /// Resolves `relay.sh` in order: `--relay-sh`, `RELAYIDE_RELAY_SH`, `$HOME/.agents/skills/agent-relay/scripts/relay.sh`.
@@ -780,14 +783,6 @@ public struct RelayRunExecutor: Sendable {
             let planCopyURL = runDirectoryURL.appendingPathComponent("plan.json")
             try validatedPlan.rawPlanData.write(to: planCopyURL, options: .atomic)
 
-            if validatedPlan.verifyCommand != nil {
-                collector.emit(
-                    isZh
-                        ? "提示：计划包含 verify 命令，M1 仅将其记录到运行台账，将在 M2 执行。"
-                        : "Note: plan includes a 'verify' command; M1 records it in the run ledger without executing it (scheduled for M2)."
-                )
-            }
-
             let startedAt = Date()
             let pendingLanes = validatedPlan.lanes.map { lane in
                 RelayRunLaneRecord(
@@ -800,6 +795,17 @@ public struct RelayRunExecutor: Sendable {
                     status: .pending
                 )
             }
+            let pendingIntegration = RelayRunIntegrationRecord(
+                branch: nil,
+                worktreePath: nil,
+                baseCommitOID: validatedPlan.baseCommitOID,
+                headCommitOID: nil,
+                status: .pending,
+                reason: nil,
+                ready: false,
+                merges: [],
+                verify: nil
+            )
             let initialRecord = RelayRunRecord(
                 runID: runID,
                 repoPath: validatedPlan.resolvedRepoURL.path,
@@ -814,9 +820,13 @@ public struct RelayRunExecutor: Sendable {
                 status: .running,
                 reason: nil,
                 relayidePID: getpid(),
-                lanes: pendingLanes
+                lanes: pendingLanes,
+                integration: pendingIntegration
             )
-            try db.createRun(initialRecord)
+            try db.createRun(
+                initialRecord,
+                configuredVerifyTimeoutSec: validatedPlan.verifyTimeoutSec
+            )
 
             let schedulerResult = try await executeScheduledLanes(
                 runID: runID,
@@ -866,6 +876,7 @@ public struct RelayRunExecutor: Sendable {
         environment: [String: String],
         emitStderrLine: @escaping @Sendable (String) -> Void
     ) async throws -> RelayDAGRunSchedulerResult {
+        let registry = activeLaneRegistry ?? RelayActiveLaneRegistry()
         let scheduler = RelayDAGRunScheduler(
             runID: runID,
             validatedPlan: validatedPlan,
@@ -873,9 +884,10 @@ public struct RelayRunExecutor: Sendable {
             runDirectoryURL: runDirectoryURL,
             projectBundleURL: projectBundleURL,
             database: database,
+            gitEngine: gitEngine,
             language: language,
             environment: environment,
-            activeLaneRegistry: activeLaneRegistry ?? RelayActiveLaneRegistry(),
+            activeLaneRegistry: registry,
             cancellationPolicy: cancellationPolicy,
             emitStderrLine: emitStderrLine
         )
@@ -883,9 +895,66 @@ public struct RelayRunExecutor: Sendable {
             // 1. Execute all DAG lanes (`relay_runs.status` remains `.running` in SQLite, R61).
             let laneSummary = try await scheduler.executeLanesPhase()
 
-            // 2. Post-lane integration & verify phase slot (M2 Stage 4 inserts `runIntegrationMergePhase` + `verify` here).
+            // 2. Post-lane integration merge & optional `verify` phase (`03-relayide.md` M2 §1, §6, §9, §10, D1–D3).
+            let hasVerify = validatedPlan.verifyCommand != nil
+            var integration = try RelayIntegrationMergeRunner.runIntegrationMergePhase(
+                runID: runID,
+                repositoryPath: validatedPlan.resolvedRepoURL.path,
+                projectBundlePath: projectBundleURL.path,
+                baseCommitOID: validatedPlan.baseCommitOID,
+                lanes: laneSummary.orderedLanes,
+                planOrder: validatedPlan.lanes.map(\.id),
+                database: database,
+                gitEngine: gitEngine,
+                language: language,
+                environment: environment,
+                emitSummaryLineOnMerged: !hasVerify,
+                onStderrLine: emitStderrLine
+            )
 
-            // 3. Persist terminal `relay_runs` status strictly AFTER the integration phase slot (R61).
+            if integration.status == .merged, let verifyCommand = validatedPlan.verifyCommand {
+                guard let integrationWorktreePath = integration.worktreePath, !integrationWorktreePath.isEmpty else {
+                    throw RelayIDEError.relayEnvironmentFailure(
+                        "Integration worktree path missing before verify for run '\(runID)'"
+                    )
+                }
+                let timeoutSec = validatedPlan.verifyTimeoutSec ?? RelayRunPlan.defaultVerifyTimeoutSeconds
+                let baseIntegrationSnapshot = integration
+                let verifyOutcome = try await RelayVerifyRunner.runVerifyWithOutcome(
+                    runID: runID,
+                    projectBundlePath: projectBundleURL.path,
+                    integrationWorktreePath: integrationWorktreePath,
+                    command: verifyCommand,
+                    timeoutSec: timeoutSec,
+                    sigintGraceSeconds: cancellationPolicy.sigintGraceSeconds,
+                    sigtermGraceSeconds: cancellationPolicy.sigtermGraceSeconds,
+                    gitEngine: gitEngine,
+                    language: language,
+                    environment: environment,
+                    onStarted: { _, _, runningVerifyRecord in
+                        var verifyingIntegration = baseIntegrationSnapshot
+                        verifyingIntegration.status = .verifying
+                        verifyingIntegration.reason = nil
+                        verifyingIntegration.ready = false
+                        verifyingIntegration.verify = runningVerifyRecord
+                        try database.upsertRunIntegration(runID: runID, verifyingIntegration)
+                    },
+                    onStderrLine: emitStderrLine
+                )
+                integration.verify = verifyOutcome.verifyRecord
+                integration.status = verifyOutcome.integrationStatus
+                integration.reason = verifyOutcome.integrationReason
+                integration.ready = verifyOutcome.ready
+                try database.upsertRunIntegration(runID: runID, integration)
+                emitStderrLine(
+                    RelayIntegrationStderrFormatter.formatIntegrationSummaryLine(
+                        integration: integration,
+                        language: language
+                    )
+                )
+            }
+
+            // 3. Persist terminal `relay_runs` status strictly AFTER the integration & verify phase (R61).
             return try scheduler.persistTerminalRunStatus(afterIntegration: laneSummary)
         } catch let relayErr as RelayIDEError {
             scheduler.persistFatalErrorRunStatus(relayErr)
