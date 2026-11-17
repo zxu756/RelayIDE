@@ -2014,9 +2014,15 @@ EOF
     stubborn_pid="$(tr -d '[:space:]' < "${stubborn_pf}")"
     [[ "${stubborn_pid}" =~ ^[0-9]+$ && "${stubborn_pid}" -gt 0 ]] || { echo "Row 14 invalid stubborn PID '${stubborn_pid}'" >&2; return 1; }
 
-    poll_until_no_procs "${WORK_TMP}" 30
+    if ! poll_until_no_procs "${WORK_TMP}" 30; then
+        kill -KILL "${stubborn_pid}" 2>/dev/null || true
+        kill_procs_for_dir "${WORK_TMP}"
+        return 1
+    fi
     if kill -0 "${stubborn_pid}" 2>/dev/null; then
         echo "Row 14 stubborn child PID ${stubborn_pid} is still alive" >&2
+        kill -KILL "${stubborn_pid}" 2>/dev/null || true
+        kill_procs_for_dir "${WORK_TMP}"
         return 1
     fi
 
@@ -2371,10 +2377,14 @@ EOF
         [[ "${run_rc}" -eq "${expected_rc}" ]] || {
             cat "${d}/run.stderr" >&2 || true
             echo "Row 18 (${sig_name}) expected exit ${expected_rc}, got ${run_rc}" >&2
+            kill_procs_for_dir "${WORK_TMP}"
             return 1
         }
 
-        poll_until_no_procs "${WORK_TMP}" 20
+        if ! poll_until_no_procs "${WORK_TMP}" 20; then
+            kill_procs_for_dir "${WORK_TMP}"
+            return 1
+        fi
 
         local st_rc=0
         invoke_product "${d}/after-status.stdout" "${d}/after-status.stderr" -- \
@@ -3706,15 +3716,13 @@ run_full_suite() {
     local r34_ok=0
     local r34_rc=0
     local r34_diag=""
-    local effective_bin="${RELAY_CLI_BIN:-${ROOT_DIR}/.build/debug/RelayIDE}"
     set +e
-    /usr/bin/python3 - "${r34_out}" "${REAL_HOME}" "${ORIG_PATH}" "${effective_bin}" "${ROOT_DIR}/Scripts/acceptance/m2-merge.sh" <<'PY'
+    /usr/bin/python3 - "${r34_out}" "${REAL_HOME}" "${ORIG_PATH}" "${ROOT_DIR}/Scripts/acceptance/m2-merge.sh" <<'PY'
 import os, signal, subprocess, sys
-out_p, real_home, orig_path, cli_bin, script_p = sys.argv[1:6]
+out_p, real_home, orig_path, script_p = sys.argv[1:5]
 env = dict(os.environ)
 env["HOME"] = real_home
 env["PATH"] = orig_path
-env["RELAY_CLI_BIN"] = cli_bin
 for k in ("RELAY_CLI_HOME", "RELAY_CLI_CHILD_PATH", "RELAY_CLAUDE_BIN", "RELAY_CODEX_BIN", "RELAY_AGY_BIN", "RELAY_VIBE_BIN"):
     env.pop(k, None)
 with open(out_p, "wb") as fh:

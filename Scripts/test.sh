@@ -44,7 +44,7 @@ usage() {
     cat <<'EOF' >&2
 Usage:
   Scripts/test.sh scope <ModuleOrFilter...>
-  Scripts/test.sh milestone <0|1> [--record]
+  Scripts/test.sh milestone <0|1|2> [--record]
   Scripts/test.sh release [--record]
 
 Acceptance output goes to a temporary directory. Only with --record are reports/*.txt rewritten.
@@ -208,6 +208,31 @@ run_milestone() {
                 echo "==> [milestone 1] --record: reports/*.txt were rewritten"
             fi
             ;;
+        2|m2|M2)
+            local tree_before
+            tree_before="$(git status --porcelain)"
+
+            echo "==> [milestone 2] Running M2 scoped unit test suites..."
+            run_scope RelayPTYCore RelayWorktreeGit RelayWorkspaceStore RelayCLIAndMCP RelayOrchestrator
+
+            run_acceptance_script m0-acceptance.sh
+            run_acceptance_script readme-commands.sh
+            run_acceptance_script m1-run.sh
+            run_acceptance_script m2-merge.sh
+
+            if [[ "${#RECORD_ARGS[@]}" -eq 0 ]]; then
+                local tree_after
+                tree_after="$(git status --porcelain)"
+                if [[ "${tree_before}" != "${tree_after}" ]]; then
+                    echo "error: 'Scripts/test.sh milestone 2' changed the working tree:" >&2
+                    diff <(printf '%s\n' "${tree_before}") <(printf '%s\n' "${tree_after}") >&2 || true
+                    exit 1
+                fi
+                echo "==> [milestone 2] git status --short after the run: ${tree_after:-(no output)}"
+            else
+                echo "==> [milestone 2] --record: reports/*.txt were rewritten"
+            fi
+            ;;
         *)
             echo "error: milestone '${m}' acceptance suite is not implemented yet." >&2
             exit 2
@@ -226,6 +251,7 @@ run_release() {
     run_acceptance_script m0-acceptance.sh
     run_acceptance_script readme-commands.sh
     run_acceptance_script m1-run.sh
+    run_acceptance_script m2-merge.sh
 
     if [[ "${RELAY_REAL_AGENTS:-0}" == "1" ]]; then
         if [[ -x "${ROOT_DIR}/Scripts/acceptance/real-agents.sh" ]]; then
