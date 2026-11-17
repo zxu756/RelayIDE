@@ -2138,6 +2138,618 @@ assert ver["modifiedTrackedFiles"] == ["src/a.txt"], ver
 PY
 }
 
+wait_for_verify_started() {
+    local trace_file="$1"
+    local stderr_file="$2"
+    local watched_pid="$3"
+    local max_sec="${4:-60}"
+    wait_for_trace_start "${trace_file}" "${watched_pid}" "${max_sec}" || return 1
+    local deadline_ticks=$(( 15 * 50 ))
+    local tick=0
+    while (( tick <= deadline_ticks )); do
+        if [[ -f "${stderr_file}" ]] && grep -Eq '验证命令已启动|verify started' "${stderr_file}" 2>/dev/null; then
+            return 0
+        fi
+        if ! kill -0 "${watched_pid}" 2>/dev/null; then
+            if [[ -f "${stderr_file}" ]] && grep -Eq '验证命令已启动|verify started' "${stderr_file}" 2>/dev/null; then
+                return 0
+            fi
+            echo "watched PID ${watched_pid} exited before verify started stderr line appeared" >&2
+            return 1
+        fi
+        /usr/bin/perl -e 'select(undef, undef, undef, 0.02)' </dev/null
+        tick=$(( tick + 1 ))
+    done
+    echo "timed out waiting for verify started stderr line in ${stderr_file}" >&2
+    return 1
+}
+
+wait_for_file_appear() {
+    local target_file="$1"
+    local watched_pid="${2:-}"
+    local max_sec="${3:-60}"
+    local deadline_ticks=$(( max_sec * 50 ))
+    local tick=0
+    while (( tick <= deadline_ticks )); do
+        if [[ -f "${target_file}" ]]; then
+            return 0
+        fi
+        if [[ -n "${watched_pid}" ]] && ! kill -0 "${watched_pid}" 2>/dev/null; then
+            if [[ -f "${target_file}" ]]; then
+                return 0
+            fi
+            echo "watched PID ${watched_pid} exited before ${target_file} appeared" >&2
+            return 1
+        fi
+        /usr/bin/perl -e 'select(undef, undef, undef, 0.02)' </dev/null
+        tick=$(( tick + 1 ))
+    done
+    echo "timed out after ${max_sec}s waiting for ${target_file}" >&2
+    return 1
+}
+
+# ------------------------------------------------------------------
+# Row 17: While verify waits on barrier after writing trace -> `status --run` succeeds without SQLITE_BUSY,
+#         shows run=running, integration=verifying, alive verify PID; releasing barrier exits 0 with verified
+# ------------------------------------------------------------------
+row_17_live_status_during_verify_shows_verifying_and_alive_pid() {
+    local d="${WORK_TMP}/r17"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    local vtrace="${d}/verify.trace"
+    local barrier="${d}/verify.barrier"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/a.txt row17-a\n' > "${d}/prompts/a.md"
+    printf 'STUB WRITE src/b.txt row17-b\n' > "${d}/prompts/b.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --trace '${vtrace}' --wait-timeout 90 --wait-barrier '${barrier}' --exit 0",
+  "verify_timeout": 120
+}
+EOF
+
+    snapshot_repo_state "${repo}" "main" "${d}/snap"
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${traces}" \
+        "${RELAY_CLI}" run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run.stdout" 2>"${d}/run.stderr" ) &
+    local bg_pid=$!
+    start_pid_watchdog "${bg_pid}" 120
+    local wpid="${WATCHDOG_PID}"
+
+    if ! wait_for_verify_started "${vtrace}" "${d}/run.stderr" "${bg_pid}" 60; then
+        stop_pid_watchdog "${wpid}"
+        kill_procs_for_dir "${d}"
+        return 1
+    fi
+    verify_pid_is_tested_binary "${bg_pid}" "${proj}"
+    local run_id
+    run_id="$(read_lock_run_id "${proj}")"
+
+    local st_rc=0
+    invoke_product "${d}/mid-status.stdout" "${d}/mid-status.stderr" -- \
+        status --project "${proj}" --run "${run_id}" --lang zh || st_rc=$?
+    if [[ "${st_rc}" -ne 0 ]]; then
+        : > "${barrier}"
+        wait "${bg_pid}" 2>/dev/null || true
+        stop_pid_watchdog "${wpid}"
+        cat "${d}/mid-status.stderr" >&2 || true
+        echo "Row 17 live status --run failed with exit ${st_rc}" >&2
+        return 1
+    fi
+    if grep -Fiq "SQLITE_BUSY" "${d}/mid-status.stderr" "${d}/mid-status.stdout" 2>/dev/null; then
+        : > "${barrier}"
+        wait "${bg_pid}" 2>/dev/null || true
+        stop_pid_watchdog "${wpid}"
+        echo "Row 17 SQLITE_BUSY encountered during live status --run" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/mid-status.stdout" <<'PY'
+import json, os, sys
+
+st = json.load(open(sys.argv[1], encoding="utf-8"))
+assert st["status"] == "running", st
+integ = st["integration"]
+assert integ is not None, st
+assert integ["status"] == "verifying", integ
+assert integ["ready"] is False, integ
+ver = integ["verify"]
+assert ver is not None, integ
+assert ver["status"] == "running", ver
+vpid = ver["pid"]
+assert isinstance(vpid, int) and vpid > 0, ver
+os.kill(vpid, 0)
+PY
+
+    : > "${barrier}"
+    set +e
+    wait "${bg_pid}"
+    local run_rc=$?
+    set -e
+    stop_pid_watchdog "${wpid}"
+
+    assert_base_untouched "${repo}" "main" "${d}/snap" "${run_id}"
+    [[ "${run_rc}" -eq 0 ]] || { cat "${d}/run.stderr" >&2 || true; echo "Row 17 expected exit 0 after barrier release, got ${run_rc}" >&2; return 1; }
+
+    /usr/bin/python3 - "${d}/run.stdout" <<'PY'
+import json, sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["status"] == "succeeded", data
+integ = data["integration"]
+assert integ["status"] == "verified" and integ["ready"] is True, integ
+assert integ["verify"]["status"] == "passed" and integ["verify"]["exitCode"] == 0, integ["verify"]
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 18: While verify is blocked on barrier, send SIGINT (130) and SIGTERM (143) in two separate runs
+#         -> run/integration/verify all cancelled, 0 leftover procs <=20s, merges & worktree kept, status --run has no running/verifying
+# ------------------------------------------------------------------
+row_18_sigint_and_sigterm_during_verify_cancel_cleanly_and_keep_merges() {
+    local root="${WORK_TMP}/r18"
+    rm -rf "${root}"
+    mkdir -p "${root}"
+
+    local spec
+    for spec in "INT:130:sigint" "TERM:143:sigterm"; do
+        local sig_name="${spec%%:*}"
+        local rest="${spec#*:}"
+        local expected_rc="${rest%%:*}"
+        local sub_name="${rest#*:}"
+        local d="${root}/${sub_name}"
+        local repo="${d}/repo"
+        local proj="${d}/Proj.relayproj"
+        local traces="${d}/traces"
+        local vtrace="${d}/verify.trace"
+        local barrier="${d}/verify.barrier"
+        mkdir -p "${d}/prompts" "${traces}"
+
+        init_temp_git_repo "${repo}" 1
+        local base_oid
+        base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+        init_temp_project "${proj}"
+
+        printf 'STUB WRITE src/a.txt row18-a\n' > "${d}/prompts/a.md"
+        printf 'STUB WRITE src/b.txt row18-b\n' > "${d}/prompts/b.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --trace '${vtrace}' --wait-timeout 90 --wait-barrier '${barrier}' --exit 0",
+  "verify_timeout": 120
+}
+EOF
+
+        snapshot_repo_state "${repo}" "main" "${d}/snap"
+        assert_stub_and_decoys_armed
+        ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+            /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+            "STUB_TRACE_DIR=${traces}" \
+            "${RELAY_CLI}" run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+            >"${d}/run.stdout" 2>"${d}/run.stderr" ) &
+        local bg_pid=$!
+        start_pid_watchdog "${bg_pid}" 120
+        local wpid="${WATCHDOG_PID}"
+
+        if ! wait_for_verify_started "${vtrace}" "${d}/run.stderr" "${bg_pid}" 60; then
+            stop_pid_watchdog "${wpid}"
+            kill_procs_for_dir "${d}"
+            return 1
+        fi
+        verify_pid_is_tested_binary "${bg_pid}" "${proj}"
+        local run_id
+        run_id="$(read_lock_run_id "${proj}")"
+
+        kill "-${sig_name}" "${bg_pid}"
+        set +e
+        wait "${bg_pid}"
+        local run_rc=$?
+        set -e
+        stop_pid_watchdog "${wpid}"
+
+        assert_base_untouched "${repo}" "main" "${d}/snap" "${run_id}"
+        [[ "${run_rc}" -eq "${expected_rc}" ]] || {
+            cat "${d}/run.stderr" >&2 || true
+            echo "Row 18 (${sig_name}) expected exit ${expected_rc}, got ${run_rc}" >&2
+            return 1
+        }
+
+        poll_until_no_procs "${WORK_TMP}" 20
+
+        local st_rc=0
+        invoke_product "${d}/after-status.stdout" "${d}/after-status.stderr" -- \
+            status --project "${proj}" --run "${run_id}" --lang zh || st_rc=$?
+        [[ "${st_rc}" -eq 0 ]] || { echo "Row 18 (${sig_name}) status --run exited ${st_rc}" >&2; return 1; }
+
+        /usr/bin/python3 - "${d}/run.stdout" "${d}/after-status.stdout" "${repo}" "${base_oid}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+run_p, st_p, repo_dir, base_oid, empty_home = sys.argv[1:6]
+data = json.load(open(run_p, encoding="utf-8"))
+st = json.load(open(st_p, encoding="utf-8"))
+run_id = data["runID"]
+
+for obj in (data, st):
+    assert obj["status"] == "cancelled", obj
+    integ = obj["integration"]
+    assert integ is not None, obj
+    assert integ["status"] == "cancelled" and integ["ready"] is False, integ
+    ver = integ["verify"]
+    assert ver is not None and ver["status"] == "cancelled", integ
+    for l in obj["lanes"]:
+        assert l["status"] not in ("running", "verifying"), l
+
+integ = data["integration"]
+wt_dir = os.path.realpath(integ["worktreePath"])
+assert os.path.isdir(wt_dir), f"integration worktree missing after verify cancel: {wt_dir}"
+
+env = dict(os.environ, HOME=empty_home, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+def git(*args, cwd=repo_dir):
+    return subprocess.run(["/usr/bin/git", "-C", cwd, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, check=True).stdout.decode("utf-8")
+
+lanes = {l["laneID"]: l for l in data["lanes"]}
+int_branch = f"relay/{run_id}/integration"
+fp = [x for x in git("rev-list", "--first-parent", "--reverse", f"{base_oid}..{int_branch}").splitlines() if x]
+assert len(fp) == 2 and fp[-1] == integ["headCommitOID"], (fp, integ["headCommitOID"])
+assert git("rev-list", "--parents", "-n", "1", fp[0]).strip().split() == [fp[0], base_oid, lanes["a"]["commitOID"]]
+assert git("rev-list", "--parents", "-n", "1", fp[1]).strip().split() == [fp[1], fp[0], lanes["b"]["commitOID"]]
+assert git("rev-parse", "HEAD", cwd=wt_dir).strip() == integ["headCommitOID"]
+PY
+    done
+}
+
+# ------------------------------------------------------------------
+# Row 19: SIGINT during merge via custom merge driver (writes marker, sleeps 3s, exits 1)
+#         -> exit 130, integration=cancelled, no MERGE_HEAD, clean git status --porcelain -uall --ignored, HEAD is a's merge
+# ------------------------------------------------------------------
+row_19_sigint_during_custom_merge_driver_aborts_and_cancels_cleanly() {
+    local d="${WORK_TMP}/r19"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    local driver_marker="${d}/driver-started.marker"
+    local driver_script="${d}/slow-merge-driver.sh"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    printf 'line-1\nshared-driver-line\nline-3\n' > "${repo}/f.txt"
+    printf 'f.txt merge=slowfail\n' > "${repo}/.gitattributes"
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" add f.txt .gitattributes
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" -c commit.gpgsign=false commit -q -m "Add f.txt and .gitattributes"
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+
+    cat > "${driver_script}" <<EOF
+#!/bin/sh
+printf 'driver pid=%s\n' "\$\$" > "${driver_marker}.tmp.\$\$"
+mv "${driver_marker}.tmp.\$\$" "${driver_marker}"
+/usr/bin/perl -e 'my (\$sec, \$tag) = @ARGV; select(undef, undef, undef, \$sec + 0);' 3 "merge-driver-tag=${WORK_TMP_NAME}" </dev/null
+exit 1
+EOF
+    chmod +x "${driver_script}"
+
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" config merge.slowfail.name "Slow failing merge driver"
+    HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" config merge.slowfail.driver "'${driver_script}' %O %A %B"
+
+    init_temp_project "${proj}"
+
+    cat > "${d}/prompts/a.md" <<'EOF'
+STUB WRITE_BLOCK f.txt EOF_A
+line-1
+alpha-driver-replacement
+line-3
+EOF_A
+EOF
+    cat > "${d}/prompts/b.md" <<'EOF'
+STUB WRITE_BLOCK f.txt EOF_B
+line-1
+beta-driver-replacement
+line-3
+EOF_B
+EOF
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []}
+  ]
+}
+EOF
+
+    snapshot_repo_state "${repo}" "main" "${d}/snap"
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${traces}" \
+        "${RELAY_CLI}" run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run.stdout" 2>"${d}/run.stderr" ) &
+    local bg_pid=$!
+    start_pid_watchdog "${bg_pid}" 120
+    local wpid="${WATCHDOG_PID}"
+
+    if ! wait_for_file_appear "${driver_marker}" "${bg_pid}" 60; then
+        stop_pid_watchdog "${wpid}"
+        kill_procs_for_dir "${d}"
+        return 1
+    fi
+    verify_pid_is_tested_binary "${bg_pid}" "${proj}"
+    local run_id
+    run_id="$(read_lock_run_id "${proj}")"
+
+    kill -INT "${bg_pid}"
+    set +e
+    wait "${bg_pid}"
+    local run_rc=$?
+    set -e
+    stop_pid_watchdog "${wpid}"
+
+    assert_base_untouched "${repo}" "main" "${d}/snap" "${run_id}"
+    [[ "${run_rc}" -eq 130 ]] || { cat "${d}/run.stderr" >&2 || true; echo "Row 19 expected exit 130, got ${run_rc}" >&2; return 1; }
+    poll_until_no_procs "${WORK_TMP}" 20
+
+    /usr/bin/python3 - "${d}/run.stdout" "${repo}" "${base_oid}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, base_oid, empty_home = sys.argv[1:5]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+assert data["status"] == "cancelled", data
+integ = data["integration"]
+assert integ is not None, data
+assert integ["status"] == "cancelled" and integ["ready"] is False, integ
+
+lanes = {l["laneID"]: l for l in data["lanes"]}
+a_oid = lanes["a"]["commitOID"]
+m_a = integ["merges"][0]
+assert m_a["laneID"] == "a" and m_a["status"] == "merged" and m_a["mergeCommitOID"], m_a
+
+wt_dir = os.path.realpath(integ["worktreePath"])
+assert os.path.isdir(wt_dir), wt_dir
+
+env = dict(os.environ, HOME=empty_home, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+def git(*args, cwd=repo_dir, check=True):
+    res = subprocess.run(["/usr/bin/git", "-C", cwd, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, check=check)
+    return res.returncode, res.stdout.decode("utf-8", errors="replace")
+
+mh_rc, _ = git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=wt_dir, check=False)
+assert mh_rc != 0, "MERGE_HEAD ref still resolves in integration worktree"
+_, mh_path = git("rev-parse", "--git-path", "MERGE_HEAD", cwd=wt_dir)
+mh_abs = mh_path.strip() if os.path.isabs(mh_path.strip()) else os.path.join(wt_dir, mh_path.strip())
+assert not os.path.exists(mh_abs), f"MERGE_HEAD file still exists: {mh_abs}"
+
+_, st_out = git("status", "--porcelain=v1", "-uall", "--ignored", cwd=wt_dir)
+assert st_out == "", f"integration worktree status not empty: {st_out!r}"
+
+_, wt_head = git("rev-parse", "HEAD", cwd=wt_dir)
+assert wt_head.strip() == m_a["mergeCommitOID"] == integ["headCommitOID"], (wt_head.strip(), m_a["mergeCommitOID"], integ["headCommitOID"])
+_, parents_out = git("rev-list", "--parents", "-n", "1", wt_head.strip())
+assert parents_out.strip().split() == [m_a["mergeCommitOID"], base_oid, a_oid], parents_out
+_, fp_out = git("rev-list", "--first-parent", "--reverse", f"{base_oid}..relay/{run_id}/integration")
+assert [x for x in fp_out.splitlines() if x] == [m_a["mergeCommitOID"]], fp_out
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 20: While verify is blocked on barrier, `kill -9` RelayIDE -> 0 leftover procs <=20s,
+#         `status --run` shows run/integration/verify all `interrupted`, subsequent small run on same project exits 0
+# ------------------------------------------------------------------
+row_20_kill9_relayide_during_verify_reconciles_interrupted_and_recovers() {
+    local d="${WORK_TMP}/r20"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    local vtrace="${d}/verify.trace"
+    local barrier="${d}/verify.barrier"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/a.txt row20-a\n' > "${d}/prompts/a.md"
+    printf 'STUB WRITE src/b.txt row20-b\n' > "${d}/prompts/b.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --trace '${vtrace}' --wait-timeout 90 --wait-barrier '${barrier}' --exit 0",
+  "verify_timeout": 120
+}
+EOF
+
+    snapshot_repo_state "${repo}" "main" "${d}/snap1"
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${traces}" \
+        "${RELAY_CLI}" run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run.stdout" 2>"${d}/run.stderr" ) &
+    local bg_pid=$!
+    start_pid_watchdog "${bg_pid}" 120
+    local wpid="${WATCHDOG_PID}"
+
+    if ! wait_for_verify_started "${vtrace}" "${d}/run.stderr" "${bg_pid}" 60; then
+        stop_pid_watchdog "${wpid}"
+        kill_procs_for_dir "${d}"
+        return 1
+    fi
+    verify_pid_is_tested_binary "${bg_pid}" "${proj}"
+    local run_id
+    run_id="$(read_lock_run_id "${proj}")"
+
+    kill -9 "${bg_pid}"
+    set +e
+    wait "${bg_pid}" 2>/dev/null
+    set -e
+    stop_pid_watchdog "${wpid}"
+
+    assert_base_untouched "${repo}" "main" "${d}/snap1" "${run_id}"
+    poll_until_no_procs "${WORK_TMP}" 20
+
+    local st_rc=0
+    invoke_product "${d}/status.stdout" "${d}/status.stderr" -- \
+        status --project "${proj}" --run "${run_id}" --lang zh || st_rc=$?
+    [[ "${st_rc}" -eq 0 ]] || { echo "Row 20 status --run exited ${st_rc}" >&2; return 1; }
+
+    /usr/bin/python3 - "${d}/status.stdout" <<'PY'
+import json, sys
+
+st = json.load(open(sys.argv[1], encoding="utf-8"))
+assert st["status"] == "interrupted", st
+integ = st["integration"]
+assert integ is not None, st
+assert integ["status"] == "interrupted" and integ["ready"] is False, integ
+ver = integ["verify"]
+assert ver is not None and ver["status"] == "interrupted", integ
+for l in st["lanes"]:
+    assert l["status"] not in ("running", "verifying"), l
+PY
+
+    # Subsequent small plan on the exact same project exits 0
+    printf 'STUB WRITE src/recovered.txt after-kill9\n' > "${d}/prompts/recover.md"
+    cat > "${d}/small-plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "recover", "agent": "claude", "prompt": "prompts/recover.md", "after": []}
+  ],
+  "verify": "test -f src/recovered.txt"
+}
+EOF
+
+    local rec_rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap2" "${d}/small.stdout" "${d}/small.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/small-plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rec_rc=$?
+    [[ "${rec_rc}" -eq 0 ]] || { cat "${d}/small.stderr" >&2 || true; echo "Row 20 recovery run expected exit 0, got ${rec_rc}" >&2; return 1; }
+
+    /usr/bin/python3 - "${d}/small.stdout" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["status"] == "succeeded" and d["integration"]["status"] == "verified" and d["integration"]["ready"] is True, d
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 21: SIGINT while lanes are blocked on barrier -> exit 130, integration=skipped, no integration branch or worktree
+# ------------------------------------------------------------------
+row_21_sigint_during_lanes_marks_integration_skipped_without_branch_or_worktree() {
+    local d="${WORK_TMP}/r21"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    local barrier="${d}/lanes.barrier"
+    local vmarker="${d}/verify-must-not-run.marker"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    init_temp_project "${proj}"
+
+    cat > "${d}/prompts/a.md" <<EOF
+STUB WRITE src/a.txt row21-a
+STUB WAIT ${barrier} 90
+EOF
+    cat > "${d}/prompts/b.md" <<EOF
+STUB WRITE src/b.txt row21-b
+STUB WAIT ${barrier} 90
+EOF
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --write-marker '${vmarker}' --exit 0"
+}
+EOF
+
+    snapshot_repo_state "${repo}" "main" "${d}/snap"
+    assert_stub_and_decoys_armed
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${traces}" \
+        "${RELAY_CLI}" run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run.stdout" 2>"${d}/run.stderr" ) &
+    local bg_pid=$!
+    start_pid_watchdog "${bg_pid}" 120
+    local wpid="${WATCHDOG_PID}"
+
+    if ! wait_for_trace_start "${traces}/a.trace" "${bg_pid}" 60 || ! wait_for_trace_start "${traces}/b.trace" "${bg_pid}" 60; then
+        stop_pid_watchdog "${wpid}"
+        kill_procs_for_dir "${d}"
+        return 1
+    fi
+    verify_pid_is_tested_binary "${bg_pid}" "${proj}"
+    local run_id
+    run_id="$(read_lock_run_id "${proj}")"
+
+    kill -INT "${bg_pid}"
+    set +e
+    wait "${bg_pid}"
+    local run_rc=$?
+    set -e
+    stop_pid_watchdog "${wpid}"
+
+    assert_base_untouched "${repo}" "main" "${d}/snap" "${run_id}"
+    [[ "${run_rc}" -eq 130 ]] || { cat "${d}/run.stderr" >&2 || true; echo "Row 21 expected exit 130, got ${run_rc}" >&2; return 1; }
+    [[ ! -e "${vmarker}" ]] || { echo "Row 21 verify marker exists unexpectedly" >&2; return 1; }
+    poll_until_no_procs "${WORK_TMP}" 20
+
+    /usr/bin/python3 - "${d}/run.stdout" "${repo}" "${proj}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+stdout_p, repo_dir, proj_dir, empty_home = sys.argv[1:5]
+data = json.load(open(stdout_p, encoding="utf-8"))
+run_id = data["runID"]
+assert data["status"] == "cancelled", data
+integ = data["integration"]
+assert integ is not None, data
+assert integ["status"] == "skipped" and integ["ready"] is False, integ
+assert integ["branch"] is None and integ["worktreePath"] is None and integ["verify"] is None, integ
+
+int_wt = os.path.join(proj_dir, "runs", run_id, "worktrees", "integration")
+assert not os.path.exists(int_wt), f"integration worktree should not exist: {int_wt}"
+
+env = dict(os.environ, HOME=empty_home, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+sr = subprocess.run(
+    ["/usr/bin/git", "-C", repo_dir, "show-ref", "--verify", "--quiet", f"refs/heads/relay/{run_id}/integration"],
+    env=env, stdin=subprocess.DEVNULL, capture_output=True
+)
+assert sr.returncode != 0, "integration branch must not exist when lanes cancelled"
+PY
+}
+
 # ------------------------------------------------------------------
 # Row 22: Merge-phase 125: while lanes wait on barrier, place regular file at worktrees/integration -> 125, empty stdout, status=error
 # ------------------------------------------------------------------
@@ -2544,11 +3156,11 @@ run_full_suite() {
     run_row "14" "verify spawns setpgrp + INT/TERM/HUP-ignoring child with timeout 2s -> timeout (exitCode null), 0 leftover procs within 30s" row_14_verify_timeout_kills_stubborn_setpgrp_descendants
     run_row "15" "verify executes kill -9 self -> verify failed with signal=9 and exitCode=null, run exits 1" row_15_verify_killed_by_sigkill_records_signal_9_and_null_exit_code
     run_row "16" "verify modifies tracked src/a.txt + exit 0 -> verify failed naming tracked file, modifiedTrackedFiles=['src/a.txt'], ready=false, exit 1" row_16_verify_modifies_tracked_file_fails_despite_exit_0
-    record_skip "17" "live status --run while verify blocked on barrier -> verifying + alive PID"
-    record_skip "18" "SIGINT / SIGTERM during verify -> 130 / 143, cancelled, merges kept, 0 procs"
-    record_skip "19" "SIGINT during custom merge driver -> 130, cancelled, clean integration worktree"
-    record_skip "20" "kill -9 RelayIDE during verify -> 0 procs, status shows interrupted, recovery run exits 0"
-    record_skip "21" "SIGINT while lanes blocked on barrier -> 130, integration skipped, no branch/worktree"
+    run_row "17" "Live status --run while verify blocked on barrier succeeds without SQLITE_BUSY and shows verifying + alive PID" row_17_live_status_during_verify_shows_verifying_and_alive_pid
+    run_row "18" "SIGINT (130) and SIGTERM (143) during verify cancel cleanly (<20s 0 procs), preserve merges & worktree, and clear running/verifying" row_18_sigint_and_sigterm_during_verify_cancel_cleanly_and_keep_merges
+    run_row "19" "SIGINT during custom merge driver exits 130, marks integration cancelled, and leaves worktree clean at lane a's merge" row_19_sigint_during_custom_merge_driver_aborts_and_cancels_cleanly
+    run_row "20" "kill -9 RelayIDE during verify leaves 0 procs (<20s), reconciles run/integration/verify to interrupted, and recovers on next run" row_20_kill9_relayide_during_verify_reconciles_interrupted_and_recovers
+    run_row "21" "SIGINT while lanes blocked on barrier exits 130 and marks integration skipped without branch or worktree" row_21_sigint_during_lanes_marks_integration_skipped_without_branch_or_worktree
     run_row "22" "Merge-phase 125 when regular file obstructs worktrees/integration -> exit 125, empty stdout, status=error, lanes & base intact" row_22_merge_phase_125_obstructed_integration_worktree
     run_row "23" "Hostile repository (verifySignatures, gpgSign, merge.log, ff=only, rerere + 7 exit-1 hooks) merges cleanly with exact Row 1 messages and zero hook runs" row_23_hostile_repo_configs_and_failing_hooks
     run_row "24" "M2 plan validation errors and status extra positional argument each exit 2 with empty stdout and zero repo/DB side effects" row_24_m2_plan_errors_and_status_positional_arg_exit_2
