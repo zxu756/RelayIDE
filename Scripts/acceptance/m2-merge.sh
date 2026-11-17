@@ -590,6 +590,21 @@ invoke_run_checked() {
     local err_file="$5"
     shift 5
 
+    local proj_arg=""
+    local args_arr=("$@")
+    local idx
+    for (( idx=0; idx<${#args_arr[@]}; idx++ )); do
+        if [[ "${args_arr[$idx]}" == "--project" && $(( idx + 1 )) -lt ${#args_arr[@]} ]]; then
+            proj_arg="${args_arr[$((idx+1))]}"
+            break
+        fi
+    done
+
+    local runs_before=""
+    if [[ -n "${proj_arg}" && -d "${proj_arg}/runs" ]]; then
+        runs_before="$(ls -1 "${proj_arg}/runs" 2>/dev/null | LC_ALL=C sort || true)"
+    fi
+
     snapshot_repo_state "${repo_dir}" "${base_ref}" "${snap_prefix}"
     local rc=0
     invoke_product "${out_file}" "${err_file}" "$@" || rc=$?
@@ -597,6 +612,16 @@ invoke_run_checked() {
     local run_id=""
     if [[ -s "${out_file}" ]]; then
         run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("runID") or "")' "${out_file}" 2>/dev/null || true)"
+    elif [[ -n "${proj_arg}" && -d "${proj_arg}/runs" ]]; then
+        local runs_after
+        runs_after="$(ls -1 "${proj_arg}/runs" 2>/dev/null | LC_ALL=C sort || true)"
+        run_id="$(/usr/bin/python3 -c '
+import sys
+b = set(x for x in sys.argv[1].splitlines() if x)
+a = [x for x in sys.argv[2].splitlines() if x and x not in b]
+if len(a) == 1:
+    print(a[0])
+' "${runs_before}" "${runs_after}" 2>/dev/null || true)"
     fi
     if ! assert_base_untouched "${repo_dir}" "${base_ref}" "${snap_prefix}" "${run_id}"; then
         return 98
