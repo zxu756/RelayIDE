@@ -2330,4 +2330,216 @@ struct PTYAndTerminalMultiplexerTests {
         let unlimitedData = try Data(contentsOf: unlimitedURL)
         #expect(unlimitedData.count == 300_000)
     }
+
+    private static func runGitForTest(
+        _ args: [String],
+        cwd: URL,
+        env: [String: String]
+    ) throws -> (exitCode: Int32, stdout: String, stderr: String) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = args
+        proc.currentDirectoryURL = cwd
+        proc.environment = env
+        proc.standardInput = FileHandle.nullDevice
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        try proc.run()
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        return (
+            proc.terminationStatus,
+            String(decoding: outData, as: UTF8.self),
+            String(decoding: errData, as: UTF8.self)
+        )
+    }
+
+    @Test("stub-agent.sh DELETE <path> removes files and directories and fails on missing targets (M2 §12)")
+    func stubAgentDirectiveDeleteRemovesFilesAndDirectories() throws {
+        let tmpDir = try Self.makeMktempDirectory(prefix: "relay-m2-stub-del")
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let (env, decoyMarker) = try Self.makeIsolatedDecoyEnvironment(in: tmpDir)
+        let workdir = tmpDir.appendingPathComponent("wt", isDirectory: true)
+        try FileManager.default.createDirectory(at: workdir.appendingPathComponent("nested-dir"), withIntermediateDirectories: true)
+        try "keep\n".write(to: workdir.appendingPathComponent("keep.txt"), atomically: true, encoding: .utf8)
+        try "gone\n".write(to: workdir.appendingPathComponent("remove-me.txt"), atomically: true, encoding: .utf8)
+        try "file-before-dir\n".write(to: workdir.appendingPathComponent("fd"), atomically: true, encoding: .utf8)
+        try "sub\n".write(to: workdir.appendingPathComponent("nested-dir/child.txt"), atomically: true, encoding: .utf8)
+
+        let prompt = """
+        STUB DELETE remove-me.txt
+        STUB DELETE nested-dir
+        STUB DELETE fd
+        STUB WRITE fd/inner replaced-by-dir
+        """
+        let res = try Self.runStubProcess(
+            arguments: ["-p", "--permission-mode", "acceptEdits", "--output-format", "json"],
+            stdinString: prompt,
+            workingDirectory: workdir,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(res.exitCode == 0)
+        #expect(FileManager.default.fileExists(atPath: workdir.appendingPathComponent("keep.txt").path) == true)
+        #expect(FileManager.default.fileExists(atPath: workdir.appendingPathComponent("remove-me.txt").path) == false)
+        #expect(FileManager.default.fileExists(atPath: workdir.appendingPathComponent("nested-dir").path) == false)
+        #expect(try String(contentsOf: workdir.appendingPathComponent("fd/inner"), encoding: .utf8) == "replaced-by-dir\n")
+
+        let missingRes = try Self.runStubProcess(
+            arguments: ["-p", "STUB DELETE nonexistent-file.txt\n", "--mode", "accept-edits", "--output-format", "json"],
+            stdinString: nil,
+            workingDirectory: workdir,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(missingRes.exitCode != 0)
+        #expect(FileManager.default.fileExists(atPath: decoyMarker.path) == false)
+    }
+
+    @Test("stub-agent.sh MOVE <src> <dst> relocates files creating parent directories and fails when source is missing (M2 §12)")
+    func stubAgentDirectiveMoveRelocatesPath() throws {
+        let tmpDir = try Self.makeMktempDirectory(prefix: "relay-m2-stub-mv")
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let (env, decoyMarker) = try Self.makeIsolatedDecoyEnvironment(in: tmpDir)
+        let workdir = tmpDir.appendingPathComponent("wt", isDirectory: true)
+        try FileManager.default.createDirectory(at: workdir, withIntermediateDirectories: true)
+        try "payload-move\n".write(to: workdir.appendingPathComponent("orig.txt"), atomically: true, encoding: .utf8)
+
+        let res = try Self.runStubProcess(
+            arguments: ["-p", "STUB MOVE orig.txt renamed/sub/moved.txt\n", "--mode", "accept-edits", "--output-format", "json"],
+            stdinString: nil,
+            workingDirectory: workdir,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(res.exitCode == 0)
+        #expect(FileManager.default.fileExists(atPath: workdir.appendingPathComponent("orig.txt").path) == false)
+        #expect(try String(contentsOf: workdir.appendingPathComponent("renamed/sub/moved.txt"), encoding: .utf8) == "payload-move\n")
+
+        let missingRes = try Self.runStubProcess(
+            arguments: ["-p", "STUB MOVE missing-src.txt other.txt\n", "--mode", "accept-edits", "--output-format", "json"],
+            stdinString: nil,
+            workingDirectory: workdir,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(missingRes.exitCode != 0)
+        #expect(FileManager.default.fileExists(atPath: decoyMarker.path) == false)
+    }
+
+    @Test("stub-agent.sh WRITE_HEX <path> <hex> writes exact raw binary bytes including NUL without trailing newline (M2 §12)")
+    func stubAgentDirectiveWriteHexWritesBinaryWithNUL() throws {
+        let tmpDir = try Self.makeMktempDirectory(prefix: "relay-m2-stub-hex")
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let (env, decoyMarker) = try Self.makeIsolatedDecoyEnvironment(in: tmpDir)
+        let workdir = tmpDir.appendingPathComponent("wt", isDirectory: true)
+        try FileManager.default.createDirectory(at: workdir, withIntermediateDirectories: true)
+
+        let res = try Self.runStubProcess(
+            arguments: ["-p", "STUB WRITE_HEX bin/blob.dat 00ff4100427f00fe\n", "--mode", "accept-edits", "--output-format", "json"],
+            stdinString: nil,
+            workingDirectory: workdir,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(res.exitCode == 0)
+        let blobURL = workdir.appendingPathComponent("bin/blob.dat")
+        #expect(FileManager.default.fileExists(atPath: blobURL.path) == true)
+        let written = (try? Data(contentsOf: blobURL)) ?? Data()
+        #expect(written == Data([0x00, 0xFF, 0x41, 0x00, 0x42, 0x7F, 0x00, 0xFE]))
+
+        let badHexRes = try Self.runStubProcess(
+            arguments: ["-p", "STUB WRITE_HEX bin/bad.dat 00zz\n", "--mode", "accept-edits", "--output-format", "json"],
+            stdinString: nil,
+            workingDirectory: workdir,
+            environment: env,
+            scratchDir: tmpDir
+        )
+        #expect(badHexRes.exitCode != 0)
+        #expect(FileManager.default.fileExists(atPath: decoyMarker.path) == false)
+    }
+
+    @Test("stub-agent.sh GIT_COMMIT <message> commits staged changes using repository identity while excluding .relay and skipping hooks (M2 §12)")
+    func stubAgentDirectiveGitCommitUsesRepoIdentityAndSkipsHooks() throws {
+        let tmpDir = try Self.makeMktempDirectory(prefix: "relay-m2-stub-git")
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let (baseEnv, decoyMarker) = try Self.makeIsolatedDecoyEnvironment(
+            in: tmpDir,
+            extraEnv: [
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null"
+            ]
+        )
+        var cleanGitEnv = baseEnv
+        for key in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] {
+            cleanGitEnv.removeValue(forKey: key)
+        }
+
+        let repoDir = tmpDir.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        #expect(try Self.runGitForTest(["init", "-q", "-b", "main"], cwd: repoDir, env: cleanGitEnv).exitCode == 0)
+        #expect(try Self.runGitForTest(["config", "user.name", "Stub Repo Author"], cwd: repoDir, env: cleanGitEnv).exitCode == 0)
+        #expect(try Self.runGitForTest(["config", "user.email", "stub-repo@relayide.invalid"], cwd: repoDir, env: cleanGitEnv).exitCode == 0)
+        #expect(try Self.runGitForTest(["config", "commit.gpgSign", "true"], cwd: repoDir, env: cleanGitEnv).exitCode == 0)
+        try "base\n".write(to: repoDir.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
+        #expect(try Self.runGitForTest(["add", "README.txt"], cwd: repoDir, env: cleanGitEnv).exitCode == 0)
+        #expect(try Self.runGitForTest(["commit", "--no-gpg-sign", "-q", "-m", "baseline"], cwd: repoDir, env: cleanGitEnv).exitCode == 0)
+
+        let hooksDir = repoDir.appendingPathComponent(".git/hooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+        let preCommitURL = hooksDir.appendingPathComponent("pre-commit")
+        try "#!/bin/sh\nexit 1\n".write(to: preCommitURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: preCommitURL.path)
+
+        let relayInternalDir = repoDir.appendingPathComponent(".relay", isDirectory: true)
+        try FileManager.default.createDirectory(at: relayInternalDir, withIntermediateDirectories: true)
+        try "internal log\n".write(to: relayInternalDir.appendingPathComponent("01-claude.log"), atomically: true, encoding: .utf8)
+
+        let prompt = """
+        STUB WRITE committed_by_agent.txt first-step
+        STUB GIT_COMMIT feat(agent): commit first file directly
+        STUB WRITE left_uncommitted.txt second-step
+        """
+        let res = try Self.runStubProcess(
+            arguments: ["-p", "--permission-mode", "acceptEdits", "--output-format", "json"],
+            stdinString: prompt,
+            workingDirectory: repoDir,
+            environment: cleanGitEnv,
+            scratchDir: tmpDir
+        )
+        #expect(res.exitCode == 0)
+
+        let countOut = try Self.runGitForTest(["rev-list", "--count", "HEAD"], cwd: repoDir, env: cleanGitEnv).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(countOut == "2")
+
+        let logMeta = try Self.runGitForTest(["log", "-1", "--format=%an <%ae>|%cn <%ce>|%s"], cwd: repoDir, env: cleanGitEnv).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(logMeta == "Stub Repo Author <stub-repo@relayide.invalid>|Stub Repo Author <stub-repo@relayide.invalid>|feat(agent): commit first file directly")
+
+        let treeFiles = try Self.runGitForTest(["ls-tree", "-r", "--name-only", "HEAD"], cwd: repoDir, env: cleanGitEnv).stdout
+            .split(separator: "\n")
+            .map(String.init)
+        #expect(treeFiles.sorted() == ["README.txt", "committed_by_agent.txt"])
+        #expect(FileManager.default.fileExists(atPath: repoDir.appendingPathComponent("left_uncommitted.txt").path) == true)
+
+        // Also verify GIT_COMMIT fails when repository has no configured identity (`user.useConfigOnly=true`)
+        let unidentRepo = tmpDir.appendingPathComponent("unident-repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: unidentRepo, withIntermediateDirectories: true)
+        #expect(try Self.runGitForTest(["init", "-q", "-b", "main"], cwd: unidentRepo, env: cleanGitEnv).exitCode == 0)
+        let noIdentRes = try Self.runStubProcess(
+            arguments: ["-p", "STUB WRITE a.txt x\nSTUB GIT_COMMIT should fail\n", "--mode", "accept-edits", "--output-format", "json"],
+            stdinString: nil,
+            workingDirectory: unidentRepo,
+            environment: cleanGitEnv,
+            scratchDir: tmpDir
+        )
+        #expect(noIdentRes.exitCode != 0)
+        #expect(FileManager.default.fileExists(atPath: decoyMarker.path) == false)
+    }
 }

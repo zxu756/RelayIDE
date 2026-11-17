@@ -328,6 +328,93 @@ while IFS= read -r -u 3 raw_line || [[ -n "$raw_line" ]]; do
                         BLOCK_BUF=""
                     fi
                     ;;
+                DELETE)
+                    trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                    if [[ -z "$trimmed" ]]; then
+                        echo "stub-agent: DELETE requires <path>" >&2
+                        finish_and_exit 2
+                    fi
+                    rel_p="${trimmed%%[[:space:]]*}"
+                    target_p="$(resolve_target_path "$rel_p")"
+                    if [[ ! -e "$target_p" && ! -L "$target_p" ]]; then
+                        echo "stub-agent: DELETE target does not exist: $target_p" >&2
+                        finish_and_exit 2
+                    fi
+                    if ! rm -rf -- "$target_p"; then
+                        echo "stub-agent: DELETE failed for $target_p" >&2
+                        finish_and_exit 2
+                    fi
+                    ;;
+                MOVE)
+                    trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                    if [[ -z "$trimmed" ]]; then
+                        echo "stub-agent: MOVE requires <src> <dst>" >&2
+                        finish_and_exit 2
+                    fi
+                    src_raw="${trimmed%%[[:space:]]*}"
+                    rem="${trimmed#"$src_raw"}"
+                    rem="${rem#"${rem%%[![:space:]]*}"}"
+                    dst_raw="${rem%%[[:space:]]*}"
+                    if [[ -z "$src_raw" || -z "$dst_raw" ]]; then
+                        echo "stub-agent: MOVE requires <src> <dst>" >&2
+                        finish_and_exit 2
+                    fi
+                    src_p="$(resolve_target_path "$src_raw")"
+                    dst_p="$(resolve_target_path "$dst_raw")"
+                    if [[ ! -e "$src_p" && ! -L "$src_p" ]]; then
+                        echo "stub-agent: MOVE source does not exist: $src_p" >&2
+                        finish_and_exit 2
+                    fi
+                    mkdir -p "$(dirname "$dst_p")" || finish_and_exit 2
+                    if ! mv -- "$src_p" "$dst_p"; then
+                        echo "stub-agent: MOVE failed from $src_p to $dst_p" >&2
+                        finish_and_exit 2
+                    fi
+                    ;;
+                WRITE_HEX)
+                    trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                    if [[ -z "$trimmed" ]]; then
+                        echo "stub-agent: WRITE_HEX requires <path> <hex>" >&2
+                        finish_and_exit 2
+                    fi
+                    rel_p="${trimmed%%[[:space:]]*}"
+                    rem="${trimmed#"$rel_p"}"
+                    rem="${rem#"${rem%%[![:space:]]*}"}"
+                    if [[ -z "$rel_p" || -z "$rem" ]]; then
+                        echo "stub-agent: WRITE_HEX requires <path> <hex>" >&2
+                        finish_and_exit 2
+                    fi
+                    target_p="$(resolve_target_path "$rel_p")"
+                    if ! /usr/bin/python3 -I -c '
+import os, sys
+dst, hex_str = sys.argv[1], sys.argv[2]
+raw = bytes.fromhex(hex_str)
+parent = os.path.dirname(dst)
+if parent:
+    os.makedirs(parent, exist_ok=True)
+with open(dst, "wb") as fh:
+    fh.write(raw)
+' "$target_p" "$rem"; then
+                        echo "stub-agent: WRITE_HEX failed for $target_p" >&2
+                        finish_and_exit 2
+                    fi
+                    ;;
+                GIT_COMMIT)
+                    trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
+                    if [[ -z "$trimmed" ]]; then
+                        echo "stub-agent: GIT_COMMIT requires <message>" >&2
+                        finish_and_exit 2
+                    fi
+                    if ! /usr/bin/git -C "$WORKDIR" -c core.hooksPath=/dev/null -c gc.auto=0 -c maintenance.auto=false add -A -- .; then
+                        echo "stub-agent: GIT_COMMIT git add failed in $WORKDIR" >&2
+                        finish_and_exit 2
+                    fi
+                    /usr/bin/git -C "$WORKDIR" -c core.hooksPath=/dev/null -c gc.auto=0 -c maintenance.auto=false reset -q HEAD -- .relay 2>/dev/null || true
+                    if ! /usr/bin/git -C "$WORKDIR" -c core.hooksPath=/dev/null -c gc.auto=0 -c maintenance.auto=false -c user.useConfigOnly=true commit --no-gpg-sign -q -m "$trimmed"; then
+                        echo "stub-agent: GIT_COMMIT git commit failed in $WORKDIR" >&2
+                        finish_and_exit 2
+                    fi
+                    ;;
                 SLEEP)
                     ensure_start_trace_written
                     trimmed="${arg_str#"${arg_str%%[![:space:]]*}"}"
