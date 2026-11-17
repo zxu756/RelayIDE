@@ -5,7 +5,7 @@
 # Never opens the desktop window and never invokes any real coding agent CLI.
 #
 # Usage: Scripts/acceptance/m2-merge.sh [--quick] [--record]
-#   --quick    run Row 1 only and exit 0 on pass (Stage 5; Row 34 scheduled for Stage 6)
+#   --quick    run Row 34 (1 lane + verify: "true") and exit 0 on pass
 #   --record   write the suite report to reports/m2-merge.txt (leaves working tree untouched otherwise)
 set -euo pipefail
 
@@ -3077,9 +3077,539 @@ PY
     [[ -z "$(ls -A "${traces}" 2>/dev/null || true)" ]] || { echo "Row 24 stub agent ran unexpectedly" >&2; return 1; }
 }
 
+# ------------------------------------------------------------------
+# Row 25: Two separate projects concurrently run + verify against the same repository
+#         -> both exit 0, distinct integration branches, each merge commit's 2nd parent belongs strictly to its own lanes
+# ------------------------------------------------------------------
+row_25_two_projects_concurrent_merge_and_verify_on_same_repo() {
+    local d="${WORK_TMP}/r25"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj1="${d}/Proj1.relayproj"
+    local proj2="${d}/Proj2.relayproj"
+    local traces1="${d}/traces1"
+    local traces2="${d}/traces2"
+    local gate="${d}/release.gate"
+    mkdir -p "${d}/prompts" "${traces1}" "${traces2}"
+
+    init_temp_git_repo "${repo}" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+    init_temp_project "${proj1}"
+    init_temp_project "${proj2}"
+
+    cat > "${d}/prompts/p1_a.md" <<EOF
+STUB WRITE src/p1_a.txt proj1-lane-a
+STUB WAIT ${gate} 90
+EOF
+    cat > "${d}/prompts/p1_b.md" <<EOF
+STUB WRITE src/p1_b.txt proj1-lane-b
+STUB WAIT ${gate} 90
+EOF
+    cat > "${d}/prompts/p2_a.md" <<EOF
+STUB WRITE src/p2_a.txt proj2-lane-a
+STUB WAIT ${gate} 90
+EOF
+    cat > "${d}/prompts/p2_b.md" <<EOF
+STUB WRITE src/p2_b.txt proj2-lane-b
+STUB WAIT ${gate} 90
+EOF
+
+    cat > "${d}/plan1.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/p1_a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/p1_b.md", "after": []}
+  ],
+  "verify": "test -f src/p1_a.txt && test -f src/p1_b.txt && test ! -e src/p2_a.txt && test ! -e src/p2_b.txt"
+}
+EOF
+    cat > "${d}/plan2.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "codex", "prompt": "prompts/p2_a.md", "after": []},
+    {"id": "b", "agent": "agy",   "prompt": "prompts/p2_b.md", "after": []}
+  ],
+  "verify": "test -f src/p2_a.txt && test -f src/p2_b.txt && test ! -e src/p1_a.txt && test ! -e src/p1_b.txt"
+}
+EOF
+
+    snapshot_repo_state "${repo}" "main" "${d}/snap"
+    assert_stub_and_decoys_armed
+
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${traces1}" \
+        "${RELAY_CLI}" run "${d}/plan1.json" --project "${proj1}" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run1.stdout" 2>"${d}/run1.stderr" ) &
+    local bg1=$!
+    start_pid_watchdog "${bg1}" 120
+    local wpid1="${WATCHDOG_PID}"
+
+    ( exec /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+        /usr/bin/env -u RELAY_WORKER -u AGY_CODER_WORKER -u CLAUDECODE -u RELAY_BUDGET_USD \
+        "STUB_TRACE_DIR=${traces2}" \
+        "${RELAY_CLI}" run "${d}/plan2.json" --project "${proj2}" --relay-sh "${REAL_RELAY_SH}" --lang zh \
+        >"${d}/run2.stdout" 2>"${d}/run2.stderr" ) &
+    local bg2=$!
+    start_pid_watchdog "${bg2}" 120
+    local wpid2="${WATCHDOG_PID}"
+
+    local ok_wait=1
+    if ! wait_for_trace_start "${traces1}/a.trace" "${bg1}" 60 \
+        || ! wait_for_trace_start "${traces1}/b.trace" "${bg1}" 60 \
+        || ! wait_for_trace_start "${traces2}/a.trace" "${bg2}" 60 \
+        || ! wait_for_trace_start "${traces2}/b.trace" "${bg2}" 60; then
+        ok_wait=0
+    fi
+
+    local run1_id="" run2_id=""
+    if [[ "${ok_wait}" -eq 1 ]]; then
+        run1_id="$(read_lock_run_id "${proj1}" || true)"
+        run2_id="$(read_lock_run_id "${proj2}" || true)"
+    fi
+
+    : > "${gate}"
+    set +e
+    wait "${bg1}"; local rc1=$?
+    wait "${bg2}"; local rc2=$?
+    set -e
+    stop_pid_watchdog "${wpid1}"
+    stop_pid_watchdog "${wpid2}"
+
+    if [[ -z "${run1_id}" && -s "${d}/run1.stdout" ]]; then
+        run1_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${d}/run1.stdout" 2>/dev/null || true)"
+    fi
+    if [[ -z "${run2_id}" && -s "${d}/run2.stdout" ]]; then
+        run2_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${d}/run2.stdout" 2>/dev/null || true)"
+    fi
+
+    assert_base_untouched "${repo}" "main" "${d}/snap" "${run1_id},${run2_id}"
+    if [[ "${ok_wait}" -ne 1 || "${rc1}" -ne 0 || "${rc2}" -ne 0 ]]; then
+        cat "${d}/run1.stderr" >&2 || true
+        cat "${d}/run2.stderr" >&2 || true
+        echo "Row 25 concurrent runs failed: ok_wait=${ok_wait}, rc1=${rc1}, rc2=${rc2}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run1.stdout" "${d}/run2.stdout" "${repo}" "${base_oid}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+r1_p, r2_p, repo_dir, base_oid, empty_home = sys.argv[1:6]
+d1 = json.load(open(r1_p, encoding="utf-8"))
+d2 = json.load(open(r2_p, encoding="utf-8"))
+assert d1["runID"] != d2["runID"], (d1["runID"], d2["runID"])
+
+for d in (d1, d2):
+    assert d["status"] == "succeeded", d
+    assert d["integration"]["status"] == "verified" and d["integration"]["ready"] is True, d["integration"]
+    assert d["integration"]["verify"]["status"] == "passed" and d["integration"]["verify"]["exitCode"] == 0, d["integration"]["verify"]
+
+b1 = d1["integration"]["branch"]
+b2 = d2["integration"]["branch"]
+assert b1 and b2 and b1 != b2, (b1, b2)
+
+lanes1 = {l["laneID"]: l["commitOID"] for l in d1["lanes"]}
+lanes2 = {l["laneID"]: l["commitOID"] for l in d2["lanes"]}
+set1 = set(lanes1.values())
+set2 = set(lanes2.values())
+assert len(set1) == 2 and len(set2) == 2 and set1.isdisjoint(set2), (set1, set2)
+
+env = dict(os.environ, HOME=empty_home, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+def git(*args):
+    return subprocess.run(["/usr/bin/git", "-C", repo_dir, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, check=True).stdout.decode("utf-8")
+
+for int_branch, own_lanes, other_set in ((b1, lanes1, set2), (b2, lanes2, set1)):
+    fp = [x for x in git("rev-list", "--first-parent", "--reverse", f"{base_oid}..{int_branch}").splitlines() if x]
+    assert len(fp) == 2, (int_branch, fp)
+    second_parents = []
+    for m_oid in fp:
+        parents = git("rev-list", "--parents", "-n", "1", m_oid).strip().split()
+        assert len(parents) == 3, (m_oid, parents)
+        second_parents.append(parents[2])
+    assert second_parents == [own_lanes["a"], own_lanes["b"]], (int_branch, second_parents, own_lanes)
+    assert set(second_parents).isdisjoint(other_set), (int_branch, second_parents, other_set)
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 26: Same plan run twice sequentially -> second run creates its own integration branch; first integration branch OID unchanged
+# ------------------------------------------------------------------
+row_26_same_plan_twice_preserves_first_integration_branch_oid() {
+    local d="${WORK_TMP}/r26"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/a.txt repeat-a\n' > "${d}/prompts/a.md"
+    printf 'STUB WRITE src/b.txt repeat-b\n' > "${d}/prompts/b.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "test -f src/a.txt && test -f src/b.txt"
+}
+EOF
+
+    local rc1=0
+    invoke_run_checked "${repo}" "main" "${d}/snap1" "${d}/run1.stdout" "${d}/run1.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc1=$?
+    [[ "${rc1}" -eq 0 ]] || { cat "${d}/run1.stderr" >&2 || true; echo "Row 26 first run expected exit 0, got ${rc1}" >&2; return 1; }
+
+    local int_branch_1 int_oid_1_before
+    int_branch_1="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["integration"]["branch"])' "${d}/run1.stdout")"
+    int_oid_1_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse "${int_branch_1}")"
+
+    local rc2=0
+    invoke_run_checked "${repo}" "main" "${d}/snap2" "${d}/run2.stdout" "${d}/run2.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc2=$?
+    [[ "${rc2}" -eq 0 ]] || { cat "${d}/run2.stderr" >&2 || true; echo "Row 26 second run expected exit 0, got ${rc2}" >&2; return 1; }
+
+    /usr/bin/python3 - "${d}/run1.stdout" "${d}/run2.stdout" "${repo}" "${int_oid_1_before}" "${WORK_TMP}/empty-git-home" <<'PY'
+import json, os, subprocess, sys
+
+r1_p, r2_p, repo_dir, oid1_before, empty_home = sys.argv[1:6]
+d1 = json.load(open(r1_p, encoding="utf-8"))
+d2 = json.load(open(r2_p, encoding="utf-8"))
+b1 = d1["integration"]["branch"]
+b2 = d2["integration"]["branch"]
+assert b1 and b2 and b1 != b2, (b1, b2)
+assert d1["integration"]["status"] == "verified" and d2["integration"]["status"] == "verified"
+
+env = dict(os.environ, HOME=empty_home, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+def rev_parse(ref):
+    return subprocess.check_output(["/usr/bin/git", "-C", repo_dir, "rev-parse", ref], env=env, stdin=subprocess.DEVNULL, text=True).strip()
+
+oid1_after = rev_parse(b1)
+oid2_after = rev_parse(b2)
+assert oid1_after == oid1_before == d1["integration"]["headCommitOID"], (oid1_after, oid1_before, d1["integration"]["headCommitOID"])
+assert oid2_after == d2["integration"]["headCommitOID"], (oid2_after, d2["integration"]["headCommitOID"])
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 27: Rows 1, 3, 11, and 18 `run` stdout is byte-for-byte identical to subsequent `status --run` output (including `integration`)
+# ------------------------------------------------------------------
+row_27_run_stdout_byte_identical_to_status_run_for_rows_1_3_11_18() {
+    local case_dir
+    for case_dir in \
+        "${WORK_TMP}/r01" \
+        "${WORK_TMP}/r03" \
+        "${WORK_TMP}/r11" \
+        "${WORK_TMP}/r18/sigint" \
+        "${WORK_TMP}/r18/sigterm"
+    do
+        [[ -s "${case_dir}/run.stdout" ]] || { echo "Row 27 missing ${case_dir}/run.stdout" >&2; return 1; }
+        [[ -d "${case_dir}/Proj.relayproj" ]] || { echo "Row 27 missing ${case_dir}/Proj.relayproj" >&2; return 1; }
+
+        local run_id
+        run_id="$(/usr/bin/python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("integration") is not None; print(d["runID"])' "${case_dir}/run.stdout")"
+
+        local st_rc=0
+        invoke_product "${case_dir}/row27-status.stdout" "${case_dir}/row27-status.stderr" -- \
+            status --project "${case_dir}/Proj.relayproj" --run "${run_id}" --lang zh || st_rc=$?
+        [[ "${st_rc}" -eq 0 ]] || { echo "Row 27 status --run failed (${st_rc}) for ${case_dir}" >&2; return 1; }
+
+        if ! cmp -s "${case_dir}/run.stdout" "${case_dir}/row27-status.stdout"; then
+            echo "Row 27 byte mismatch between run.stdout and status --run in ${case_dir}" >&2
+            diff -u "${case_dir}/run.stdout" "${case_dir}/row27-status.stdout" >&2 || true
+            return 1
+        fi
+    done
+}
+
+# ------------------------------------------------------------------
+# Row 28: Replay Rows 3 and 11 with `--lang zh` and `--lang en` -> stderr language differs, JSON is identical
+# ------------------------------------------------------------------
+row_28_rows_3_and_11_bilingual_stderr_differs_while_json_identical() {
+    local root="${WORK_TMP}/r28"
+    rm -rf "${root}"
+    mkdir -p "${root}"
+
+    local lang
+    # Replay Row 3 (same-line conflict on f.txt) under zh and en
+    for lang in zh en; do
+        local d="${root}/r3-${lang}"
+        local marker="${d}/verify-must-not-run.marker"
+        mkdir -p "${d}/prompts" "${d}/traces"
+        init_temp_git_repo "${d}/repo" 1
+        printf 'line-1\nshared-r28-line\nline-3\n' > "${d}/repo/f.txt"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" add f.txt
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" -c commit.gpgsign=false commit -q -m "Add f.txt"
+        init_temp_project "${d}/Proj.relayproj"
+
+        printf 'STUB WRITE_BLOCK f.txt EOF_A\nline-1\nalpha-r28\nline-3\nEOF_A\n' > "${d}/prompts/a.md"
+        printf 'STUB WRITE_BLOCK f.txt EOF_B\nline-1\nbeta-r28\nline-3\nEOF_B\n' > "${d}/prompts/b.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --write-marker '${marker}' --exit 0"
+}
+EOF
+        local rc=0
+        invoke_run_checked "${d}/repo" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+            "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang "${lang}" || rc=$?
+        [[ "${rc}" -eq 1 ]] || { echo "Row 28 (r3-${lang}) expected exit 1, got ${rc}" >&2; return 1; }
+        [[ ! -e "${marker}" ]] || { echo "Row 28 (r3-${lang}) verify marker exists unexpectedly" >&2; return 1; }
+
+        local run_id
+        run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${d}/run.stdout")"
+        invoke_product "${d}/status-zh.stdout" "${d}/status-zh.stderr" -- status --project "${d}/Proj.relayproj" --run "${run_id}" --lang zh
+        invoke_product "${d}/status-en.stdout" "${d}/status-en.stderr" -- status --project "${d}/Proj.relayproj" --run "${run_id}" --lang en
+        cmp -s "${d}/status-zh.stdout" "${d}/status-en.stdout" || { echo "Row 28 (r3-${lang}) status --run differed between zh and en" >&2; return 1; }
+    done
+
+    # Replay Row 11 (verify exits 3) under zh and en
+    for lang in zh en; do
+        local d="${root}/r11-${lang}"
+        mkdir -p "${d}/prompts" "${d}/traces"
+        init_temp_git_repo "${d}/repo" 1
+        init_temp_project "${d}/Proj.relayproj"
+
+        printf 'STUB WRITE src/a.txt r28-r11-a\n' > "${d}/prompts/a.md"
+        printf 'STUB WRITE src/b.txt r28-r11-b\n' > "${d}/prompts/b.md"
+        cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${d}/repo",
+  "base": "main",
+  "lanes": [
+    {"id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []},
+    {"id": "b", "agent": "codex",  "prompt": "prompts/b.md", "after": []}
+  ],
+  "verify": "'${STUB_VERIFY_BIN}' --tag '${WORK_TMP_NAME}' --stderr-line 'r28-verify-3' --exit 3"
+}
+EOF
+        local rc=0
+        invoke_run_checked "${d}/repo" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+            "STUB_TRACE_DIR=${d}/traces" -- \
+            run "${d}/plan.json" --project "${d}/Proj.relayproj" --relay-sh "${REAL_RELAY_SH}" --lang "${lang}" || rc=$?
+        [[ "${rc}" -eq 1 ]] || { echo "Row 28 (r11-${lang}) expected exit 1, got ${rc}" >&2; return 1; }
+
+        local run_id
+        run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${d}/run.stdout")"
+        invoke_product "${d}/status-zh.stdout" "${d}/status-zh.stderr" -- status --project "${d}/Proj.relayproj" --run "${run_id}" --lang zh
+        invoke_product "${d}/status-en.stdout" "${d}/status-en.stderr" -- status --project "${d}/Proj.relayproj" --run "${run_id}" --lang en
+        cmp -s "${d}/status-zh.stdout" "${d}/status-en.stdout" || { echo "Row 28 (r11-${lang}) status --run differed between zh and en" >&2; return 1; }
+    done
+
+    /usr/bin/python3 - "${root}/r3-zh" "${root}/r3-en" "${root}/r11-zh" "${root}/r11-en" <<'PY'
+import copy, json, os, sys
+
+def load_pair(d):
+    j = json.load(open(os.path.join(d, "run.stdout"), encoding="utf-8"))
+    e = open(os.path.join(d, "run.stderr"), encoding="utf-8").read()
+    return j, e
+
+def normalize_run_json(orig):
+    d = copy.deepcopy(orig)
+    for k in ("runID", "repoPath", "planCopyPath", "baseCommitOID", "startedAt", "finishedAt", "relayidePID", "verifyCommand"):
+        if k in d and d[k] is not None:
+            d[k] = f"<{k}>"
+    for l in d.get("lanes", []):
+        for k in ("runID", "promptPath", "startedAt", "finishedAt", "pid", "branch", "commitOID", "worktreePath"):
+            if k in l and l[k] is not None:
+                l[k] = f"<{k}>"
+    integ = d.get("integration")
+    if integ is not None:
+        for k in ("branch", "worktreePath", "baseCommitOID", "headCommitOID"):
+            if k in integ and integ[k] is not None:
+                integ[k] = f"<{k}>"
+        for m in integ.get("merges", []):
+            for k in ("laneCommitOID", "mergeCommitOID", "startedAt", "finishedAt"):
+                if k in m and m[k] is not None:
+                    m[k] = f"<{k}>"
+            if "conflictLines" in m and m["conflictLines"]:
+                m["conflictLines"] = [f"<conflict-line-{i}>" for i in range(len(m["conflictLines"]))]
+        ver = integ.get("verify")
+        if ver is not None:
+            for k in ("command", "pid", "startedAt", "finishedAt", "logPath", "logBytes"):
+                if k in ver and ver[k] is not None:
+                    ver[k] = f"<{k}>"
+    return d
+
+j3_zh, e3_zh = load_pair(sys.argv[1])
+j3_en, e3_en = load_pair(sys.argv[2])
+assert e3_zh != e3_en, "Row 3 stderr did not differ between zh and en"
+assert "合并通道" in e3_zh and "集成结果" in e3_zh and "[relay] merge lane" not in e3_zh, e3_zh
+assert "[relay] merge lane" in e3_en and "[relay] integration finished" in e3_en and "合并通道" not in e3_en, e3_en
+assert normalize_run_json(j3_zh) == normalize_run_json(j3_en), (normalize_run_json(j3_zh), normalize_run_json(j3_en))
+
+j11_zh, e11_zh = load_pair(sys.argv[3])
+j11_en, e11_en = load_pair(sys.argv[4])
+assert e11_zh != e11_en, "Row 11 stderr did not differ between zh and en"
+assert "验证命令已启动" in e11_zh and "验证命令已结束" in e11_zh and "[relay] verify started" not in e11_zh, e11_zh
+assert "[relay] verify started" in e11_en and "[relay] verify finished" in e11_en and "验证命令已启动" not in e11_en, e11_en
+assert normalize_run_json(j11_zh) == normalize_run_json(j11_en), (normalize_run_json(j11_zh), normalize_run_json(j11_en))
+PY
+}
+
+# ------------------------------------------------------------------
+# Row 29: `base` never touched: verify all prior `assert_base_untouched` checks passed, plus replay Row 10 twice:
+#         once with un-checked-out branch `dev` as base, and once with tag `v0` (no reflog) as base
+# ------------------------------------------------------------------
+row_29_base_untouched_across_all_rows_plus_branch_dev_and_tag_v0() {
+    local log_f="${WORK_TMP}/assert-base-untouched.log"
+    [[ -s "${log_f}" ]] || { echo "Row 29 assert-base-untouched.log missing or empty" >&2; return 1; }
+    if grep -q '^FAIL	' "${log_f}"; then
+        echo "Row 29 prior assert_base_untouched failures recorded:" >&2
+        grep '^FAIL	' "${log_f}" >&2 || true
+        return 1
+    fi
+    local pass_checks
+    pass_checks="$(grep -c '^PASS	' "${log_f}" || true)"
+    [[ "${pass_checks}" -ge 25 ]] || { echo "Row 29 expected >= 25 prior assert_base_untouched checks, got ${pass_checks}" >&2; return 1; }
+
+    local root="${WORK_TMP}/r29"
+    rm -rf "${root}"
+    mkdir -p "${root}"
+
+    # 29a: Un-checked-out branch `dev` while main working tree stays on `main`
+    {
+        local d="${root}/branch-dev"
+        mkdir -p "${d}"
+        init_temp_git_repo "${d}/repo" 1
+        local main_oid dev_oid
+        main_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" checkout -q -b dev
+        printf 'dev-branch-seed\n' > "${d}/repo/dev-seed.txt"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" add dev-seed.txt
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" -c commit.gpgsign=false commit -q -m "Commit on dev"
+        dev_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse dev)"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" checkout -q main
+
+        [[ "${dev_oid}" != "${main_oid}" ]] || return 1
+        [[ "$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" symbolic-ref HEAD)" == "refs/heads/main" ]] || return 1
+        local dev_reflog_before
+        dev_reflog_before="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" reflog show refs/heads/dev | wc -l | tr -d ' ')"
+        [[ "${dev_reflog_before}" -ge 1 ]] || return 1
+
+        run_row10_verify_probe_scenario "${d}" "${d}/repo" "dev" "${dev_oid}"
+
+        local dev_reflog_after
+        dev_reflog_after="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" reflog show refs/heads/dev | wc -l | tr -d ' ')"
+        [[ "${dev_reflog_after}" == "${dev_reflog_before}" ]] || { echo "Row 29a dev reflog changed" >&2; return 1; }
+        [[ "$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse dev)" == "${dev_oid}" ]] || return 1
+        [[ "$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)" == "${main_oid}" ]] || return 1
+        [[ "$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" symbolic-ref HEAD)" == "refs/heads/main" ]] || return 1
+
+        local run_id
+        run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${d}/run.stdout")"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" cat-file -e "relay/${run_id}/integration:dev-seed.txt"
+    }
+
+    # 29b: Lightweight tag `v0` (which has no reflog) while `main` has advanced past `v0`
+    {
+        local d="${root}/tag-v0"
+        mkdir -p "${d}"
+        init_temp_git_repo "${d}/repo" 1
+        local v0_oid main_oid
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" tag v0 HEAD
+        v0_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse refs/tags/v0)"
+
+        printf 'later-on-main\n' > "${d}/repo/post-v0.txt"
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" add post-v0.txt
+        HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" -c commit.gpgsign=false commit -q -m "Advance main past v0"
+        main_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)"
+
+        [[ "${v0_oid}" != "${main_oid}" ]] || return 1
+        [[ ! -e "${d}/repo/.git/logs/refs/tags/v0" ]] || { echo "Row 29b unexpected reflog for tag v0" >&2; return 1; }
+
+        run_row10_verify_probe_scenario "${d}" "${d}/repo" "v0" "${v0_oid}"
+
+        [[ "$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse refs/tags/v0)" == "${v0_oid}" ]] || { echo "Row 29b refs/tags/v0 target changed" >&2; return 1; }
+        [[ ! -e "${d}/repo/.git/logs/refs/tags/v0" ]] || { echo "Row 29b tag v0 gained a reflog" >&2; return 1; }
+        [[ "$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" rev-parse main)" == "${main_oid}" ]] || return 1
+        [[ "$(HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" symbolic-ref HEAD)" == "refs/heads/main" ]] || return 1
+
+        local run_id
+        run_id="$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runID"])' "${d}/run.stdout")"
+        if HOME="${WORK_TMP}/empty-git-home" git -C "${d}/repo" cat-file -e "relay/${run_id}/integration:post-v0.txt" 2>/dev/null; then
+            echo "Row 29b integration branched from main instead of tag v0" >&2
+            return 1
+        fi
+    }
+}
+
+# ------------------------------------------------------------------
+# Row 34: `m2-merge.sh --quick`: 1 lane + `verify: "true"` -> run exits 0, integration verified, ready=true, base untouched
+# ------------------------------------------------------------------
+row_34_quick_single_lane_verify_true() {
+    local d="${WORK_TMP}/r34"
+    rm -rf "${d}"
+    local repo="${d}/repo"
+    local proj="${d}/Proj.relayproj"
+    local traces="${d}/traces"
+    mkdir -p "${d}/prompts" "${traces}"
+
+    init_temp_git_repo "${repo}" 1
+    local base_oid
+    base_oid="$(HOME="${WORK_TMP}/empty-git-home" git -C "${repo}" rev-parse main)"
+    init_temp_project "${proj}"
+
+    printf 'STUB WRITE src/quick.txt quick-m2-payload\nSTUB COST 0.0050\n' > "${d}/prompts/q.md"
+    cat > "${d}/plan.json" <<EOF
+{
+  "repo": "${repo}",
+  "base": "main",
+  "lanes": [
+    {"id": "q", "agent": "claude", "prompt": "prompts/q.md", "after": []}
+  ],
+  "verify": "true"
+}
+EOF
+
+    local rc=0
+    invoke_run_checked "${repo}" "main" "${d}/snap" "${d}/run.stdout" "${d}/run.stderr" \
+        "STUB_TRACE_DIR=${traces}" -- \
+        run "${d}/plan.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        cat "${d}/run.stderr" >&2 || true
+        echo "Row 34 (--quick) expected exit 0, got ${rc}" >&2
+        return 1
+    fi
+
+    /usr/bin/python3 - "${d}/run.stdout" "${base_oid}" <<'PY'
+import json, sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+base_oid = sys.argv[2]
+assert data["status"] == "succeeded", data
+assert len(data["lanes"]) == 1 and data["lanes"][0]["laneID"] == "q" and data["lanes"][0]["status"] == "succeeded", data["lanes"]
+integ = data["integration"]
+assert integ is not None, data
+assert integ["status"] == "verified", integ
+assert integ["ready"] is True, integ
+assert integ["baseCommitOID"] == base_oid, integ
+ver = integ["verify"]
+assert ver is not None and ver["status"] == "passed" and ver["exitCode"] == 0 and ver["signal"] is None, integ
+PY
+}
+
 run_quick_mode() {
     echo "================================================================"
-    echo "RelayIDE M2 Acceptance Quick Check (--quick, Row 1)"
+    echo "RelayIDE M2 Acceptance Quick Check (--quick, Row 34)"
     echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo "Commit:    $(git rev-parse --short HEAD) (branch: $(git rev-parse --abbrev-ref HEAD); ${TREE_STATE})"
     echo "relay.sh sha256 (start):      ${SHA256_RELAY_SH_BEFORE}"
@@ -3092,7 +3622,7 @@ run_quick_mode() {
         [[ -x "${RELAY_CLI_BIN}" ]] || { echo "error: RELAY_CLI_BIN is not executable" >&2; return 1; }
     fi
 
-    run_row "1" "(--quick) Two independent lanes a & b merge with --no-ff, configured identity, clean integration worktree, and untouched base" row_01_two_independent_lanes_no_verify
+    run_row "34" "(--quick, 1 lane + verify: \"true\") run exited 0, integration verified, ready=true, base untouched" row_34_quick_single_lane_verify_true
 
     if [[ -e "${DECOY_MARKER}" ]]; then
         record_fail "quick-decoy" "decoy CLI was invoked during --quick"
@@ -3164,12 +3694,49 @@ run_full_suite() {
     run_row "22" "Merge-phase 125 when regular file obstructs worktrees/integration -> exit 125, empty stdout, status=error, lanes & base intact" row_22_merge_phase_125_obstructed_integration_worktree
     run_row "23" "Hostile repository (verifySignatures, gpgSign, merge.log, ff=only, rerere + 7 exit-1 hooks) merges cleanly with exact Row 1 messages and zero hook runs" row_23_hostile_repo_configs_and_failing_hooks
     run_row "24" "M2 plan validation errors and status extra positional argument each exit 2 with empty stdout and zero repo/DB side effects" row_24_m2_plan_errors_and_status_positional_arg_exit_2
-    record_skip "25" "Two projects concurrently running + verifying against same repository"
-    record_skip "26" "Same plan run twice -> distinct integration branches, first unchanged"
-    record_skip "27" "Rows 1, 3, 11, 18 run stdout byte-identical to status --run"
-    record_skip "28" "Rows 3 and 11 with --lang zh vs --lang en -> stderr differs, JSON identical"
-    record_skip "29" "base untouched across un-checked-out branch dev and tag v0"
-    record_skip "34" "m2-merge.sh --quick 1-lane + verify:true check"
+    run_row "25" "Two separate projects concurrently run + verify against same repo -> both exit 0 with distinct integration branches and isolated 2nd parents" row_25_two_projects_concurrent_merge_and_verify_on_same_repo
+    run_row "26" "Same plan run twice -> second run creates distinct integration branch while first integration branch OID stays unchanged" row_26_same_plan_twice_preserves_first_integration_branch_oid
+    run_row "27" "Rows 1, 3, 11, and 18 run stdout JSON is byte-for-byte identical to status --run output (including integration)" row_27_run_stdout_byte_identical_to_status_run_for_rows_1_3_11_18
+    run_row "28" "Rows 3 and 11 replayed with --lang zh and --lang en -> stderr language differs while JSON is identical" row_28_rows_3_and_11_bilingual_stderr_differs_while_json_identical
+    run_row "29" "base never touched across all rows plus Row 10 replayed on un-checked-out branch dev and tag v0" row_29_base_untouched_across_all_rows_plus_branch_dev_and_tag_v0
+
+    # Execute Row 34 (`m2-merge.sh --quick`) into a scratch file before Row 33 tears down ${WORK_TMP},
+    # so Row 33 can verify real deletion of ${WORK_TMP} and rows print in canonical order 33, 34.
+    local r34_out="${WORK_TMP}/r34-quick.out"
+    local r34_ok=0
+    local r34_rc=0
+    local r34_diag=""
+    local effective_bin="${RELAY_CLI_BIN:-${ROOT_DIR}/.build/debug/RelayIDE}"
+    set +e
+    /usr/bin/python3 - "${r34_out}" "${REAL_HOME}" "${ORIG_PATH}" "${effective_bin}" "${ROOT_DIR}/Scripts/acceptance/m2-merge.sh" <<'PY'
+import os, signal, subprocess, sys
+out_p, real_home, orig_path, cli_bin, script_p = sys.argv[1:6]
+env = dict(os.environ)
+env["HOME"] = real_home
+env["PATH"] = orig_path
+env["RELAY_CLI_BIN"] = cli_bin
+for k in ("RELAY_CLI_HOME", "RELAY_CLI_CHILD_PATH", "RELAY_CLAUDE_BIN", "RELAY_CODEX_BIN", "RELAY_AGY_BIN", "RELAY_VIBE_BIN"):
+    env.pop(k, None)
+with open(out_p, "wb") as fh:
+    p = subprocess.Popen([script_p, "--quick"], stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    try:
+        sys.exit(p.wait(timeout=120.0))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        sys.exit(124)
+PY
+    r34_rc=$?
+    set -e
+    if [[ "${r34_rc}" -eq 0 ]] \
+        && grep -Fq "[PASS] Row 34: (--quick" "${r34_out}" \
+        && ! grep -Fq "[FAIL]" "${r34_out}"; then
+        r34_ok=1
+    else
+        r34_diag="$(cat "${r34_out}" 2>/dev/null || true)"
+    fi
 
     local fail_log_nonempty=0
     [[ -s "${FAIL_LOG}" ]] && fail_log_nonempty=1
@@ -3216,6 +3783,15 @@ run_full_suite() {
         record_pass "33" "decoy marker absent, zero temp-dir or git background processes, temp dir removed, Preferences & relay.sh sha256 & working tree unchanged"
     else
         record_fail "33" "post-run decoy, process, temp dir, Preferences, sha256, or working tree check failed"
+    fi
+
+    echo ""
+    echo "--- Row 34: m2-merge.sh --quick runs 1 lane + verify: \"true\" and exits 0 ---"
+    if [[ "${r34_ok}" -eq 1 ]]; then
+        record_pass "34" "m2-merge.sh --quick ran 1 lane + verify: \"true\" (verified, ready=true, base untouched) and exited 0"
+    else
+        [[ -n "${r34_diag}" ]] && printf '%s\n' "${r34_diag}" >&2
+        record_fail "34" "m2-merge.sh --quick failed (exit=${r34_rc})"
     fi
 
     echo ""
