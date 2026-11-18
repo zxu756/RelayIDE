@@ -1,0 +1,10 @@
+language	extensions	url	default_branch	commit	license
+python	.py	https://github.com/pytest-dev/pytest.git	main	6665a79fb9a6553ce4e1be5574c21a9e3b769eec	MIT
+python	.py	https://github.com/pallets/flask.git	main	49943b5a94413a530761350f04e896f76e8d620e	BSD-3-Clause
+python	.py	https://github.com/ipython/ipython.git	main	80b623833fd0c472f7df80795b5affb406bc4001	BSD-3-Clause
+swift	.swift	https://github.com/realm/SwiftLint.git	main	d9c55cdd401f57bdc1de965e620852ddb87fd175	MIT
+swift	.swift	https://github.com/ReactiveCocoa/ReactiveSwift.git	master	a44317ce38b5bcce173b03f5d36cfdc939e1768b	MIT
+swift	.swift	https://github.com/vapor/vapor.git	main	e4a5b7050f5e9e5793be3ebdeb687eac92fd9965	MIT
+typescript	.ts,.tsx	https://github.com/apollographql/apollo-client.git	main	53bae5bc871c209e9b8f0dc833d950185cd67580	MIT
+typescript	.ts,.tsx	https://github.com/nestjs/nest.git	master	bbbfaf1765308826a581a75424a11d0f3e59521a	MIT
+typescript	.ts,.tsx	https://github.com/reduxjs/redux-toolkit.git	master	45eb0379c719ddfaeee6a39f43222cee01515caa	MIT
