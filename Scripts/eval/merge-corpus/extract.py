@@ -290,8 +290,10 @@ def is_pure_insertion_diff3(git_bin, env, tmp_dir, left_path, base_path, right_p
         elif state == "right":
             if stripped == right_m:
                 state = "stable"
-    if state != "stable" or blocks == 0:
+    if state != "stable":
         raise RuntimeError("failed to parse git merge-file --diff3 conflict markers (state=%s, blocks=%d)" % (state, blocks))
+    if blocks == 0:
+        return False
     return all_base_empty
 
 
