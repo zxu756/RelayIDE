@@ -1,0 +1,152 @@
+--- a/Sources/RelaySemanticMerge/LineAnchoredGuardedMerge.swift
++++ b/Sources/RelaySemanticMerge/LineAnchoredGuardedMerge.swift
+@@ -166,8 +166,6 @@
+             return .lineMergeUnavailable(reason: error.localizedDescription)
+         }
+ 
+-        let fileExtension = (relativePath as NSString).pathExtension.lowercased()
+-
+         if lineRun.conflictCount == 0 {
+             let mergedText = String(decoding: lineRun.output, as: UTF8.self)
+             let verdict = LanguageSyntaxValidator.validate(source: mergedText, filePath: relativePath)
+@@ -201,72 +199,7 @@
+             .conflict(lineMergeText: lineMergeText, conflictCount: lineRun.conflictCount, declarationVerdict: verdict)
+         }
+ 
+-        guard LanguageSyntaxValidator.hasSyntaxChecker(forFilePath: relativePath) else {
+-            return conflict(.noSyntaxCheckerForFileType(fileExtension: fileExtension))
+-        }
+-
+-        // git must add a newline in front of a conflict marker when a side's last line has none, which would make
+-        // the end of file ambiguous. Files that all lack the final newline are merged as if they had one and the
+-        // newline is removed again at the end; mixed cases are left to the user.
+-        let terminated = [base, left, right].map { $0.isEmpty || $0.last == 0x0A }
+-        let stripFinalNewline: Bool
+-        var structuralBase = base
+-        var structuralLeft = left
+-        var structuralRight = right
+-        if terminated.allSatisfy({ $0 }) {
+-            stripFinalNewline = false
+-        } else if terminated.allSatisfy({ !$0 }) {
+-            stripFinalNewline = true
+-            structuralBase.append(0x0A)
+-            structuralLeft.append(0x0A)
+-            structuralRight.append(0x0A)
+-        } else {
+-            return conflict(.inconsistentFinalNewline)
+-        }
+-
+-        let markerSize = Self.unambiguousMarkerSize(for: [structuralBase, structuralLeft, structuralRight])
+-        let structuralRun: GitMergeFileRun
+-        do {
+-            structuralRun = try Self.runGitMergeFile(
+-                gitPath: gitPath,
+-                workDir: workDir,
+-                tag: "diff3",
+-                left: structuralLeft,
+-                base: structuralBase,
+-                right: structuralRight,
+-                extraArguments: ["--diff3", "--marker-size=\(markerSize)"]
+-            )
+-        } catch let failure as GitMergeFileFailure {
+-            return conflict(.structuralMergeUnreadable(detail: failure.reason))
+-        } catch {
+-            return conflict(.structuralMergeUnreadable(detail: error.localizedDescription))
+-        }
+-
+-        let segments: [MergeSegment]
+-        switch Self.parseDiff3(structuralRun.output, markerSize: markerSize) {
+-        case .failure(let parseFailure):
+-            return conflict(.structuralMergeUnreadable(detail: parseFailure.detail))
+-        case .success(let parsed):
+-            segments = parsed
+-        }
+-        let blockCount = segments.reduce(0) { count, segment in
+-            if case .conflict = segment { return count + 1 }
+-            return count
+-        }
+-        guard blockCount > 0 else {
+-            return conflict(.structuralMergeUnreadable(detail: "no conflict block found in --diff3 output"))
+-        }
+-        var blockNumber = 0
+-        for segment in segments {
+-            if case .conflict(_, let baseLines, _) = segment {
+-                blockNumber += 1
+-                if !baseLines.isEmpty {
+-                    return conflict(.conflictTouchesBaseLines(blockNumber: blockNumber, blockCount: blockCount))
+-                }
+-            }
+-        }
+-
+-        // The declaration-level engine is consulted as a referee only.
++        // Mutation A (unguarded engine emission): drop all pure-insertion, line-anchoring, and syntax guards.
+         let report = ThreeWaySemanticASTMerger().mergeFile(
+             relativePath: relativePath,
+             baseSource: baseSource,
+@@ -278,63 +211,11 @@
+         guard report.isCleanlyMerged else {
+             return conflict(.engineReportedConflicts(count: max(1, report.unresolvedConflictCount)))
+         }
+-
+-        let engineLines = Self.nonBlankLines(Array(report.mergedText.utf8))
+-        var cursor = 0
+-        var assembled: [UInt8] = []
+-        assembled.reserveCapacity(left.count + right.count)
+-        blockNumber = 0
+-        for segment in segments {
+-            switch segment {
+-            case .stable(let bytes):
+-                let expected = Self.nonBlankLines(bytes)
+-                guard Self.sequence(engineLines, at: cursor, startsWith: expected) else {
+-                    return conflict(.engineDisagreesWithLineMerge(
+-                        detail: "lines outside the conflict blocks differ near non-blank line \(cursor + 1)"
+-                    ))
+-                }
+-                cursor += expected.count
+-                assembled.append(contentsOf: bytes)
+-            case .conflict(let leftBytes, _, let rightBytes):
+-                blockNumber += 1
+-                let leftLines = Self.nonBlankLines(leftBytes)
+-                let rightLines = Self.nonBlankLines(rightBytes)
+-                if Self.sequence(engineLines, at: cursor, startsWith: leftLines + rightLines) {
+-                    assembled.append(contentsOf: leftBytes)
+-                    assembled.append(contentsOf: rightBytes)
+-                } else if Self.sequence(engineLines, at: cursor, startsWith: rightLines + leftLines) {
+-                    assembled.append(contentsOf: rightBytes)
+-                    assembled.append(contentsOf: leftBytes)
+-                } else {
+-                    return conflict(.engineDisagreesWithLineMerge(
+-                        detail: "conflict block \(blockNumber) of \(blockCount): the engine did not keep both sides' inserted lines together at this position"
+-                    ))
+-                }
+-                cursor += leftLines.count + rightLines.count
+-            }
+-        }
+-        guard cursor == engineLines.count else {
+-            return conflict(.engineDisagreesWithLineMerge(
+-                detail: "the engine emitted \(engineLines.count - cursor) extra non-blank line(s)"
+-            ))
+-        }
+-
+-        if stripFinalNewline, assembled.last == 0x0A {
+-            assembled.removeLast()
+-        }
+-        let assembledText = String(decoding: assembled, as: UTF8.self)
+-        let verdict = LanguageSyntaxValidator.validate(source: assembledText, filePath: relativePath)
+-        guard verdict.passed, let parser = verdict.parserUsed else {
+-            return conflict(.assembledTextFailedSyntaxCheck(
+-                parser: verdict.parserUsed ?? "parser",
+-                diagnostic: verdict.diagnostic
+-            ))
+-        }
+         return .clean(
+-            mergedText: assembledText,
++            mergedText: report.mergedText,
+             strategy: .declarationLevel,
+-            syntaxParser: parser,
+-            resolvedConflictBlocks: blockCount
++            syntaxParser: nil,
++            resolvedConflictBlocks: lineRun.conflictCount
+         )
+     }
+ 
