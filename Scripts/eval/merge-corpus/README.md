@@ -48,6 +48,16 @@ python3 -I Scripts/eval/merge-corpus/extract.py --verify
 
 # Run extractor unit tests
 python3 -I -m unittest Scripts/eval/merge-corpus/test_extract.py
+
+# Run classifier git self-check on cases.tsv + optional tool result TSVs
+python3 -I Scripts/eval/merge-corpus/classify.py [--tool cli=path/to/cli.tsv ...] [--summary-out summary.tsv] [--details-out details.tsv] [--rejected-out rejected.tsv]
+
+# Classify the 39 fixed cases (35 merge-cases + 4 syntax-gate-cases) and write/check CLASSIFIED.tsv
+python3 -I Scripts/eval/merge-corpus/classify.py --fixed-cases --write-classified Fixtures/merge-cases/CLASSIFIED.tsv
+python3 -I Scripts/eval/merge-corpus/classify.py --fixed-cases --check-classified Fixtures/merge-cases/CLASSIFIED.tsv
+
+# Run classifier unit tests
+python3 -I -m unittest Scripts/eval/merge-corpus/test_classify.py
 ```
 
 ## Manifest Schemas
@@ -64,3 +74,13 @@ Tab-separated columns:
 
 For each row in `cases.tsv`, the extracted four versions live at:
 `$RELAY_MERGE_CORPUS_DIR/extract/cases/<case_id>/{base,left,right,human}<ext>` where `<ext>` is `os.path.splitext(path)[1]`.
+
+### Tool Result Input TSV (`classify.py --tool <name>=<path>`)
+
+UTF-8 tab-separated file (blank lines and `#` comments ignored; optional header row starting with `case_id` is skipped):
+`case_id`, `exit_code`, `claimed_clean` (`1` | `0` | `skip`), `output_path`, `reason` *(optional)*, `strategy` *(optional)*
+
+### `Fixtures/merge-cases/CLASSIFIED.tsv`
+
+Tab-separated columns across the 39 fixed cases (`35` in `Fixtures/merge-cases` + `4` in `Fixtures/syntax-gate-cases`):
+`case_id`, `ext`, `reference` (`expected` | `git_clean` | `true_conflict`), `git`, `cli_exit`, `cli_strategy`, `cli`, `cli_reason`, `engine` *(populated in Stage 4 via `--engine-tsv`)*
