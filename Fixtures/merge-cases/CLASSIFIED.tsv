@@ -34,6 +34,7 @@ merge-cases/32-py-modify-vs-adjacent-insert	.py	true_conflict	conflict	1	none	co
 merge-cases/33-swift-no-final-newline-both-add	.swift	expected	conflict	0	declaration-level	same		
 merge-cases/34-py-crlf-git-clean	.py	git_clean	same	0	line-level	same		
 merge-cases/35-py-rst-underline-both-add	.py	true_conflict	conflict	1	none	conflict		
+merge-cases/36-py-crlf-true-conflict	.py	true_conflict	conflict	1	none	conflict		
 syntax-gate-cases/javascript-block-comment	.js	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (node --check)	
 syntax-gate-cases/python-string-delimiters	.py	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (python3 -m py_compile)	
 syntax-gate-cases/swift-string-delimiters	.swift	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (swiftc -parse)	

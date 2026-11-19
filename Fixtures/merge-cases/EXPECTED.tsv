@@ -34,3 +34,4 @@
 33-swift-no-final-newline-both-add	0	declaration-level
 34-py-crlf-git-clean	0	line-level
 35-py-rst-underline-both-add	1	none
+36-py-crlf-true-conflict	1	none
