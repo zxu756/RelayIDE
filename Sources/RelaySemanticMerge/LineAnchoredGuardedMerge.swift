@@ -184,8 +184,13 @@ public struct LineAnchoredGuardedMerger: Sendable {
 
         // Step 2: git reported conflicts. Everything below either proves a declaration-level resolution safe
         // or falls back to git's conflict-marked text.
-        let openingMarker = Array((String(repeating: "<", count: 7) + " " + Self.leftLabel + "\n").utf8)
-        let hasOpeningMarker = Self.splitLinesKeepingTerminators(lineRun.output).contains { Array($0) == openingMarker }
+        let openingMarkerPrefix = String(repeating: "<", count: 7) + " " + Self.leftLabel
+        let openingMarkerLF = Array((openingMarkerPrefix + "\n").utf8)
+        let openingMarkerCRLF = Array((openingMarkerPrefix + "\r\n").utf8)
+        let hasOpeningMarker = Self.splitLinesKeepingTerminators(lineRun.output).contains { line in
+            let lineBytes = Array(line)
+            return lineBytes == openingMarkerLF || lineBytes == openingMarkerCRLF
+        }
         guard hasOpeningMarker else {
             return .lineMergeUnavailable(
                 reason: "`git merge-file` exited with status \(lineRun.conflictCount) but printed no conflict markers"

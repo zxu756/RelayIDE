@@ -1226,6 +1226,68 @@ struct SemanticASTMergeAndCouplingTests {
         #expect(Array(crlfText.utf8) == Array("def first():\r\n    return 100\r\n\r\n\r\ndef second():\r\n    return 200\r\n".utf8))
     }
 
+    @Test("LineAnchoredGuardedMerger returns git's conflict text byte for byte on CRLF conflicts as well as LF (R70)")
+    func guardedMergerPreservesCRLFConflictText() throws {
+        let scratch = try makeScratchDirectory(prefix: "relay-r70-crlf")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        func runReferenceGitMerge(tag: String, base: String, left: String, right: String) throws -> (status: Int32, stdout: Data) {
+            let bURL = scratch.appendingPathComponent("\(tag)-base.py")
+            let lURL = scratch.appendingPathComponent("\(tag)-left.py")
+            let rURL = scratch.appendingPathComponent("\(tag)-right.py")
+            try Data(base.utf8).write(to: bURL)
+            try Data(left.utf8).write(to: lURL)
+            try Data(right.utf8).write(to: rURL)
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            proc.arguments = ["merge-file", "-p", "-L", "left", "-L", "base", "-L", "right", lURL.path, bURL.path, rURL.path]
+            proc.currentDirectoryURL = scratch
+            proc.environment = [
+                "PATH": "/usr/bin:/bin",
+                "HOME": scratch.path,
+                "LC_ALL": "C",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null"
+            ]
+            let outPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = Pipe()
+            try proc.run()
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            return (proc.terminationStatus, outData)
+        }
+
+        let crlfBase = "header = 0\r\nx = 1\r\nfooter = 0\r\n"
+        let crlfLeft = "header = 0\r\nx = 2\r\nfooter = 0\r\n"
+        let crlfRight = "header = 0\r\nx = 3\r\nfooter = 0\r\n"
+        let crlfGit = try runReferenceGitMerge(tag: "crlf", base: crlfBase, left: crlfLeft, right: crlfRight)
+        #expect(crlfGit.status == 1)
+        #expect(String(decoding: crlfGit.stdout, as: UTF8.self).contains("<<<<<<< left\r\n"))
+
+        let crlfOutcome = pathGitMerger.merge(relativePath: "m.py", baseSource: crlfBase, leftSource: crlfLeft, rightSource: crlfRight)
+        if case .conflict(let crlfText, let crlfCount, _) = crlfOutcome {
+            #expect(crlfCount == 1)
+            #expect(Data(crlfText.utf8) == crlfGit.stdout)
+        } else {
+            Issue.record("expected .conflict on CRLF 3-line conflict, got \(crlfOutcome)")
+        }
+
+        let lfBase = "header = 0\nx = 1\nfooter = 0\n"
+        let lfLeft = "header = 0\nx = 2\nfooter = 0\n"
+        let lfRight = "header = 0\nx = 3\nfooter = 0\n"
+        let lfGit = try runReferenceGitMerge(tag: "lf", base: lfBase, left: lfLeft, right: lfRight)
+        #expect(lfGit.status == 1)
+
+        let lfOutcome = pathGitMerger.merge(relativePath: "m.py", baseSource: lfBase, leftSource: lfLeft, rightSource: lfRight)
+        if case .conflict(let lfText, let lfCount, _) = lfOutcome {
+            #expect(lfCount == 1)
+            #expect(Data(lfText.utf8) == lfGit.stdout)
+        } else {
+            Issue.record("expected .conflict on LF 3-line conflict, got \(lfOutcome)")
+        }
+    }
+
     @Test("LineAnchoredGuardedMerger refuses to merge when git is missing, is not git, or fails")
     func guardedMergerRefusesWithoutWorkingGit() throws {
         let base = "x = 1\ny = 2\n"

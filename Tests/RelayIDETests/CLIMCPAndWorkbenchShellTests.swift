@@ -1321,6 +1321,73 @@ struct CLIMCPAndWorkbenchShellTests {
         }
     }
 
+    @Test("semantic-merge CLI and MCP exit 1 with git's byte-identical conflict text on CRLF conflicts as well as LF (R70)")
+    func semanticMergeCRLFAndLFConflictMatchesGitOnCLIAndMCP() async throws {
+        let tempDir = try makeIsolatedTempDirectory(prefix: "relay-r70-cli-mcp")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let cli = RelayCLIRunner()
+        let mcp = RelayMCPServer()
+
+        for (label, eol) in [("crlf", "\r\n"), ("lf", "\n")] {
+            let baseText = "header = 0\(eol)x = 1\(eol)footer = 0\(eol)"
+            let leftText = "header = 0\(eol)x = 2\(eol)footer = 0\(eol)"
+            let rightText = "header = 0\(eol)x = 3\(eol)footer = 0\(eol)"
+
+            let baseURL = tempDir.appendingPathComponent("\(label)-base.py")
+            let leftURL = tempDir.appendingPathComponent("\(label)-left.py")
+            let rightURL = tempDir.appendingPathComponent("\(label)-right.py")
+            try Data(baseText.utf8).write(to: baseURL)
+            try Data(leftText.utf8).write(to: leftURL)
+            try Data(rightText.utf8).write(to: rightURL)
+
+            let gitRef = try runToolRaw(
+                "/usr/bin/git",
+                ["merge-file", "-p", "-L", "left", "-L", "base", "-L", "right", leftURL.path, baseURL.path, rightURL.path],
+                environment: [
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": tempDir.path,
+                    "LC_ALL": "C",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_GLOBAL": "/dev/null"
+                ],
+                currentDirectory: tempDir
+            )
+            #expect(gitRef.exitCode == 1, "\(label): reference git merge-file expected exit 1, got \(gitRef.exitCode)")
+
+            let cliRes = await cli.executeCommand(arguments: ["semantic-merge", baseURL.path, leftURL.path, rightURL.path, "--lang", "en"])
+            #expect(cliRes.exitCode == 1, "\(label) CLI: expected exit 1, got \(cliRes.exitCode); stderr: \(cliRes.stderr)")
+            #expect(Data(cliRes.stdout.utf8) == gitRef.stdout, "\(label) CLI: stdout is not byte-identical to git merge-file -p")
+            #expect(cliRes.stdoutIsVerbatim)
+            #expect(cliRes.stderr.contains("[strategy=none]"))
+
+            let mcpReq: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": 70,
+                "method": "tools/call",
+                "params": [
+                    "name": "relay_semantic_merge",
+                    "arguments": [
+                        "path": "\(label).py",
+                        "base": baseText,
+                        "left": leftText,
+                        "right": rightText
+                    ]
+                ]
+            ]
+            let mcpReply = try #require(mcp.handleJSONRPCLine(String(decoding: try JSONSerialization.data(withJSONObject: mcpReq), as: UTF8.self)))
+            let mcpRes = try #require((try JSONSerialization.jsonObject(with: Data(mcpReply.utf8)) as? [String: Any])?["result"] as? [String: Any])
+            let mcpIsError = mcpRes["isError"] as? Bool
+            let mcpContent = mcpRes["content"] as? [[String: Any]] ?? []
+            let mcpPayload = mcpContent.first?["text"] as? String ?? ""
+            let mcpNote = mcpContent.count > 1 ? (mcpContent[1]["text"] as? String ?? "") : ""
+            #expect(mcpIsError == true, "\(label) MCP: expected isError=true")
+            #expect(mcpContent.count == 2, "\(label) MCP: expected 2 content items (conflict text + note), got \(mcpContent.count): \(mcpPayload)")
+            #expect(Data(mcpPayload.utf8) == gitRef.stdout, "\(label) MCP: payload is not byte-identical to git merge-file -p")
+            #expect(mcpNote.contains("[strategy=none]"), "\(label) MCP: expected [strategy=none] in note, got \(mcpNote)")
+        }
+    }
+
     // MARK: - 21. M0 Rework (C2): Tests Never Write Into the User's Preferences Folder
 
     private func relayPreferenceFilesInUserLibrary() -> Set<String> {
