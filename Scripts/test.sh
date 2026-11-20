@@ -44,7 +44,7 @@ usage() {
     cat <<'EOF' >&2
 Usage:
   Scripts/test.sh scope <ModuleOrFilter...>
-  Scripts/test.sh milestone <0|1|2> [--record]
+  Scripts/test.sh milestone <0|1|2|3> [--record]
   Scripts/test.sh release [--record]
 
 Acceptance output goes to a temporary directory. Only with --record are reports/*.txt rewritten.
@@ -233,6 +233,34 @@ run_milestone() {
                 echo "==> [milestone 2] --record: reports/*.txt were rewritten"
             fi
             ;;
+        3|m3|M3)
+            local tree_before
+            tree_before="$(git status --porcelain)"
+
+            echo "==> [milestone 3] Running M3 scoped unit test suites..."
+            run_scope RelaySemanticMerge RelayCLIAndMCP
+
+            run_acceptance_script m0-acceptance.sh
+            if [[ ! -x "${ROOT_DIR}/Scripts/acceptance/m3-merge-eval.sh" ]]; then
+                echo "error: missing executable ${ROOT_DIR}/Scripts/acceptance/m3-merge-eval.sh" >&2
+                exit 1
+            fi
+            echo "==> Running Scripts/acceptance/m3-merge-eval.sh --quick"
+            "${ROOT_DIR}/Scripts/acceptance/m3-merge-eval.sh" --quick
+
+            if [[ "${#RECORD_ARGS[@]}" -eq 0 ]]; then
+                local tree_after
+                tree_after="$(git status --porcelain)"
+                if [[ "${tree_before}" != "${tree_after}" ]]; then
+                    echo "error: 'Scripts/test.sh milestone 3' changed the working tree:" >&2
+                    diff <(printf '%s\n' "${tree_before}") <(printf '%s\n' "${tree_after}") >&2 || true
+                    exit 1
+                fi
+                echo "==> [milestone 3] git status --short after the run: ${tree_after:-(no output)}"
+            else
+                echo "==> [milestone 3] --record: reports/*.txt were rewritten"
+            fi
+            ;;
         *)
             echo "error: milestone '${m}' acceptance suite is not implemented yet." >&2
             exit 2
@@ -252,6 +280,12 @@ run_release() {
     run_acceptance_script readme-commands.sh
     run_acceptance_script m1-run.sh
     run_acceptance_script m2-merge.sh
+
+    if [[ -n "${RELAY_MERGE_CORPUS_DIR:-}" ]]; then
+        run_acceptance_script m3-merge-eval.sh
+    else
+        echo "==> [release] M3 full merge corpus evaluation: SKIPPED (RELAY_MERGE_CORPUS_DIR unset)"
+    fi
 
     if [[ "${RELAY_REAL_AGENTS:-0}" == "1" ]]; then
         if [[ -x "${ROOT_DIR}/Scripts/acceptance/real-agents.sh" ]]; then

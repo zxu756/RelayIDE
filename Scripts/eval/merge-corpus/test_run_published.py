@@ -138,7 +138,7 @@ class RunPublishedTests(unittest.TestCase):
                         sys.stdout.buffer.write(b"match x:\\n    case 1:\\n        pass\\n")
                         sys.stderr.write("semantic-merge: [strategy=line-level] clean: syntax check passed (python3 -m py_compile)\\n")
                         sys.exit(0)
-                    fake_home = os.environ.get("FAKE_USER_HOME_FOR_TEST", "/Users/someone")
+                    fake_home = os.environ.get("FAKE_USER_HOME_FOR_TEST", "/Users/alice")
                     sys.stderr.write(
                         f"semantic-merge: Merged output failed syntax check (python3 -m py_compile): "
                         f"File \\"/tmp/relay-syntax-check-1234/merged_check.py\\", home={fake_home}/secret.py, SyntaxError\\n"
