@@ -1,41 +1,41 @@
 case_id	ext	reference	git	cli_exit	cli_strategy	cli	cli_reason	engine
-merge-cases/01-swift-samefunc-difflines	.swift	git_clean	same	0	line-level	same		
-merge-cases/02-swift-both-add-func	.swift	expected	conflict	0	declaration-level	same		
-merge-cases/03-swift-rename-vs-body	.swift	true_conflict	conflict	1	none	conflict		
-merge-cases/04-swift-string-braces	.swift	true_conflict	conflict	1	none	conflict		
-merge-cases/05-ts-samefunc-difflines	.ts	git_clean	same	0	line-level	same		
-merge-cases/06-ts-both-add-func	.ts	true_conflict	conflict	1	none	conflict		
-merge-cases/07-py-samefunc-difflines	.py	git_clean	same	0	line-level	same		
-merge-cases/08-py-class-both-add-method	.py	true_conflict	conflict	1	none	conflict		
-merge-cases/09-py-triplequote	.py	git_clean	same	0	line-level	same		
-merge-cases/10-py-rename-vs-body	.py	true_conflict	conflict	1	none	conflict		
-merge-cases/11-ts-rename-vs-body	.ts	true_conflict	conflict	1	none	conflict		
-merge-cases/12-swift-true-conflict	.swift	true_conflict	conflict	1	none	conflict		
-merge-cases/13-swift-control-nobrace-strings	.swift	expected	conflict	0	declaration-level	same		
-merge-cases/14-py-control-triplequote-nodef	.py	git_clean	same	0	line-level	same		
-merge-cases/15-py-class-plain-twomethods	.py	git_clean	same	0	line-level	same		
-merge-cases/16-swift-struct-twomethods	.swift	git_clean	same	0	line-level	same		
-merge-cases/17-ts-class-twomethods	.ts	git_clean	same	0	line-level	same		
-merge-cases/18-ts-control-nobrace	.ts	expected	conflict	0	declaration-level	same		
-merge-cases/19-py-both-add-toplevel	.py	expected	conflict	0	declaration-level	same		
-merge-cases/20-py-decorator-added	.py	git_clean	same	0	line-level	same		
-merge-cases/21-swift-attribute-and-multiline-string	.swift	git_clean	same	0	line-level	same		
-merge-cases/22-py-nested-indent-decorators	.py	git_clean	same	0	line-level	same		
-merge-cases/23-py-both-add-decorated-func	.py	expected	conflict	0	declaration-level	same		
-merge-cases/24-py-decorator-vs-insert-above	.py	true_conflict	conflict	1	none	conflict		
-merge-cases/25-swift-attr-members-multiline-string	.swift	expected	conflict	0	declaration-level	same		
-merge-cases/26-ts-template-literal-edit-vs-add	.ts	git_clean	same	0	line-level	same		
-merge-cases/27-js-class-both-add-method-jsdoc	.js	expected	conflict	0	declaration-level	same		
-merge-cases/28-rs-attributes-git-clean	.rs	git_clean	same	0	line-level	same		
-merge-cases/29-rs-both-add-fn	.rs	true_conflict	conflict	1	none	conflict		
-merge-cases/30-go-both-add-func	.go	true_conflict	conflict	1	none	conflict		
-merge-cases/31-java-annotation-git-clean	.java	git_clean	same	0	line-level	same		
-merge-cases/32-py-modify-vs-adjacent-insert	.py	true_conflict	conflict	1	none	conflict		
-merge-cases/33-swift-no-final-newline-both-add	.swift	expected	conflict	0	declaration-level	same		
-merge-cases/34-py-crlf-git-clean	.py	git_clean	same	0	line-level	same		
-merge-cases/35-py-rst-underline-both-add	.py	true_conflict	conflict	1	none	conflict		
-merge-cases/36-py-crlf-true-conflict	.py	true_conflict	conflict	1	none	conflict		
-syntax-gate-cases/javascript-block-comment	.js	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (node --check)	
-syntax-gate-cases/python-string-delimiters	.py	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (python3 -m py_compile)	
-syntax-gate-cases/swift-string-delimiters	.swift	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (swiftc -parse)	
-syntax-gate-cases/typescript-block-comment	.ts	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (node stripTypeScriptTypes)	
+merge-cases/01-swift-samefunc-difflines	.swift	git_clean	same	0	line-level	same		conflict
+merge-cases/02-swift-both-add-func	.swift	expected	conflict	0	declaration-level	same		same
+merge-cases/03-swift-rename-vs-body	.swift	true_conflict	conflict	1	none	conflict		conflict
+merge-cases/04-swift-string-braces	.swift	true_conflict	conflict	1	none	conflict		conflict
+merge-cases/05-ts-samefunc-difflines	.ts	git_clean	same	0	line-level	same		conflict
+merge-cases/06-ts-both-add-func	.ts	true_conflict	conflict	1	none	conflict		conflict
+merge-cases/07-py-samefunc-difflines	.py	git_clean	same	0	line-level	same		conflict
+merge-cases/08-py-class-both-add-method	.py	true_conflict	conflict	1	none	conflict		conflict
+merge-cases/09-py-triplequote	.py	git_clean	same	0	line-level	same		damaged
+merge-cases/10-py-rename-vs-body	.py	true_conflict	conflict	1	none	conflict		conflict
+merge-cases/11-ts-rename-vs-body	.ts	true_conflict	conflict	1	none	conflict		conflict
+merge-cases/12-swift-true-conflict	.swift	true_conflict	conflict	1	none	conflict		conflict
+merge-cases/13-swift-control-nobrace-strings	.swift	expected	conflict	0	declaration-level	same		clean_different
+merge-cases/14-py-control-triplequote-nodef	.py	git_clean	same	0	line-level	same		damaged
+merge-cases/15-py-class-plain-twomethods	.py	git_clean	same	0	line-level	same		conflict
+merge-cases/16-swift-struct-twomethods	.swift	git_clean	same	0	line-level	same		same
+merge-cases/17-ts-class-twomethods	.ts	git_clean	same	0	line-level	same		same
+merge-cases/18-ts-control-nobrace	.ts	expected	conflict	0	declaration-level	same		same
+merge-cases/19-py-both-add-toplevel	.py	expected	conflict	0	declaration-level	same		clean_different
+merge-cases/20-py-decorator-added	.py	git_clean	same	0	line-level	same		clean_different
+merge-cases/21-swift-attribute-and-multiline-string	.swift	git_clean	same	0	line-level	same		clean_different
+merge-cases/22-py-nested-indent-decorators	.py	git_clean	same	0	line-level	same		conflict
+merge-cases/23-py-both-add-decorated-func	.py	expected	conflict	0	declaration-level	same		clean_different
+merge-cases/24-py-decorator-vs-insert-above	.py	true_conflict	conflict	1	none	conflict		clean_different
+merge-cases/25-swift-attr-members-multiline-string	.swift	expected	conflict	0	declaration-level	same		same
+merge-cases/26-ts-template-literal-edit-vs-add	.ts	git_clean	same	0	line-level	same		same
+merge-cases/27-js-class-both-add-method-jsdoc	.js	expected	conflict	0	declaration-level	same		same
+merge-cases/28-rs-attributes-git-clean	.rs	git_clean	same	0	line-level	same		clean_different
+merge-cases/29-rs-both-add-fn	.rs	true_conflict	conflict	1	none	conflict		clean_different
+merge-cases/30-go-both-add-func	.go	true_conflict	conflict	1	none	conflict		clean_different
+merge-cases/31-java-annotation-git-clean	.java	git_clean	same	0	line-level	same		clean_different
+merge-cases/32-py-modify-vs-adjacent-insert	.py	true_conflict	conflict	1	none	conflict		conflict
+merge-cases/33-swift-no-final-newline-both-add	.swift	expected	conflict	0	declaration-level	same		clean_different
+merge-cases/34-py-crlf-git-clean	.py	git_clean	same	0	line-level	same		clean_different
+merge-cases/35-py-rst-underline-both-add	.py	true_conflict	conflict	1	none	conflict		damaged
+merge-cases/36-py-crlf-true-conflict	.py	true_conflict	conflict	1	none	conflict		conflict
+syntax-gate-cases/javascript-block-comment	.js	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (node --check)	clean_different
+syntax-gate-cases/python-string-delimiters	.py	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (python3 -m py_compile)	clean_different
+syntax-gate-cases/swift-string-delimiters	.swift	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (swiftc -parse)	damaged
+syntax-gate-cases/typescript-block-comment	.ts	git_clean	damaged	3	-	rejected	exit=3: syntax_check_failed (node stripTypeScriptTypes)	clean_different
