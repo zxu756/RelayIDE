@@ -1881,9 +1881,11 @@ EOF
     assert_exit_2_plan_error_case "multiple-predecessors" "${repo}" "${proj}" "${traces}" 1 "${d}/o13" "${d}/e13" \
         "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/multi-after.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
 
-    # 14. `RELAY_BUDGET_USD` set in environment
-    assert_exit_2_plan_error_case "relay-budget-usd" "${repo}" "${proj}" "${traces}" 1 "${d}/o14" "${d}/e14" \
-        "RELAY_BUDGET_USD=5.00" "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/valid.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    # 14. Invalid `RELAY_BUDGET_USD` values (`0`, `bad`) in environment
+    assert_exit_2_plan_error_case "relay-budget-usd-zero" "${repo}" "${proj}" "${traces}" 1 "${d}/o14a" "${d}/e14a" \
+        "RELAY_BUDGET_USD=0" "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/valid.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
+    assert_exit_2_plan_error_case "relay-budget-usd-bad" "${repo}" "${proj}" "${traces}" 1 "${d}/o14b" "${d}/e14b" \
+        "RELAY_BUDGET_USD=bad" "STUB_TRACE_DIR=${traces}" -- run "${d}/plans/valid.json" --project "${proj}" --relay-sh "${REAL_RELAY_SH}" --lang zh
 
     # 15. Malformed JSON
     printf '{ invalid json\n' > "${d}/plans/malformed.json"

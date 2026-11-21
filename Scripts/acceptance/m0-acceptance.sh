@@ -112,12 +112,14 @@ for req_en in [
     "runs optional `verify`",
     "`integration.ready`",
     "never merges into `base`",
-    "no whole-job budget",
+    "`RELAY_BUDGET_USD`",
+    "whole-job USD budget",
 ]:
-    assert req_en in en_p1, f"README.md first paragraph missing M2 disclosure {req_en!r}"
+    assert req_en in en_p1, f"README.md first paragraph missing M4 disclosure {req_en!r}"
 assert "does not launch coding agents yet" not in en_text, "Stale M0 no-agent statement left in README.md"
 assert "does not merge branches" not in en_text, "Stale M1 no-merge statement left in README.md"
 assert "does not execute `verify`" not in en_text, "Stale M1 no-verify statement left in README.md"
+assert "no whole-job budget" not in en_text, "Stale M2 no-budget statement left in README.md"
 
 for req_zh in [
     "先安装 `agent-relay`",
@@ -127,18 +129,20 @@ for req_zh in [
     "执行可选的 `verify`",
     "`integration.ready`",
     "不把集成分支合入 `base`",
-    "没有整单预算",
+    "`RELAY_BUDGET_USD`",
+    "整单美元预算",
 ]:
-    assert req_zh in zh_p1, f"README.zh-CN.md first paragraph missing M2 disclosure {req_zh!r}"
+    assert req_zh in zh_p1, f"README.zh-CN.md first paragraph missing M4 disclosure {req_zh!r}"
 assert "尚不会启动任何 coding agent" not in zh_text, "Stale M0 no-agent statement left in README.zh-CN.md"
 assert "还不自动合并分支" not in zh_text, "Stale M1 no-merge statement left in README.zh-CN.md"
 assert "不执行 `verify`" not in zh_text, "Stale M1 no-verify statement left in README.zh-CN.md"
+assert "没有整单预算" not in zh_text, "Stale M2 no-budget statement left in README.zh-CN.md"
 
 assert "—" not in en_text and "—" not in zh_text, "Em-dash found in README"
 for forbidden in ["LOC", "zero external dependencies", "129 automated", "129 项", "forkpty"]:
     assert forbidden not in en_text and forbidden not in zh_text, f"Token {forbidden!r} found in README"
 PY
-    pass_row "Row 1: swift build succeeded and README.md & README.zh-CN.md state M2 agent-relay runner, git merge --no-ff, verify, integration.ready, and untouched-base/no-budget boundaries in paragraph 1"
+    pass_row "Row 1: swift build succeeded and README.md & README.zh-CN.md state agent-relay runner, git merge --no-ff, verify, integration.ready, RELAY_BUDGET_USD whole-job budget, and untouched-base boundaries in paragraph 1"
 
     # ------------------------------------------------------------------
     # Row 2: --help, version, status (empty project) exit 0; [DEMO] / [演示数据] markers
