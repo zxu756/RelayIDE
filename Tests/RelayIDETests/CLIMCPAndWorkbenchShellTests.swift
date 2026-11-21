@@ -67,7 +67,7 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(!helpZhOut.contains("还不合并分支"))
 
         let versionOut = try await cli.execute(arguments: ["--version"])
-        #expect(versionOut.contains("RelayIDE 1.4.0"))
+        #expect(versionOut.contains("RelayIDE 1.5.0"))
         #expect(versionOut.contains("M4"))
         #expect(versionOut.contains("RELAY_BUDGET_USD"))
         #expect(versionOut.contains("agent-relay"))
@@ -768,8 +768,8 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(html.contains("[DEMO]"))
         #expect(html.contains("[演示数据]"))
         #expect(html.contains(#"class="kicker""#))
-        #expect(html.contains("RelayIDE v1.4.0 Synthetic Demo Workspace Snapshot (Preview Only, Not Output from Live Agent Runs)"))
-        #expect(html.contains("RelayIDE v1.4.0 合成演示工作区快照（仅供预览，非真实智能体运行产物）"))
+        #expect(html.contains("RelayIDE v1.5.0 Synthetic Demo Workspace Snapshot (Preview Only, Not Output from Live Agent Runs)"))
+        #expect(html.contains("RelayIDE v1.5.0 合成演示工作区快照（仅供预览，非真实智能体运行产物）"))
         #expect(!html.contains("M0"))
     }
 
