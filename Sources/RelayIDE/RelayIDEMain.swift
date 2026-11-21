@@ -118,12 +118,7 @@ enum RelayIDEBootstrap {
 
     private static func writeCLIResultAndExit(_ result: RelayCLIExecutionResult) -> Never {
         if !result.stdout.isEmpty {
-            if result.stdoutIsVerbatim {
-                // Merged file content: written byte for byte, without the newline `print` would append.
-                FileHandle.standardOutput.write(Data(result.stdout.utf8))
-            } else {
-                print(result.stdout)
-            }
+            print(result.stdout)
         }
         if !result.stderr.isEmpty && !result.stderrAlreadyStreamed {
             FileHandle.standardError.write(Data((result.stderr + "\n").utf8))

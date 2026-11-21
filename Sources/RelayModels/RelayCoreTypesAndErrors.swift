@@ -88,8 +88,6 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
     case cyclicTaskDependency([String])
     case workspaceBundleNotFound(String)
     case semanticMergeFailure(String)
-    case semanticMergeConflictsDetected(Int)
-    case semanticMergeSyntaxCheckFailed(parser: String, diagnostic: String)
     case proxyBindFailure(port: UInt16, reason: String)
     case budgetCircuitTripped(laneID: String, spentUSD: Double, limitUSD: Double)
     case databaseError(code: Int32, message: String)
@@ -101,7 +99,7 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
     case relayRunInterrupted(runID: String, reason: String)
 
     /// Canonical CLI exit code (`03-relayide.md` §3, R40).
-    /// Exit code `1` is reserved for completed `run` where at least one lane failed or `semantic-merge` conflicts.
+    /// Exit code `1` is reserved for completed `run` where at least one lane failed, merge conflicted, or `verify` failed.
     public var cliExitCode: Int32 {
         switch self {
         case .invalidCLIUsage,
@@ -110,10 +108,6 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
              .cyclicTaskDependency,
              .gitRepositoryNotFound:
             return 2
-        case .semanticMergeConflictsDetected:
-            return 1
-        case .semanticMergeSyntaxCheckFailed:
-            return 3
         case .semanticMergeFailure:
             return 4
         case .ptyAllocationFailed,
@@ -185,14 +179,6 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
             return isZh
                 ? "三路语义合并失败：\(msg)"
                 : "3-Way Semantic AST Merge failed: \(msg)"
-        case .semanticMergeConflictsDetected(let count):
-            return isZh
-                ? "检测到未解决的合并冲突（共 \(count) 处）"
-                : "Unresolved merge conflicts detected (\(count) conflict(s))"
-        case .semanticMergeSyntaxCheckFailed(let parser, let diagnostic):
-            return isZh
-                ? "合并结果未通过语法检查（\(parser)），已阻止输出以防损坏文件：\(diagnostic)"
-                : "Merged output failed syntax check (\(parser)) and was suppressed to prevent file corruption: \(diagnostic)"
         case .proxyBindFailure(let port, let reason):
             return isZh
                 ? "回环 HTTP 代理绑定端口 \(port) 失败：\(reason)"
