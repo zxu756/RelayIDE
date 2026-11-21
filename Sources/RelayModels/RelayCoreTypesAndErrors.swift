@@ -88,8 +88,6 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
     case cyclicTaskDependency([String])
     case workspaceBundleNotFound(String)
     case semanticMergeFailure(String)
-    case proxyBindFailure(port: UInt16, reason: String)
-    case budgetCircuitTripped(laneID: String, spentUSD: Double, limitUSD: Double)
     case databaseError(code: Int32, message: String)
     case pluginError(pluginID: String, reason: String)
     case invalidCLIUsage(String)
@@ -117,8 +115,6 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
              .gitPlumbingFailure,
              .worktreeAlreadyExists,
              .ownershipViolation,
-             .proxyBindFailure,
-             .budgetCircuitTripped,
              .databaseError,
              .pluginError,
              .relayEnvironmentFailure,
@@ -179,14 +175,6 @@ public enum RelayIDEError: Error, LocalizedError, Sendable, Equatable {
             return isZh
                 ? "三路语义合并失败：\(msg)"
                 : "3-Way Semantic AST Merge failed: \(msg)"
-        case .proxyBindFailure(let port, let reason):
-            return isZh
-                ? "回环 HTTP 代理绑定端口 \(port) 失败：\(reason)"
-                : "Wiretap HTTP proxy failed to bind port \(port): \(reason)"
-        case .budgetCircuitTripped(let lane, let spent, let limit):
-            return isZh
-                ? String(format: "通道 '%@' 预算熔断已触发 ($%.4f / $%.4f)", lane, spent, limit)
-                : String(format: "Budget circuit tripped for lane '%@' ($%.4f / $%.4f)", lane, spent, limit)
         case .databaseError(let code, let msg):
             return isZh
                 ? "Relay SQLite WAL 错误 (\(code))：\(msg)"

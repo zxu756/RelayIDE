@@ -12,7 +12,6 @@ let package = Package(
         .library(name: "RelayWorktreeGit", targets: ["RelayWorktreeGit"]),
         .library(name: "RelaySemanticMerge", targets: ["RelaySemanticMerge"]),
         .library(name: "RelayWorkspaceStore", targets: ["RelayWorkspaceStore"]),
-        .library(name: "RelayWiretapProxy", targets: ["RelayWiretapProxy"]),
         .library(name: "RelayPluginSDK", targets: ["RelayPluginSDK"]),
         .library(name: "RelayOrchestrator", targets: ["RelayOrchestrator"]),
         .library(name: "RelayCLIAndMCP", targets: ["RelayCLIAndMCP"]),
@@ -48,10 +47,6 @@ let package = Package(
             ]
         ),
         .target(
-            name: "RelayWiretapProxy",
-            dependencies: ["RelayModels"]
-        ),
-        .target(
             name: "RelayPluginSDK",
             dependencies: [
                 "RelayModels",
@@ -69,7 +64,6 @@ let package = Package(
                 "RelayWorktreeGit",
                 "RelaySemanticMerge",
                 "RelayWorkspaceStore",
-                "RelayWiretapProxy",
                 "RelayPluginSDK"
             ]
         ),
@@ -80,7 +74,6 @@ let package = Package(
                 "RelayPTYCore",
                 "RelayWorktreeGit",
                 "RelayWorkspaceStore",
-                "RelayWiretapProxy",
                 "RelayPluginSDK",
                 "RelayOrchestrator"
             ]
@@ -105,7 +98,6 @@ let package = Package(
                 "RelayWorktreeGit",
                 "RelaySemanticMerge",
                 "RelayWorkspaceStore",
-                "RelayWiretapProxy",
                 "RelayPluginSDK",
                 "RelayOrchestrator",
                 "RelayCLIAndMCP",
@@ -123,7 +115,6 @@ let package = Package(
                 "RelayPTYCore",
                 "RelayWorktreeGit",
                 "RelayWorkspaceStore",
-                "RelayWiretapProxy",
                 "RelayPluginSDK",
                 "RelayOrchestrator",
                 "RelayCLIAndMCP",
@@ -139,7 +130,6 @@ let package = Package(
                 "RelayWorktreeGit",
                 "RelaySemanticMerge",
                 "RelayWorkspaceStore",
-                "RelayWiretapProxy",
                 "RelayPluginSDK",
                 "RelayOrchestrator",
                 "RelayCLIAndMCP",

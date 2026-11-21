@@ -56,7 +56,6 @@ Modules supported by `scope`:
   RelayWorktreeGit     (WorktreeGitDiffAndHandoffTests)
   RelayWorkspaceStore  (WorkspaceStoreFTSAndUndoTests + dependent store suites)
   RelaySemanticMerge   (SemanticASTMergeAndCouplingTests + CLIMCPAndWorkbenchShellTests)
-  RelayWiretapProxy    (WiretapSSEAndDLPCircuitBreakerTests)
   RelayPluginSDK       (PluginSDKAndOrchestratorCPMTests)
   RelayOrchestrator    (PluginSDKAndOrchestratorCPMTests)
   RelayCLIAndMCP       (CLIMCPAndWorkbenchShellTests)
@@ -83,9 +82,6 @@ map_module_to_filter() {
         RelaySemanticMerge)
             # The guarded merge is exercised both directly and through the CLI / MCP entry points.
             echo "SemanticASTMergeAndCouplingTests|CLIMCPAndWorkbenchShellTests"
-            ;;
-        RelayWiretapProxy)
-            echo "WiretapSSEAndDLPCircuitBreakerTests"
             ;;
         RelayPluginSDK|RelayOrchestrator)
             echo "PluginSDKAndOrchestratorCPMTests"
@@ -166,7 +162,7 @@ run_milestone() {
             tree_before="$(git status --porcelain)"
 
             echo "==> [milestone 0] Running M0 scoped unit test suites..."
-            run_scope RelaySemanticMerge RelayWiretapProxy RelayWorkspaceStore RelayCLIAndMCP RelayStudioViews RelayPTYCore
+            run_scope RelaySemanticMerge RelayWorkspaceStore RelayCLIAndMCP RelayStudioViews RelayPTYCore
 
             run_acceptance_script m0-acceptance.sh
             run_acceptance_script readme-commands.sh
