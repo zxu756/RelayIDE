@@ -446,7 +446,7 @@ public struct RelayStudioRootWorkbenchView: View {
             VStack(alignment: .leading, spacing: 5) {
                 RelaySectionEyebrow(
                     viewModel.L("Studio Views", "工作台视图"),
-                    trailingText: "⌘1–6"
+                    trailingText: "⌘1–5"
                 )
 
                 ForEach(Array(RelayStudioPane.allCases.enumerated()), id: \.element.id) { idx, pane in
@@ -489,15 +489,10 @@ public struct RelayStudioRootWorkbenchView: View {
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 Text(
-                    viewModel.isWiretapProxyRunning
-                        ? viewModel.L(
-                            "\(viewModel.checkpoints.count) checkpoints · Proxy :\(viewModel.wiretapProxyPort)",
-                            "\(viewModel.checkpoints.count) 个快照 · 代理端口 \(viewModel.wiretapProxyPort)"
-                        )
-                        : viewModel.L(
-                            "\(viewModel.checkpoints.count) checkpoints · Proxy idle",
-                            "\(viewModel.checkpoints.count) 个快照 · 代理未启动"
-                        )
+                    viewModel.L(
+                        "\(viewModel.checkpoints.count) checkpoints",
+                        "\(viewModel.checkpoints.count) 个快照"
+                    )
                 )
                 .font(.system(size: 9.5))
                 .monospacedDigit()
@@ -576,8 +571,6 @@ public struct RelayStudioRootWorkbenchView: View {
             return "AST Merge"
         case .territoryMap:
             return "Territory Map"
-        case .wiretapBudget:
-            return "Wiretap Spend"
         case .guardrailPlugins:
             return "JS Guardrails"
         }
@@ -594,8 +587,6 @@ public struct RelayStudioRootWorkbenchView: View {
             return c > 0 ? "\(c)!" : viewModel.L("OK", "就绪")
         case .territoryMap:
             return "\(viewModel.isometricTiles.count)"
-        case .wiretapBudget:
-            return viewModel.laneBudgetAccounts.isEmpty ? nil : RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)
         case .guardrailPlugins:
             return "\(viewModel.policyPack.entries.count)"
         }
@@ -678,8 +669,6 @@ public struct RelayStudioRootWorkbenchView: View {
             SemanticASTMergeStudioView(viewModel: viewModel)
         case .territoryMap:
             IsometricTerritoryMapCanvasView(viewModel: viewModel)
-        case .wiretapBudget:
-            WiretapBudgetStudioView(viewModel: viewModel)
         case .guardrailPlugins:
             GuardrailPluginStudioView(viewModel: viewModel)
         }
@@ -940,7 +929,7 @@ public struct RelayCommandPaletteModalView: View {
             RelayAdaptiveTextField(
                 viewModel.L(
                     "Jump to studio pane, toggle language, run AST merge, or save checkpoint",
-                    "跳转视图、切换中英文、执行三路语义合并、触发熔断或保存快照"
+                    "跳转视图、切换中英文、执行三路语义合并或保存快照"
                 ),
                 text: $viewModel.commandPaletteQuery,
                 font: .system(size: 13, weight: .medium)
@@ -1064,18 +1053,6 @@ public struct RelayPreferencesModalView: View {
 
                     Toggle(
                         viewModel.L(
-                            "Redact Outbound Secrets in Loopback Proxy by Default (Planned M4)",
-                            "默认在本地回环代理中自动脱敏外发敏感凭据（计划于 M4）"
-                        ),
-                        isOn: Binding(
-                            get: { viewModel.coordinator.preferences.snapshot.outboundDLPRedactByDefault },
-                            set: { viewModel.coordinator.preferences.snapshot.outboundDLPRedactByDefault = $0 }
-                        )
-                    )
-                    .font(.system(size: 12))
-
-                    Toggle(
-                        viewModel.L(
                             "Auto-Run 3-Way Semantic AST Merge on .relay Handoff (Disabled before M3)",
                             "收到 .relay 交接产物时自动执行三路 AST 语义合并（M3 前默认关闭）"
                         ),
@@ -1182,15 +1159,10 @@ public struct RelayStudioMenuCommands: Commands {
             }
             .keyboardShortcut("4", modifiers: [.command])
 
-            Button(RelayStudioPane.wiretapBudget.localizedTitle(in: viewModel.currentLanguage)) {
-                viewModel.selectPane(.wiretapBudget)
-            }
-            .keyboardShortcut("5", modifiers: [.command])
-
             Button(RelayStudioPane.guardrailPlugins.localizedTitle(in: viewModel.currentLanguage)) {
                 viewModel.selectPane(.guardrailPlugins)
             }
-            .keyboardShortcut("6", modifiers: [.command])
+            .keyboardShortcut("5", modifiers: [.command])
 
             Divider()
 
@@ -1302,9 +1274,9 @@ public enum RelayRetinaScreenshotExporter {
                 }
             ),
             (
-                "screenshot-wiretap-guardrails",
+                "screenshot-guardrails",
                 { vm in
-                    vm.selectPane(.wiretapBudget)
+                    vm.selectPane(.guardrailPlugins)
                     vm.isBottomDrawerPresented = false
                     vm.isCommandPalettePresented = false
                 }

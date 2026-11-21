@@ -619,20 +619,21 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(campaign.terminalSnapshots.count == 4)
         #expect(!campaign.mergeReports.isEmpty)
         #expect(!campaign.isometricTiles.isEmpty)
-        #expect(!campaign.wiretapSpans.isEmpty)
+        #expect(campaign.laneBudgetAccounts.count == 4)
+        #expect(campaign.laneBudgetAccounts.reduce(0.0) { $0 + $1.spentUSD } > 0)
         #expect(!campaign.guardrailFindings.isEmpty)
-        #expect(campaign.costAnalytics.totalSpentUSD > 0)
 
-        // Verify persisted SQLite database matches synthesized campaign
+        // Verify persisted SQLite database matches synthesized campaign (wiretap_spans stays untouched)
         let stats = try db.computeStats()
         #expect(stats.activeLaneCount == 4)
         #expect(stats.taskNodeCount == campaign.dagSpec.tasks.count)
-        #expect(stats.totalSpendUSD > 0)
+        #expect(try db.allWiretapSpans().isEmpty)
+        #expect(stats.totalSpendUSD == 0)
     }
 
     // MARK: - 15. `MultiVendorDAGOrchestrator.seedIndustrialDemoWorkspace` End-to-End
 
-    @Test("MultiVendorDAGOrchestrator.seedIndustrialDemoWorkspace populates lanes, DAG, semantic merge, and wiretap spans")
+    @Test("MultiVendorDAGOrchestrator.seedIndustrialDemoWorkspace populates lanes, DAG, and semantic merge without writing wiretap_spans")
     func orchestratorSeedIndustrialDemoWorkspace() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("relay-seed-\(UUID().uuidString)", isDirectory: true)
@@ -648,6 +649,7 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(stats.activeLaneCount >= 4)
         #expect(stats.taskNodeCount >= 4)
         #expect(stats.semanticAutoMergeCount >= 1)
+        #expect(try db.allWiretapSpans().isEmpty)
     }
 
     // MARK: - 16. JavaScript Runtime Exception Resilience in `RelayJSScratchpadEvaluator`

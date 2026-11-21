@@ -3,109 +3,13 @@ import RelayModels
 import RelayPTYCore
 import RelayPluginSDK
 import RelaySemanticMerge
-import RelayWiretapProxy
 import RelayWorkspaceStore
 import RelayWorktreeGit
 
 // Alias matching both `IsometricModuleTower` and `IsometricModuleTile` naming conventions
 public typealias IsometricModuleTile = IsometricModuleTower
 
-// MARK: - Rich Wiretap Span Record, Boundary Collision & Synthesized Campaign Bundle
-
-public struct WiretapSpanRecord: Sendable, Codable, Hashable, Identifiable {
-    public let id: UUID
-    public let sequenceIndex: Int
-    public let laneID: String
-    public let taskID: String
-    public let vendor: AgentVendor
-    public let providerHost: String
-    public let endpointPath: String
-    public let modelIdentifier: String
-    public let inputTokens: Int
-    public let cachedReadTokens: Int
-    public let cacheWriteTokens: Int
-    public let outputTokens: Int
-    public let reasoningTokens: Int
-    public let costUSD: Double
-    public let ttftMs: Double
-    public let durationMs: Double
-    public let tokensPerSecond: Double
-    public let cacheHitRatio: Double
-    public let statusCode: Int
-    public let blockedByCircuitBreaker: Bool
-    public let isCircuitBreakerWarning: Bool
-    public let toolCallsInvoked: [String]
-    public let recordedAt: Date
-
-    public init(
-        id: UUID,
-        sequenceIndex: Int,
-        laneID: String,
-        taskID: String,
-        vendor: AgentVendor,
-        providerHost: String,
-        endpointPath: String,
-        modelIdentifier: String,
-        inputTokens: Int,
-        cachedReadTokens: Int,
-        cacheWriteTokens: Int = 0,
-        outputTokens: Int,
-        reasoningTokens: Int = 0,
-        costUSD: Double,
-        ttftMs: Double,
-        durationMs: Double,
-        statusCode: Int = 200,
-        blockedByCircuitBreaker: Bool = false,
-        isCircuitBreakerWarning: Bool = false,
-        toolCallsInvoked: [String] = [],
-        recordedAt: Date
-    ) {
-        self.id = id
-        self.sequenceIndex = sequenceIndex
-        self.laneID = laneID
-        self.taskID = taskID
-        self.vendor = vendor
-        self.providerHost = providerHost
-        self.endpointPath = endpointPath
-        self.modelIdentifier = modelIdentifier
-        self.inputTokens = inputTokens
-        self.cachedReadTokens = cachedReadTokens
-        self.cacheWriteTokens = cacheWriteTokens
-        self.outputTokens = outputTokens
-        self.reasoningTokens = reasoningTokens
-        self.costUSD = costUSD
-        self.ttftMs = ttftMs
-        self.durationMs = durationMs
-        let genMs = max(10.0, durationMs - ttftMs)
-        self.tokensPerSecond = Double(outputTokens + reasoningTokens) / (genMs / 1_000.0)
-        self.cacheHitRatio = inputTokens > 0 ? Double(cachedReadTokens) / Double(inputTokens) : 0.0
-        self.statusCode = statusCode
-        self.blockedByCircuitBreaker = blockedByCircuitBreaker
-        self.isCircuitBreakerWarning = isCircuitBreakerWarning
-        self.toolCallsInvoked = toolCallsInvoked
-        self.recordedAt = recordedAt
-    }
-
-    public var apiSpan: WiretapAPISpan {
-        WiretapAPISpan(
-            id: id,
-            laneID: laneID,
-            taskID: taskID,
-            vendor: vendor,
-            providerHost: providerHost,
-            modelIdentifier: modelIdentifier,
-            inputTokens: inputTokens,
-            cachedReadTokens: cachedReadTokens,
-            outputTokens: outputTokens,
-            reasoningTokens: reasoningTokens,
-            costUSD: costUSD,
-            durationMs: durationMs,
-            statusCode: statusCode,
-            blockedByCircuitBreaker: blockedByCircuitBreaker,
-            recordedAt: recordedAt
-        )
-    }
-}
+// MARK: - Boundary Collision & Synthesized Campaign Bundle
 
 public struct TerritoryBoundaryCollisionWarning: Sendable, Codable, Hashable, Identifiable {
     public let id: UUID
@@ -176,11 +80,7 @@ public struct SynthesizedFlagshipCampaign: Sendable, Codable, Hashable {
     public let isometricTiles: [IsometricModuleTile]
     public let isometricCouplingArcs: [IsometricCouplingArc]
     public let boundaryCollisions: [TerritoryBoundaryCollisionWarning]
-    public let wiretapSpanRecords: [WiretapSpanRecord]
-    public let wiretapSpans: [WiretapAPISpan]
     public let laneBudgetAccounts: [LaneBudgetAccount]
-    public let costAnalytics: WorkspaceCostAnalyticsSnapshot
-    public let flamechartTimeline: WiretapFlamechartTimeline
     public let guardrailFindings: [RelayGuardrailFinding]
     public let hookTraceEntries: [RelayHookTraceEntry]
     public let policyPack: RelayGuardrailsPolicyPack
@@ -224,8 +124,6 @@ public struct RelayDemoWorkspaceSynthesizer: Sendable {
 
         // 3. Topological DAG & Critical Path Method (CPM) Schedule
         let dag = Self.buildFlagshipDAG(repoRoot: repositoryPath, baseDate: tBase)
-        let spanRecords = Self.build24WiretapSpanRecords(baseDate: tBase)
-        let apiSpans = spanRecords.map(\.apiSpan)
         let cpm = (try? CriticalPathMethodAnalyzer().analyze(
             tasks: dag.tasks,
             durationOverridesSeconds: [
@@ -235,8 +133,7 @@ public struct RelayDemoWorkspaceSynthesizer: Sendable {
                 "h3-edge-router": 31.0,
                 "h3-ast-reconcile": 14.0,
                 "h3-fuzz-suite": 27.0
-            ],
-            observedWiretapSpans: apiSpans
+            ]
         )) ?? CPMAnalysisReport(
             nodeSchedules: [],
             criticalPathTaskIDs: [],
@@ -260,14 +157,8 @@ public struct RelayDemoWorkspaceSynthesizer: Sendable {
         // 5. 18 Isometric Module Tiles + Coupling Arcs + 1 Boundary Collision Warning
         let (tiles, arcs, collisions) = Self.build18IsometricArchitectureMap(baseDate: tBase)
 
-        // 6. Lane Budget Accounts, Burn-Rate Forecasts & Flamechart Timeline
-        let accounts = Self.buildBudgetAccounts(from: spanRecords)
-        let costAnalytics = WiretapCostAnalyticsEngine().analyzeWorkspace(
-            accounts: accounts,
-            spans: apiSpans,
-            globalCeilingUSD: dag.globalBudgetCeilingUSD
-        )
-        let flamechart = WiretapFlamechartBuilder.buildTimeline(from: apiSpans)
+        // 6. Synthetic [DEMO] Lane Spend Accounts
+        let accounts = Self.buildDemoLaneBudgetAccounts()
 
         // 7. Active Guardrail Plugin Audit Events & Hook Trace Ring-Buffer Entries
         let (findings, hookTraces) = Self.buildGuardrailFindingsAndHookTraces(baseDate: tBase)
@@ -287,11 +178,7 @@ public struct RelayDemoWorkspaceSynthesizer: Sendable {
             isometricTiles: tiles,
             isometricCouplingArcs: arcs,
             boundaryCollisions: collisions,
-            wiretapSpanRecords: spanRecords,
-            wiretapSpans: apiSpans,
             laneBudgetAccounts: accounts,
-            costAnalytics: costAnalytics,
-            flamechartTimeline: flamechart,
             guardrailFindings: findings,
             hookTraceEntries: hookTraces,
             policyPack: RelayGuardrailsPolicyPack.defaultIndustrialPack()
@@ -329,10 +216,6 @@ public struct RelayDemoWorkspaceSynthesizer: Sendable {
         }
         for acc in campaign.laneBudgetAccounts {
             try database.setMeta(key: "budget_ceiling_\(acc.laneID)", value: String(format: "%.4f", acc.ceilingUSD))
-            orchestrator?.wiretapProxy.ledger.registerLane(laneID: acc.laneID, vendor: acc.vendor, ceilingUSD: acc.ceilingUSD)
-        }
-        for span in campaign.wiretapSpans {
-            try database.appendWiretapSpan(span)
         }
         try database.replaceGuardrailFindings(campaign.guardrailFindings)
 
@@ -1152,106 +1035,55 @@ public struct RelayDemoWorkspaceSynthesizer: Sendable {
         return (tiles, arcs, [collisionWarning])
     }
 
-    // MARK: - 6. 24 Realistic Wiretap LLM API Calls Across All 4 Vendors (+ 1 Circuit-Breaker Warning)
+    // MARK: - 6. Synthetic [DEMO] Per-Lane Spend Accounts Across All 4 Vendors
 
-    private static func build24WiretapSpanRecords(baseDate: Date) -> [WiretapSpanRecord] {
-        let pricing = ProviderPricingCatalog()
-        // Tuple: (seq, laneID, taskID, vendor, host, path, model, inTok, cacheRead, cacheWrite, outTok, reasonTok, ttftMs, durMs, status, blocked, cbWarn, tools, offsetSec)
-        let rawTurns: [(Int, String, String, AgentVendor, String, String, String, Int, Int, Int, Int, Int, Double, Double, Int, Bool, Bool, [String], Double)] = [
-            // Claude Code (6 turns — Anthropic Messages SSE)
-            (1, "lane-claude-quic", "h3-quic-ring", .claudeCode, "api.anthropic.com", "/v1/messages", "claude-sonnet-4-20250514", 42_800, 0, 38_400, 2_140, 1_400, 410, 2_380, 200, false, false, ["read_file", "grep_search"], 3),
-            (2, "lane-claude-quic", "h3-quic-ring", .claudeCode, "api.anthropic.com", "/v1/messages", "claude-sonnet-4-20250514", 48_600, 38_400, 4_200, 3_620, 1_950, 285, 2_910, 200, false, false, ["edit_file"], 14),
-            (3, "lane-claude-quic", "h3-quic-ring", .claudeCode, "api.anthropic.com", "/v1/messages", "claude-sonnet-4-20250514", 54_200, 42_600, 0, 2_890, 900, 260, 2_120, 200, false, false, ["run_command"], 29),
-            (4, "lane-claude-quic", "h3-passkey-verifier", .claudeCode, "api.anthropic.com", "/v1/messages", "claude-opus-4-20250514", 61_500, 48_000, 6_000, 3_410, 2_600, 520, 4_180, 200, false, false, ["read_file", "edit_file"], 47),
-            (5, "lane-claude-quic", "h3-passkey-verifier", .claudeCode, "api.anthropic.com", "/v1/messages", "claude-sonnet-4-20250514", 67_900, 54_000, 0, 2_980, 1_100, 275, 2_440, 200, false, false, ["edit_file", "run_command"], 63),
-            (6, "lane-claude-quic", "h3-passkey-verifier", .claudeCode, "api.anthropic.com", "/v1/messages", "claude-sonnet-4-20250514", 71_400, 60_200, 0, 1_840, 450, 240, 1_690, 200, false, false, ["write_file"], 77),
-
-            // OpenAI Codex (7 turns — OpenAI Responses SSE, culminating in 1 Circuit-Breaker Warning on turn #13!)
-            (7, "lane-codex-auth", "h3-auth-subkeys", .codex, "api.openai.com", "/v1/responses", "gpt-5-codex", 39_400, 0, 0, 2_650, 3_100, 390, 2_640, 200, false, false, ["shell", "apply_patch"], 5),
-            (8, "lane-codex-auth", "h3-auth-subkeys", .codex, "api.openai.com", "/v1/responses", "gpt-5-codex", 52_100, 36_800, 0, 4_120, 4_400, 355, 3_420, 200, false, false, ["apply_patch"], 18),
-            (9, "lane-codex-auth", "h3-auth-subkeys", .codex, "api.openai.com", "/v1/responses", "o3", 64_800, 44_000, 0, 3_890, 9_600, 690, 5_150, 200, false, false, ["apply_patch"], 31),
-            (10, "lane-codex-auth", "h3-auth-subkeys", .codex, "api.openai.com", "/v1/responses", "gpt-5-codex", 73_200, 56_000, 0, 3_240, 3_900, 340, 2_890, 200, false, false, ["shell"], 44),
-            (11, "lane-codex-auth", "h3-auth-subkeys", .codex, "api.openai.com", "/v1/responses", "o3", 88_500, 62_000, 0, 5_400, 14_200, 740, 6_120, 200, false, false, ["apply_patch", "shell"], 58),
-            (12, "lane-codex-auth", "h3-auth-subkeys", .codex, "api.openai.com", "/v1/responses", "o3", 96_400, 68_000, 0, 6_180, 16_800, 780, 6_840, 200, false, true, ["apply_patch"], 73),
-            (13, "lane-codex-auth", "h3-auth-subkeys", .codex, "api.openai.com", "/v1/responses", "gpt-5-codex", 0, 0, 0, 0, 0, 0.4, 0.8, 429, true, true, [], 81),
-
-            // Google AGY (6 turns — Gemini streamGenerateContent SSE)
-            (14, "lane-agy-gateway", "h3-edge-router", .antigravity, "generativelanguage.googleapis.com", "/v1beta/models/gemini-2.5-pro:streamGenerateContent", "gemini-2.5-pro", 82_000, 64_000, 0, 3_420, 2_200, 310, 2_190, 200, false, false, ["read_file", "edit_file"], 53),
-            (15, "lane-agy-gateway", "h3-edge-router", .antigravity, "generativelanguage.googleapis.com", "/v1beta/models/gemini-2.5-pro:streamGenerateContent", "gemini-2.5-pro", 94_600, 78_500, 0, 4_680, 2_750, 295, 2_610, 200, false, false, ["edit_file"], 65),
-            (16, "lane-agy-gateway", "h3-edge-router", .antigravity, "generativelanguage.googleapis.com", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", "gemini-2.5-flash", 104_000, 88_000, 0, 2_950, 600, 145, 1_120, 200, false, false, ["run_command"], 76),
-            (17, "lane-agy-gateway", "h3-edge-router", .antigravity, "generativelanguage.googleapis.com", "/v1beta/models/gemini-2.5-pro:streamGenerateContent", "gemini-2.5-pro", 112_400, 96_000, 0, 5_840, 1_900, 320, 2_880, 200, false, false, ["write_file"], 86),
-            (18, "lane-agy-gateway", "h3-ast-reconcile", .antigravity, "generativelanguage.googleapis.com", "/v1beta/models/gemini-2.5-pro:streamGenerateContent", "gemini-2.5-pro", 118_900, 102_000, 0, 3_190, 3_400, 335, 2_540, 200, false, false, ["relay_semantic_merge"], 98),
-            (19, "lane-agy-gateway", "h3-ast-reconcile", .antigravity, "generativelanguage.googleapis.com", "/v1beta/models/gemini-2.5-pro:streamGenerateContent", "gemini-2.5-pro", 124_200, 110_000, 0, 2_410, 1_850, 290, 1_980, 200, false, false, ["relay_check_ownership"], 111),
-
-            // Mistral Vibe (5 turns — Mistral Chat Completions SSE)
-            (20, "lane-vibe-fuzz", "h3-fuzz-suite", .mistralVibe, "api.mistral.ai", "/v1/chat/completions", "devstral-medium", 44_200, 16_000, 0, 4_890, 0, 180, 1_540, 200, false, false, ["write_file"], 89),
-            (21, "lane-vibe-fuzz", "h3-fuzz-suite", .mistralVibe, "api.mistral.ai", "/v1/chat/completions", "devstral-medium", 51_800, 38_000, 0, 5_620, 0, 165, 1_710, 200, false, false, ["write_file"], 99),
-            (22, "lane-vibe-fuzz", "h3-fuzz-suite", .mistralVibe, "api.mistral.ai", "/v1/chat/completions", "codestral-2508", 36_400, 28_000, 0, 3_940, 0, 120, 1_090, 200, false, false, ["bash"], 108),
-            (23, "lane-vibe-fuzz", "h3-fuzz-suite", .mistralVibe, "api.mistral.ai", "/v1/chat/completions", "devstral-medium", 58_900, 46_500, 0, 4_210, 0, 170, 1_480, 200, false, false, ["bash"], 119),
-            (24, "lane-vibe-fuzz", "h3-fuzz-suite", .mistralVibe, "api.mistral.ai", "/v1/chat/completions", "codestral-2508", 61_200, 52_000, 0, 2_760, 0, 115, 940, 200, false, false, ["bash"], 128)
-        ]
-
-        return rawTurns.map { item in
-            let (seq, laneID, taskID, vendor, host, path, model, inTok, cRead, cWrite, outTok, reasonTok, ttft, dur, status, blocked, cbWarn, tools, offsetSec) = item
-            let rate = pricing.matchRate(for: model, fallbackVendor: vendor)
-            let cost = blocked ? 0.0 : rate.estimateCostUSD(
-                inputTokens: inTok,
-                cachedReadTokens: cRead,
-                outputTokens: outTok,
-                reasoningTokens: reasonTok
+    private static func buildDemoLaneBudgetAccounts() -> [LaneBudgetAccount] {
+        [
+            LaneBudgetAccount(
+                laneID: "lane-agy-gateway",
+                vendor: .antigravity,
+                requestCount: 6,
+                inputTokens: 636_100,
+                cachedTokens: 538_500,
+                outputTokens: 35_190,
+                spentUSD: 0.6240,
+                ceilingUSD: 4.50,
+                circuitOpen: false
+            ),
+            LaneBudgetAccount(
+                laneID: "lane-claude-quic",
+                vendor: .claudeCode,
+                requestCount: 6,
+                inputTokens: 346_400,
+                cachedTokens: 243_200,
+                outputTokens: 25_280,
+                spentUSD: 0.9180,
+                ceilingUSD: 6.00,
+                circuitOpen: false
+            ),
+            LaneBudgetAccount(
+                laneID: "lane-codex-auth",
+                vendor: .codex,
+                requestCount: 6,
+                inputTokens: 414_400,
+                cachedTokens: 266_800,
+                outputTokens: 77_480,
+                spentUSD: 1.1240,
+                ceilingUSD: 2.50,
+                circuitOpen: false
+            ),
+            LaneBudgetAccount(
+                laneID: "lane-vibe-fuzz",
+                vendor: .mistralVibe,
+                requestCount: 5,
+                inputTokens: 252_500,
+                cachedTokens: 180_500,
+                outputTokens: 21_420,
+                spentUSD: 0.2860,
+                ceilingUSD: 3.00,
+                circuitOpen: false
             )
-            let deterministicUUID = UUID(uuidString: String(format: "cccc0024-0000-4000-8000-%012d", seq))!
-            return WiretapSpanRecord(
-                id: deterministicUUID,
-                sequenceIndex: seq,
-                laneID: laneID,
-                taskID: taskID,
-                vendor: vendor,
-                providerHost: host,
-                endpointPath: path,
-                modelIdentifier: model,
-                inputTokens: inTok,
-                cachedReadTokens: cRead,
-                cacheWriteTokens: cWrite,
-                outputTokens: outTok,
-                reasoningTokens: reasonTok,
-                costUSD: cost,
-                ttftMs: ttft,
-                durationMs: dur,
-                statusCode: status,
-                blockedByCircuitBreaker: blocked,
-                isCircuitBreakerWarning: cbWarn,
-                toolCallsInvoked: tools,
-                recordedAt: baseDate.addingTimeInterval(offsetSec)
-            )
-        }
-    }
-
-    private static func buildBudgetAccounts(from records: [WiretapSpanRecord]) -> [LaneBudgetAccount] {
-        let ceilings: [String: (AgentVendor, Double)] = [
-            "lane-claude-quic": (.claudeCode, 6.00),
-            "lane-codex-auth": (.codex, 1.15), // Tight cap that triggers realistic circuit-breaker warning/trip on Codex's heavy o3 turns!
-            "lane-agy-gateway": (.antigravity, 4.50),
-            "lane-vibe-fuzz": (.mistralVibe, 3.00)
         ]
-
-        var map: [String: LaneBudgetAccount] = [:]
-        for (laneID, (vendor, cap)) in ceilings {
-            map[laneID] = LaneBudgetAccount(laneID: laneID, vendor: vendor, ceilingUSD: cap)
-        }
-        for r in records {
-            var acc = map[r.laneID] ?? LaneBudgetAccount(laneID: r.laneID, vendor: r.vendor, ceilingUSD: 5.0)
-            acc.requestCount += 1
-            acc.inputTokens += r.inputTokens
-            acc.cachedTokens += r.cachedReadTokens
-            acc.outputTokens += (r.outputTokens + r.reasoningTokens)
-            acc.spentUSD += r.costUSD
-            if r.blockedByCircuitBreaker || acc.spentUSD >= acc.ceilingUSD {
-                acc.circuitOpen = true
-            }
-            map[r.laneID] = acc
-        }
-        return map.values.sorted { $0.laneID < $1.laneID }
     }
 
     // MARK: - 7. Active Guardrail Plugin Audit Events & Hook Traces

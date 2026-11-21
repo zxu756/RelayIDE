@@ -351,24 +351,6 @@ public final class RelayLocalizer: ObservableObject {
         "Captured automatically before 3-Way Semantic AST reconciliation of AuthSessionManager.swift":
             "在 AuthSessionManager.swift 执行三路 AST 语义合并前自动捕获",
 
-        // DLP Secret Category Display Titles
-        ".env Secret Assignment": ".env 密钥环境变量赋值",
-        "PEM Cryptographic Private Key": "PEM 加密私钥证书",
-        "OpenSSH Private Key Block": "OpenSSH 私钥数据块",
-        "Anthropic API Key": "Anthropic API 密钥",
-        "OpenAI Project / Secret Key": "OpenAI 项目 / 访问密钥",
-        "Google Cloud / Gemini API Key": "Google Cloud / Gemini API 密钥",
-        "GitHub Personal Access Token": "GitHub 个人访问令牌 (PAT)",
-        "AWS IAM Access Key ID": "AWS IAM 访问密钥 ID",
-        "AWS IAM Secret Access Key": "AWS IAM 秘密访问密钥",
-        "Stripe Live Secret / Restricted Key": "Stripe 生产环境秘密密钥",
-        "Slack Bot / User Token": "Slack 机器人 / 用户令牌",
-        "Signed JSON Web Token (JWT)": "签名 JSON Web 令牌 (JWT)",
-        "Local /Users SSH Key or Config Path": "本机 /Users SSH 密钥或配置路径",
-        "Hardcoded macOS /Users Home Path": "硬编码 macOS /Users 主目录路径",
-        "Database URI with Embedded Password": "内嵌明文密码的数据库连接串",
-        "High-Entropy Bearer / Secret Token": "高信息熵 Bearer / 凭据令牌",
-
         // Conflict Resolution Strategy Titles & Scratchpad Verdicts
         "Accept Left Lane": "采纳左侧通道",
         "Accept Right Lane": "采纳右侧通道",
@@ -402,8 +384,6 @@ public extension RelayStudioPane {
             return RelayLocalizer.select(language, "3-Way AST Merge", "三路语义合并")
         case .territoryMap:
             return RelayLocalizer.select(language, "Isometric Territory", "领地围栏地图")
-        case .wiretapBudget:
-            return RelayLocalizer.select(language, "Wiretap & Spend", "Wiretap 预算网关")
         case .guardrailPlugins:
             return RelayLocalizer.select(language, "Guardrail Plugins", "JSC 编排插件")
         }

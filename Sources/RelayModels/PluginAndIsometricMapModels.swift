@@ -188,7 +188,6 @@ public enum RelayStudioPane: String, Sendable, Codable, Hashable, CaseIterable, 
     case dagPipeline = "Relay DAG"
     case semanticMerge = "3-Way AST Merge"
     case territoryMap = "Isometric Territory"
-    case wiretapBudget = "Wiretap & Spend"
     case guardrailPlugins = "Guardrail Plugins"
 
     public var id: String { rawValue }
@@ -199,7 +198,6 @@ public enum RelayStudioPane: String, Sendable, Codable, Hashable, CaseIterable, 
         case .dagPipeline: return "point.bottomleft.forward.to.arrow.triangle.scurvepath"
         case .semanticMerge: return "arrow.triangle.merge"
         case .territoryMap: return "cube.transparent"
-        case .wiretapBudget: return "chart.bar.xaxis"
         case .guardrailPlugins: return "checkmark.shield"
         }
     }

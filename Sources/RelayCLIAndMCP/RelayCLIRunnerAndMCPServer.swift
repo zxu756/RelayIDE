@@ -3,7 +3,6 @@ import Foundation
 import RelayModels
 import RelayOrchestrator
 import RelayPluginSDK
-import RelayWiretapProxy
 import RelayWorkspaceStore
 import RelayWorktreeGit
 

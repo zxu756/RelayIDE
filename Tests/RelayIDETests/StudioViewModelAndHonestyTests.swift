@@ -28,14 +28,10 @@ struct StudioViewModelAndHonestyTests {
             let vm = RelayStudioViewModel(initialPane: .ptyGrid, localizer: localizer)
 
             #expect(vm.isDemoMode == false)
-            #expect(vm.isWiretapProxyRunning == false)
             #expect(vm.lanes.isEmpty)
             #expect(vm.terminalSnapshotsByLane.isEmpty)
             #expect(vm.laneBudgetAccounts.isEmpty)
             #expect(vm.totalWorkspaceSpendUSD == 0.0)
-            #expect(vm.wiretapSpanRecords.isEmpty)
-            #expect(vm.wiretapAPISpans.isEmpty)
-            #expect(vm.dlpAuditEvents.isEmpty)
             #expect(vm.pluginLatencyByID.isEmpty)
             #expect(vm.guardrailFindings.isEmpty)
             #expect(vm.mergeReports.isEmpty)
@@ -77,7 +73,6 @@ struct StudioViewModelAndHonestyTests {
             )
             #expect(vm.isDemoMode == false)
             #expect(vm.lanes.isEmpty)
-            #expect(vm.dlpAuditEvents.isEmpty)
 
             // Also test openProjectBundle(at:) on an existing running ViewModel
             vm.openProjectBundle(at: emptyProjURL)
@@ -110,7 +105,7 @@ struct StudioViewModelAndHonestyTests {
         let vmDemo = RelayStudioViewModel(initialPane: .ptyGrid, localizer: locEN, loadDemoWorkspace: true)
         #expect(vmDemo.isDemoMode == true)
         #expect(vmDemo.lanes.count == 4)
-        #expect(!vmDemo.dlpAuditEvents.isEmpty)
+        #expect(!vmDemo.laneBudgetAccounts.isEmpty)
         #expect(!vmDemo.pluginLatencyByID.isEmpty)
         #expect(vmDemo.demoBadgeLabel.contains("[DEMO]"))
         let demoBannerEN = vmDemo.coordinator.shellState.statusBannerText
@@ -176,27 +171,10 @@ struct StudioViewModelAndHonestyTests {
         #expect(toastZH.detail.contains("RelayIDE run"))
     }
 
-    @Test("toggleCircuitBreaker when wiretap proxy is not running reports honest in-memory status without fake 127.0.0.1 HTTP 429 claims (R19)")
+    @Test("RelayStudioRootWorkbenchView rasterizes all 5 studio panes cleanly in empty non-demo state across EN and ZH")
     @MainActor
-    func toggleCircuitBreakerWithoutProxyReportsInMemoryOnly() throws {
-        let localizer = RelayLocalizer(language: .en, persistToUserDefaults: false)
-        let vm = RelayStudioViewModel(initialPane: .wiretapBudget, localizer: localizer, loadDemoWorkspace: true)
-        #expect(vm.isWiretapProxyRunning == false)
-
-        vm.toggleCircuitBreaker(forLane: "lane-claude-quic")
-        let toastEN = try #require(vm.coordinator.toastCenter.visibleToasts.last)
-        #expect(!toastEN.detail.contains("127.0.0.1"))
-        #expect(!toastEN.detail.contains("gated with HTTP 429"))
-
-        vm.setLanguage(.zhHans, postToast: false)
-        vm.toggleCircuitBreaker(forLane: "lane-claude-quic")
-        let toastZH = try #require(vm.coordinator.toastCenter.visibleToasts.last)
-        #expect(!toastZH.detail.contains("127.0.0.1"))
-    }
-
-    @Test("RelayStudioRootWorkbenchView rasterizes all 6 studio panes cleanly in empty non-demo state across EN and ZH")
-    @MainActor
-    func rootWorkbenchViewRasterizesAllSixPanesWhenEmpty() throws {
+    func rootWorkbenchViewRasterizesAllFivePanesWhenEmpty() throws {
+        #expect(RelayStudioPane.allCases.count == 5)
         for lang in [RelayLanguage.en, RelayLanguage.zhHans] {
             let localizer = RelayLocalizer(language: lang, persistToUserDefaults: false)
             let vm = RelayStudioViewModel(initialPane: .ptyGrid, localizer: localizer, loadDemoWorkspace: false)

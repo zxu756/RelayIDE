@@ -78,15 +78,14 @@ public final class RelayWorkbenchShellState: ObservableObject {
     @Published public var gridColumnsCount: Int = 2
     @Published public var isCommandPalettePresented: Bool = false
     @Published public var commandQuery: String = ""
-    @Published public var statusBannerText: String = "Wiretap Proxy Ready · 4 Agent Worktrees Isolated"
+    @Published public var statusBannerText: String = "Empty workspace · Desktop UI not connected to live runs yet (M5)"
 
     public let availableActions: [RelayCommandAction] = [
         RelayCommandAction(id: "goto.pty", title: "Open 2×2 Multi-Vendor PTY Grid · 并行终端网格", subtitle: "Inspect live VT100/TrueColor agent terminals", shortcutHint: "⌘1", targetPane: .ptyGrid),
         RelayCommandAction(id: "goto.dag", title: "Open Topological Relay DAG · DAG 接力编排", subtitle: "Inspect parallel waves & .relay artifact handoffs", shortcutHint: "⌘2", targetPane: .dagPipeline),
         RelayCommandAction(id: "goto.merge", title: "Open 3-Way Semantic AST Merge Studio · 三路语义合并", subtitle: "Resolve declaration-level & nested member merges", shortcutHint: "⌘3", targetPane: .semanticMerge),
         RelayCommandAction(id: "goto.iso", title: "Open 2.5D Isometric Territory Map · 领地围栏地图", subtitle: "Inspect module fan-in/out & live lane ownership", shortcutHint: "⌘4", targetPane: .territoryMap),
-        RelayCommandAction(id: "goto.wiretap", title: "Open Wiretap Token & Spend · Wiretap 预算网关", subtitle: "Configure USD circuit breakers per vendor lane", shortcutHint: "⌘5", targetPane: .wiretapBudget),
-        RelayCommandAction(id: "goto.plugins", title: "Run JavaScriptCore Guardrail Plugins · JSC 编排插件", subtitle: "Audit secret leaks, test gates & Conventional Commits", shortcutHint: "⌘6", targetPane: .guardrailPlugins),
+        RelayCommandAction(id: "goto.plugins", title: "Run JavaScriptCore Guardrail Plugins · JSC 编排插件", subtitle: "Audit secret leaks, test gates & Conventional Commits", shortcutHint: "⌘5", targetPane: .guardrailPlugins),
         RelayCommandAction(id: "workbench.toggleLanguage", title: "Toggle Language · 切换语言 (中文 / EN)", subtitle: "Switch RelayIDE UI language between Simplified Chinese and English", shortcutHint: "⇧⌘L", targetPane: nil)
     ]
 

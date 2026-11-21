@@ -124,7 +124,6 @@ public struct RelayUserPreferencesSnapshot: Sendable, Codable, Hashable {
     public var defaultLaneBudgetCeilingUSD: Double
     public var autoRunSemanticMergeOnHandoff: Bool
     public var autoRevertOwnershipViolations: Bool
-    public var outboundDLPRedactByDefault: Bool
     public var preferCompactChromeDensity: Bool
     public var respectReducedMotion: Bool
 
@@ -138,7 +137,6 @@ public struct RelayUserPreferencesSnapshot: Sendable, Codable, Hashable {
         defaultLaneBudgetCeilingUSD: Double = 6.0,
         autoRunSemanticMergeOnHandoff: Bool = false,
         autoRevertOwnershipViolations: Bool = false,
-        outboundDLPRedactByDefault: Bool = false,
         preferCompactChromeDensity: Bool = false,
         respectReducedMotion: Bool = false
     ) {
@@ -151,7 +149,6 @@ public struct RelayUserPreferencesSnapshot: Sendable, Codable, Hashable {
         self.defaultLaneBudgetCeilingUSD = max(0.25, defaultLaneBudgetCeilingUSD)
         self.autoRunSemanticMergeOnHandoff = autoRunSemanticMergeOnHandoff
         self.autoRevertOwnershipViolations = autoRevertOwnershipViolations
-        self.outboundDLPRedactByDefault = outboundDLPRedactByDefault
         self.preferCompactChromeDensity = preferCompactChromeDensity
         self.respectReducedMotion = respectReducedMotion
     }
@@ -233,7 +230,6 @@ public enum PaletteCommandCategory: String, Sendable, Codable, Hashable, CaseIte
     case studioNavigation = "Studio Views"
     case ptyMultiplexer = "PTY Lanes & Broadcast"
     case semanticMerge = "3-Way Semantic Merge"
-    case wiretapAndBudget = "Wiretap & Circuit Breakers"
     case guardrailsAndPlugins = "Guardrails & Scratchpad"
     case workspaceAndJournal = "Undo, Checkpoints & Export"
 
@@ -247,8 +243,6 @@ public enum PaletteCommandCategory: String, Sendable, Codable, Hashable, CaseIte
             return RelayLocalizer.select(language, "PTY Lanes & Broadcast", "终端通道与广播")
         case .semanticMerge:
             return RelayLocalizer.select(language, "3-Way Semantic Merge", "三路语义合并")
-        case .wiretapAndBudget:
-            return RelayLocalizer.select(language, "Wiretap & Circuit Breakers", "预算网关与熔断")
         case .guardrailsAndPlugins:
             return RelayLocalizer.select(language, "Guardrails & Scratchpad", "护栏与脚本演练")
         case .workspaceAndJournal:
@@ -565,21 +559,11 @@ public final class RelayCommandPaletteController: ObservableObject {
                 keywords: ["isometric territory", "isometric", "coupling", "martin", "ownership", "fence", "领地围栏地图", "架构地图"]
             ),
             RelayPaletteCommandItem(
-                id: "studio.wiretapBudget",
-                title: L("Focus Loopback Wiretap Flamechart & Spend Analytics", "切换至 Wiretap 预算网关与火焰图"),
-                subtitle: L("Inspect SSE TTFT, prompt cache savings, DLP redactions & burn rate", "查看 SSE 首字延迟、提示词缓存节省、DLP 脱敏与预算消耗"),
-                category: .studioNavigation,
-                shortcutBadge: "⌘5",
-                sfSymbolName: RelayStudioPane.wiretapBudget.sfSymbolName,
-                targetPane: .wiretapBudget,
-                keywords: ["wiretap", "tokens", "cost", "usd", "flamechart", "dlp", "Wiretap 预算网关", "预算", "令牌"]
-            ),
-            RelayPaletteCommandItem(
                 id: "studio.guardrailPlugins",
                 title: L("Focus JavaScriptCore Guardrail Plugins & Scratchpad", "切换至 JSC 编排插件与脚本演练场"),
                 subtitle: L("Audit policy packs, microsecond profiles & lifecycle hook traces", "审计护栏策略包、微秒级耗时与生命周期钩子轨迹"),
                 category: .studioNavigation,
-                shortcutBadge: "⌘6",
+                shortcutBadge: "⌘5",
                 sfSymbolName: RelayStudioPane.guardrailPlugins.sfSymbolName,
                 targetPane: .guardrailPlugins,
                 keywords: ["jsc", "plugins", "guardrail", "scratchpad", "veto", "JSC 编排插件", "护栏插件"]
@@ -620,16 +604,6 @@ public final class RelayCommandPaletteController: ObservableObject {
                 sfSymbolName: "arrow.triangle.merge",
                 targetPane: .semanticMerge,
                 keywords: ["semantic merge", "reconcile", "auto-merge", "AuthSessionManager", "执行语义合并", "自动合并"]
-            ),
-            RelayPaletteCommandItem(
-                id: "wiretap.tripOrResetCircuitBreaker",
-                title: L("Trip or Reset Selected Lane Budget Circuit Breaker", "触发或重置当前通道预算熔断器"),
-                subtitle: L("Toggle in-memory lane budget circuit breaker state (planned proxy gate in M4)", "切换内存级通道预算熔断状态（真实回环网关排在 M4）"),
-                category: .wiretapAndBudget,
-                shortcutBadge: "⇧⌘K",
-                sfSymbolName: "bolt.horizontal.circle",
-                targetPane: .wiretapBudget,
-                keywords: ["circuit", "breaker", "halt", "reset", "ceiling", "429", "熔断器", "预算上限"]
             ),
             RelayPaletteCommandItem(
                 id: "journal.undo",
@@ -710,7 +684,6 @@ public enum RelaySplitArrangement: String, Sendable, Codable, Hashable, CaseIter
 public enum RelayInspectorSection: String, Sendable, Codable, Hashable, CaseIterable, Identifiable {
     case laneOwnership = "Territory & Globs"
     case astOutline = "AST Declarations"
-    case spendAndDLP = "Spend & DLP"
     case undoCheckpoints = "Undo & Checkpoints"
     case pluginLatency = "JSC Micro-Profiler"
 
@@ -722,8 +695,6 @@ public enum RelayInspectorSection: String, Sendable, Codable, Hashable, CaseIter
             return RelayLocalizer.select(language, "Territory & Globs", "领地围栏规则")
         case .astOutline:
             return RelayLocalizer.select(language, "AST Declarations", "AST 声明大纲")
-        case .spendAndDLP:
-            return RelayLocalizer.select(language, "Spend & DLP", "预算与 DLP")
         case .undoCheckpoints:
             return RelayLocalizer.select(language, "Undo & Checkpoints", "撤销与检查点")
         case .pluginLatency:
@@ -735,7 +706,6 @@ public enum RelayInspectorSection: String, Sendable, Codable, Hashable, CaseIter
 public enum RelayBottomDrawerTab: String, Sendable, Codable, Hashable, CaseIterable, Identifiable {
     case ftsSearch = "FTS5 Search"
     case verificationGate = "Verifier Console"
-    case wiretapStream = "Wiretap SSE Feed"
     case hookTraces = "Guardrail Hook Ring"
 
     public var id: String { rawValue }
@@ -746,8 +716,6 @@ public enum RelayBottomDrawerTab: String, Sendable, Codable, Hashable, CaseItera
             return RelayLocalizer.select(language, "FTS5 Search", "FTS5 全文检索")
         case .verificationGate:
             return RelayLocalizer.select(language, "Verifier Console", "验证控制台")
-        case .wiretapStream:
-            return RelayLocalizer.select(language, "Wiretap SSE Feed", "Wiretap 实时流")
         case .hookTraces:
             return RelayLocalizer.select(language, "Guardrail Hook Ring", "护栏钩子环")
         }
@@ -797,7 +765,6 @@ public struct RelayWorkspaceTab: Sendable, Codable, Hashable, Identifiable {
         case "tab.dag.http3": return "DAG 接力编排"
         case "tab.merge.auth": return title // file basename `AuthSessionManager.swift`
         case "tab.iso.map": return "领地围栏地图"
-        case "tab.wiretap.spend": return "Wiretap 预算网关"
         case "tab.plugins.audit": return "JSC 编排插件"
         default:
             if associatedFilePath != nil { return title }
@@ -812,7 +779,6 @@ public struct RelayWorkspaceTab: Sendable, Codable, Hashable, Identifiable {
         case "tab.dag.http3": return "6 个任务 · 2.16× 加速比"
         case "tab.merge.auth": return subtitle
         case "tab.iso.map": return "1 处越界碰撞"
-        case "tab.wiretap.spend": return "1 条熔断告警"
         case "tab.plugins.audit": return "5 条护栏发现"
         default:
             return subtitle
@@ -981,13 +947,6 @@ public final class RelaySplitWorkspaceController: ObservableObject {
             badgeCount: 1
         ),
         RelayWorkspaceTab(
-            id: "tab.wiretap.spend",
-            title: "Wiretap 24 Spans",
-            subtitle: "1 Circuit Warning",
-            studioPane: .wiretapBudget,
-            badgeCount: 1
-        ),
-        RelayWorkspaceTab(
             id: "tab.plugins.audit",
             title: "Guardrail Policies",
             subtitle: "5 Active Findings",
@@ -1130,35 +1089,6 @@ public final class RelayToastCenter: ObservableObject {
                     "\(report.relativePath)：已自动合并 \(report.autoMergedCount) 项，\(report.unresolvedConflictCount) 处符号冲突。"
                 ),
                 shortcutHint: "⌘3"
-            )
-        }
-    }
-
-    public func postCircuitBreakerStatus(laneID: String, vendor: AgentVendor, isOpen: Bool, ceilingUSD: Double, language: RelayLanguage? = nil) {
-        let lang = language ?? RelayLocalizer.shared.language
-        if isOpen {
-            _ = post(
-                severity: .danger,
-                title: RelayLocalizer.select(lang, "Budget Circuit Tripped (\(vendor.shortBadge))", "预算熔断器已触发 (\(vendor.shortBadge))"),
-                detail: RelayLocalizer.select(
-                    lang,
-                    String(format: "Halted outbound API traffic on '%@' at $%.2f ceiling.", laneID, ceilingUSD),
-                    String(format: "已在 $%.2f 预算上限处熔断通道 '%@' 的外发 API 请求。", ceilingUSD, laneID)
-                ),
-                vendor: vendor,
-                shortcutHint: "⇧⌘K"
-            )
-        } else {
-            _ = post(
-                severity: .success,
-                title: RelayLocalizer.select(lang, "Budget Circuit Reset (\(vendor.shortBadge))", "预算熔断器已重置 (\(vendor.shortBadge))"),
-                detail: RelayLocalizer.select(
-                    lang,
-                    String(format: "Restored outbound API admission on '%@' (cap $%.2f).", laneID, ceilingUSD),
-                    String(format: "已恢复通道 '%@' 的外发 API 准入 (上限 $%.2f)。", laneID, ceilingUSD)
-                ),
-                vendor: vendor,
-                shortcutHint: "⇧⌘K"
             )
         }
     }

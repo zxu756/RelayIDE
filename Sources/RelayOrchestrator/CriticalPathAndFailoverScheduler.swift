@@ -4,7 +4,6 @@ import RelayModels
 import RelayPTYCore
 import RelayPluginSDK
 import RelaySemanticMerge
-import RelayWiretapProxy
 import RelayWorkspaceStore
 import RelayWorktreeGit
 
@@ -697,7 +696,7 @@ public extension MultiVendorDAGOrchestrator {
         for dag: RelayDAGSpec,
         durationOverridesSeconds: [String: Double] = [:]
     ) throws -> CPMAnalysisReport {
-        let spans = (try? database.allWiretapSpans()) ?? wiretapProxy.ledger.allSpans()
+        let spans = (try? database.allWiretapSpans()) ?? []
         return try CriticalPathMethodAnalyzer().analyze(
             tasks: dag.tasks,
             durationOverridesSeconds: durationOverridesSeconds,

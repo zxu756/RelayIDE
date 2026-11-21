@@ -3,7 +3,6 @@ import RelayModels
 import RelayPTYCore
 import RelayPluginSDK
 import RelaySemanticMerge
-import RelayWiretapProxy
 import RelayWorkspaceStore
 import RelayWorktreeGit
 
@@ -16,7 +15,6 @@ public final class MultiVendorDAGOrchestrator: @unchecked Sendable {
     public let gitEngine: GitWorktreePlumbingEngine
     public let ownershipMonitor: FSEventsOwnershipMonitor
     public let semanticMerger: ThreeWaySemanticASTMerger
-    public let wiretapProxy: LoopbackWiretapProxyServer
     public let pluginHost: RelayJavaScriptPluginHost
 
     public init(database: RelayProjectDatabase) {
@@ -27,7 +25,6 @@ public final class MultiVendorDAGOrchestrator: @unchecked Sendable {
         self.gitEngine = git
         self.ownershipMonitor = FSEventsOwnershipMonitor(gitEngine: git)
         self.semanticMerger = ThreeWaySemanticASTMerger()
-        self.wiretapProxy = LoopbackWiretapProxyServer()
         self.pluginHost = RelayJavaScriptPluginHost()
     }
 
@@ -78,7 +75,7 @@ public final class MultiVendorDAGOrchestrator: @unchecked Sendable {
         return waves
     }
 
-    /// Seeds a complete, deterministic multi-vendor workspace with real Git commits, PTY transcripts, 3-Way AST Merges, Wiretap telemetry, and Guardrail findings.
+    /// Seeds a complete, deterministic multi-vendor workspace with real Git commits, PTY transcripts, 3-Way AST Merges, and Guardrail findings.
     public func seedIndustrialDemoWorkspace(workspaceName: String = "PaymentsCore-Relay") throws {
         let demoRepoDir = database.bundleDirectoryURL.appendingPathComponent("demo-repo").path
         if !FileManager.default.fileExists(atPath: (demoRepoDir as NSString).appendingPathComponent(".git")) {
@@ -317,35 +314,14 @@ public final class MultiVendorDAGOrchestrator: @unchecked Sendable {
         )
         try database.saveMergeReport(conflictReport)
 
-        // 4. Record Realistic Wiretap Token & Cost Spans Across All 4 Vendors
-        let sampleUsages: [(String, AgentVendor, String, String, ExtractedUsagePayload, Double)] = [
-            ("lane-claude-core", .claudeCode, "api.anthropic.com", "stage-1-ledger", ExtractedUsagePayload(modelIdentifier: "claude-sonnet-4-20250514", inputTokens: 84_200, cachedReadTokens: 61_000, outputTokens: 6_480), 2840.0),
-            ("lane-codex-tax", .codex, "api.openai.com", "stage-1-tax", ExtractedUsagePayload(modelIdentifier: "gpt-5-codex", inputTokens: 68_400, cachedReadTokens: 44_000, outputTokens: 5_120, reasoningTokens: 3_200), 2190.0),
-            ("lane-agy-docs", .antigravity, "generativelanguage.googleapis.com", "stage-2-gateway", ExtractedUsagePayload(modelIdentifier: "gemini-2.5-pro", inputTokens: 96_500, cachedReadTokens: 72_000, outputTokens: 4_890, reasoningTokens: 2_100), 1920.0),
-            ("lane-vibe-tests", .mistralVibe, "api.mistral.ai", "stage-3-verify", ExtractedUsagePayload(modelIdentifier: "devstral-medium", inputTokens: 54_100, cachedReadTokens: 18_500, outputTokens: 7_310), 1460.0)
-        ]
-
-        for (laneID, vendor, host, taskID, usage, ms) in sampleUsages {
-            wiretapProxy.ledger.registerLane(laneID: laneID, vendor: vendor, ceilingUSD: 6.00)
-            let span = wiretapProxy.ledger.recordUsage(
-                laneID: laneID,
-                taskID: taskID,
-                vendor: vendor,
-                providerHost: host,
-                usage: usage,
-                durationMs: ms
-            )
-            try database.appendWiretapSpan(span)
-        }
-
-        // 5. Run Built-In JavaScriptCore Guardrail Plugins
+        // 4. Run Built-In JavaScriptCore Guardrail Plugins
         let pluginOutputs = try pluginHost.evaluateEnabledPlugins(
             modifiedFilesByLane: [
                 "lane-claude-core": ["Sources/Ledger/BillingEngine.swift": claudeBilling],
                 "lane-codex-tax": ["Sources/Ledger/BillingEngine.swift": codexBilling],
                 "lane-vibe-tests": ["Tests/LedgerTests/BillingPropertyTests.swift": "import Testing\n@Test func vatInvariant() {}"]
             ],
-            budgetAccounts: wiretapProxy.ledger.allAccounts()
+            budgetAccounts: []
         )
         let allFindings = pluginOutputs.flatMap(\.findings)
         try database.replaceGuardrailFindings(allFindings)

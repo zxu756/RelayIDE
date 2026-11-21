@@ -270,8 +270,9 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(palette.selectedIndex == initialIdx)
 
         // Category filter
-        palette.present(initialQuery: "", category: .wiretapAndBudget)
-        #expect(palette.rankedMatches.allSatisfy { $0.item.category == .wiretapAndBudget })
+        palette.present(initialQuery: "", category: .workspaceAndJournal)
+        #expect(!palette.rankedMatches.isEmpty)
+        #expect(palette.rankedMatches.allSatisfy { $0.item.category == .workspaceAndJournal })
 
         let executed = palette.executeSelected()
         #expect(executed != nil)
@@ -472,9 +473,9 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(controller.activeBottomDrawerTab == .ftsSearch)
     }
 
-    // MARK: - 13. `@MainActor RelayToastCenter` Max Capacity Eviction & Merge/Circuit Notifications
+    // MARK: - 13. `@MainActor RelayToastCenter` Max Capacity Eviction & Merge Notifications
 
-    @Test("RelayToastCenter enforces bounded queue capacity and posts semantic merge and circuit-breaker alerts")
+    @Test("RelayToastCenter enforces bounded queue capacity and posts semantic merge alerts")
     @MainActor
     func toastCenterCapacityEvictionAndStructuredFeedback() {
         let toasts = RelayToastCenter(maxVisibleCount: 3)
@@ -502,7 +503,7 @@ struct CLIMCPAndWorkbenchShellTests {
             wouldGitLineMergeConflict: true
         )
         toasts.postSemanticMergeFeedback(report)
-        toasts.postCircuitBreakerStatus(laneID: "lane-codex", vendor: .codex, isOpen: true, ceilingUSD: 5.0)
+        #expect(toasts.visibleToasts.count == 1)
         toasts.dismissAll()
     }
 
@@ -802,7 +803,6 @@ struct CLIMCPAndWorkbenchShellTests {
 
         let defaultSnapshot = RelayUserPreferencesSnapshot()
         #expect(defaultSnapshot.autoRunSemanticMergeOnHandoff == false)
-        #expect(defaultSnapshot.outboundDLPRedactByDefault == false)
     }
 
     // MARK: - 19. M0 Rework (C1): Acceptance Scripts Must Never Launch the Desktop GUI

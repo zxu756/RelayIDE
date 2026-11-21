@@ -334,7 +334,6 @@ public enum RelayShortcutContextScope: String, Sendable, Codable, Hashable, Case
     case dagStudioFocused       = "Relay DAG Pipeline"
     case mergeStudioFocused     = "3-Way Semantic Merge"
     case territoryMapFocused    = "2.5D Territory Map"
-    case wiretapStudioFocused   = "Wiretap & Budget"
     case guardrailStudioFocused = "Guardrail Plugins"
     case commandPaletteModal    = "Command Palette Modal"
 
@@ -346,7 +345,6 @@ public enum RelayShortcutContextScope: String, Sendable, Codable, Hashable, Case
         case .dagPipeline:      return .dagStudioFocused
         case .semanticMerge:    return .mergeStudioFocused
         case .territoryMap:     return .territoryMapFocused
-        case .wiretapBudget:    return .wiretapStudioFocused
         case .guardrailPlugins: return .guardrailStudioFocused
         }
     }
@@ -358,7 +356,6 @@ public enum RelayShortcutContextScope: String, Sendable, Codable, Hashable, Case
         case .dagStudioFocused:       return RelayLocalizer.select(language, "Relay DAG Pipeline", "DAG 接力编排")
         case .mergeStudioFocused:     return RelayLocalizer.select(language, "3-Way Semantic Merge", "三路语义合并")
         case .territoryMapFocused:    return RelayLocalizer.select(language, "2.5D Territory Map", "领地围栏地图")
-        case .wiretapStudioFocused:   return RelayLocalizer.select(language, "Wiretap & Budget", "Wiretap 预算网关")
         case .guardrailStudioFocused: return RelayLocalizer.select(language, "Guardrail Plugins", "JSC 编排插件")
         case .commandPaletteModal:    return RelayLocalizer.select(language, "Command Palette Modal", "命令面板弹窗")
         }
@@ -424,13 +421,11 @@ public struct RelayShortcutBinding: Sendable, Codable, Hashable, Identifiable {
         case "studio.dagPipeline": return "打开 DAG 接力编排与关键路径视图"
         case "studio.semanticMerge": return "打开三路 AST 语义合并工作台"
         case "studio.territoryMap": return "打开 2.5D 领地围栏地图"
-        case "studio.wiretapBudget": return "打开 Wiretap 预算网关与火焰图"
         case "studio.guardrailPlugins": return "打开 JSC 编排插件与演练场"
         case "workbench.commandPalette": return "打开或关闭模糊命令面板"
         case "workbench.toggleLanguage": return "切换界面语言 (中文 / EN)"
         case "pty.broadcastInput": return "向所选智能体终端广播输入"
         case "merge.runThreeWaySemantic": return "执行三路 AST 语义合并"
-        case "wiretap.tripOrResetCircuitBreaker": return "触发或重置通道预算熔断器"
         case "journal.undo": return "撤销上一步工作区变更"
         case "journal.redo": return "重做工作区变更"
         case "journal.createCheckpoint": return "创建命名工作区检查点"
@@ -971,20 +966,12 @@ public final class RelayKeybindingAndShortcutRegistry: ObservableObject {
             defaultChord: .single([.command], "4")
         ),
         RelayShortcutBinding(
-            commandID: "studio.wiretapBudget",
-            title: "Open Loopback Wiretap & Spend Flamechart",
-            subtitle: "Switch workbench canvas to SSE TTFT spans, DLP audit & circuit breakers",
-            category: .studioNavigation,
-            scope: .globalWorkbench,
-            defaultChord: .single([.command], "5")
-        ),
-        RelayShortcutBinding(
             commandID: "studio.guardrailPlugins",
             title: "Open JavaScriptCore Guardrail Plugins & Scratchpad",
             subtitle: "Switch workbench canvas to policy packs, micro-profiler & hook traces",
             category: .studioNavigation,
             scope: .globalWorkbench,
-            defaultChord: .single([.command], "6")
+            defaultChord: .single([.command], "5")
         ),
 
         // Core Workbench & Multi-Agent Operations
@@ -1019,14 +1006,6 @@ public final class RelayKeybindingAndShortcutRegistry: ObservableObject {
             category: .semanticMerge,
             scope: .globalWorkbench,
             defaultChord: .single([.command, .shift], "m")
-        ),
-        RelayShortcutBinding(
-            commandID: "wiretap.tripOrResetCircuitBreaker",
-            title: "Trip or Reset Lane Budget Circuit Breaker",
-            subtitle: "Toggle loopback HTTP 429 budget circuit breaker on selected vendor lane",
-            category: .wiretapAndBudget,
-            scope: .globalWorkbench,
-            defaultChord: .single([.command, .shift], "k")
         ),
 
         // Transactional Undo/Redo, Checkpoints, FTS5 Search & Chrome Docking
@@ -1073,7 +1052,7 @@ public final class RelayKeybindingAndShortcutRegistry: ObservableObject {
         RelayShortcutBinding(
             commandID: "workbench.toggleRightInspector",
             title: "Toggle Right Inspector Drawer",
-            subtitle: "Show or hide territory globs, AST symbols, DLP & JSC micro-profiler",
+            subtitle: "Show or hide territory globs, AST symbols & JSC micro-profiler",
             category: .studioNavigation,
             scope: .globalWorkbench,
             defaultChord: .single([.command, .option], "i")
@@ -1081,7 +1060,7 @@ public final class RelayKeybindingAndShortcutRegistry: ObservableObject {
         RelayShortcutBinding(
             commandID: "workbench.toggleBottomDrawer",
             title: "Toggle Bottom Telemetry & FTS5 Drawer",
-            subtitle: "Show or hide FTS5 search, verifier console & SSE wiretap feed",
+            subtitle: "Show or hide FTS5 search, verifier console & hook trace ring",
             category: .studioNavigation,
             scope: .globalWorkbench,
             defaultChord: .single([.command], "j")
@@ -1137,7 +1116,6 @@ public final class RelayWorkbenchCoordinator: ObservableObject {
     public let shortcutRegistry: RelayKeybindingAndShortcutRegistry
 
     public var onRunSemanticMergeRequested: (() -> Void)?
-    public var onToggleCircuitBreakerRequested: ((String) -> Void)?
     public var onBroadcastInputRequested: (() -> Void)?
     public var onUndoRequested: (() -> Void)?
     public var onRedoRequested: (() -> Void)?
@@ -1208,8 +1186,6 @@ public final class RelayWorkbenchCoordinator: ObservableObject {
             selectStudioPane(.semanticMerge)
         case "studio.territoryMap":
             selectStudioPane(.territoryMap)
-        case "studio.wiretapBudget":
-            selectStudioPane(.wiretapBudget)
         case "studio.guardrailPlugins":
             selectStudioPane(.guardrailPlugins)
         case "workbench.commandPalette":
@@ -1225,9 +1201,6 @@ public final class RelayWorkbenchCoordinator: ObservableObject {
         case "merge.runThreeWaySemantic":
             selectStudioPane(.semanticMerge)
             onRunSemanticMergeRequested?()
-        case "wiretap.tripOrResetCircuitBreaker":
-            selectStudioPane(.wiretapBudget)
-            onToggleCircuitBreakerRequested?(shellState.selectedLaneID)
         case "journal.undo":
             onUndoRequested?()
         case "journal.redo":

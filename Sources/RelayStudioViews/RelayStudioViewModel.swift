@@ -7,7 +7,6 @@ import RelayOrchestrator
 import RelayPTYCore
 import RelayPluginSDK
 import RelaySemanticMerge
-import RelayWiretapProxy
 import RelayWorkbenchShell
 import RelayWorkspaceStore
 import SwiftUI
@@ -546,7 +545,6 @@ public final class RelayStudioViewModel: ObservableObject {
     public private(set) var undoRedoController: RelayUndoRedoController
     public private(set) var ftsSearchStore: RelayFTS5SearchStore
     public private(set) var checkpointManager: RelayCheckpointJournalManager
-    public let dlpEngine: OutboundSecretDLPEngine
     public let jsScratchpadEvaluator: RelayJSScratchpadEvaluator
     public let xtermPalette: Xterm256ColorPalette
     public let scrollbackSearchEngine: TerminalScrollbackSearchEngine
@@ -612,14 +610,8 @@ public final class RelayStudioViewModel: ObservableObject {
     @Published public var showCrossLaneCouplingOnly: Bool = false
     @Published public var territoryVendorFilter: AgentVendor?
 
-    // Wiretap Flamechart, Budget Circuit Breaker & DLP Audit State
-    @Published public var wiretapSpanRecords: [WiretapSpanRecord] = []
-    @Published public var wiretapAPISpans: [WiretapAPISpan] = []
+    // Per-Lane Spend & Workspace Budget State
     @Published public var laneBudgetAccounts: [LaneBudgetAccount] = []
-    @Published public var flamechartTimeline: WiretapFlamechartTimeline
-    @Published public var costAnalytics: WorkspaceCostAnalyticsSnapshot
-    @Published public var dlpAuditEvents: [DLPAuditEvent] = []
-    @Published public var selectedWiretapSpanID: UUID?
     @Published public var globalBudgetCeilingUSD: Double = 0.0
 
     // JavaScriptCore Guardrail Plugins & Scratchpad State
@@ -670,19 +662,6 @@ public final class RelayStudioViewModel: ObservableObject {
                 ),
                 schedulesByLaneID: [:]
             )
-    }
-
-    private static func makeEmptyCostAnalytics() -> WorkspaceCostAnalyticsSnapshot {
-        WorkspaceCostAnalyticsSnapshot(
-            totalSpentUSD: 0,
-            globalCeilingUSD: 0,
-            totalCacheSavingsUSD: 0,
-            workspaceBurnRateUSDPerHour: 0,
-            projectedGlobalExhaustionSeconds: nil,
-            laneForecasts: [],
-            vendorBreakdowns: [],
-            anomalies: []
-        )
     }
 
     private static let defaultScratchpadTemplate = """
@@ -753,7 +732,6 @@ public final class RelayStudioViewModel: ObservableObject {
         let undoCtrl = RelayUndoRedoController(database: openedDatabase)
         let ftsStore = openedDatabase.makeFTS5SearchStore()
         let cpManager = RelayCheckpointJournalManager(database: openedDatabase)
-        let dlp = OutboundSecretDLPEngine()
         let jsEval = RelayJSScratchpadEvaluator()
 
         self.database = openedDatabase
@@ -767,7 +745,6 @@ public final class RelayStudioViewModel: ObservableObject {
         self.undoRedoController = undoCtrl
         self.ftsSearchStore = ftsStore
         self.checkpointManager = cpManager
-        self.dlpEngine = dlp
         self.jsScratchpadEvaluator = jsEval
         self.xtermPalette = Xterm256ColorPalette(theme: .relayBauhausDark)
         self.scrollbackSearchEngine = TerminalScrollbackSearchEngine(excerptContextRadius: 34)
@@ -778,8 +755,6 @@ public final class RelayStudioViewModel: ObservableObject {
         self.activePane = initialPane
         self.dagSpec = Self.makeEmptyDAGSpec()
         self.cpmSchedule = Self.makeEmptyCPMSchedule()
-        self.flamechartTimeline = WiretapFlamechartBuilder.buildTimeline(from: [])
-        self.costAnalytics = Self.makeEmptyCostAnalytics()
         self.policyPack = RelayGuardrailsPolicyPack.defaultIndustrialPack()
         self.scratchpadScriptSource = Self.defaultScratchpadTemplate
 
@@ -807,14 +782,8 @@ public final class RelayStudioViewModel: ObservableObject {
 
     private func hydrateRealWorkspaceState() {
         isDemoMode = false
-        dlpEngine.clearAuditEvents()
-        dlpAuditEvents = []
         pluginLatencyByID = [:]
-        wiretapSpanRecords = []
-        wiretapAPISpans = []
         laneBudgetAccounts = []
-        flamechartTimeline = WiretapFlamechartBuilder.buildTimeline(from: [])
-        costAnalytics = Self.makeEmptyCostAnalytics()
         globalBudgetCeilingUSD = 0.0
         gitCommits = []
         terminalSnapshotsByLane = [:]
@@ -858,7 +827,6 @@ public final class RelayStudioViewModel: ObservableObject {
 
     private func hydrateDemoCampaignState(seedIfEmpty: Bool) {
         isDemoMode = true
-        orchestrator.wiretapProxy.ledger.setGlobalCeilingUSD(18.0)
         let synth = RelayDemoWorkspaceSynthesizer()
         let campaign: SynthesizedFlagshipCampaign
         let existingLanes = (try? database.allLanes()) ?? []
@@ -919,12 +887,7 @@ public final class RelayStudioViewModel: ObservableObject {
         selectedIsometricModulePath = campaign.isometricTiles.first(where: \.hasMergeConflict)?.relativePath
             ?? "Sources/Auth/AuthSessionManager.swift"
 
-        wiretapSpanRecords = campaign.wiretapSpanRecords
-        wiretapAPISpans = campaign.wiretapSpans
         laneBudgetAccounts = campaign.laneBudgetAccounts
-        flamechartTimeline = campaign.flamechartTimeline
-        costAnalytics = campaign.costAnalytics
-        selectedWiretapSpanID = campaign.wiretapSpanRecords.last?.id
         globalBudgetCeilingUSD = campaign.dagSpec.globalBudgetCeilingUSD
 
         policyPack = campaign.policyPack
@@ -934,7 +897,6 @@ public final class RelayStudioViewModel: ObservableObject {
         scratchpadSubjectInput = "git reset --hard HEAD~1 && rm -rf Sources/Auth"
         ftsQueryText = "ZeroCopy passkey HKDF"
 
-        seedDeterministicDLPAuditLedger()
         recomputeCallSiteDiagnostics()
         seedDeterministicPluginLatencies()
         for entry in campaign.hookTraceEntries {
@@ -984,17 +946,11 @@ public final class RelayStudioViewModel: ObservableObject {
                 "Empty workspace · Desktop UI not connected to live runs yet (M5, does not launch agents; use 'RelayIDE run' in CLI)",
                 "空工作区 · 桌面界面尚未接入真实运行（排在 M5，界面不启动 agent；请在命令行用 RelayIDE run）"
             )
-        } else if isWiretapProxyRunning {
-            coordinator.shellState.statusBannerText = RelayLocalizer.select(
-                lang,
-                "\(lanes.count) lane(s) loaded · Loopback proxy active on port \(wiretapProxyPort)",
-                "已加载 \(lanes.count) 条通道 · 本地回环代理运行于端口 \(wiretapProxyPort)"
-            )
         } else {
             coordinator.shellState.statusBannerText = RelayLocalizer.select(
                 lang,
-                "\(lanes.count) lane(s) loaded · Loopback proxy not started (M4)",
-                "已加载 \(lanes.count) 条通道 · 本地回环代理未启动（排在 M4）"
+                "\(lanes.count) lane(s) loaded · Desktop UI not connected to live runs yet (M5; use 'RelayIDE run' in CLI)",
+                "已加载 \(lanes.count) 条通道 · 桌面界面尚未接入真实运行（排在 M5；请在命令行用 RelayIDE run）"
             )
         }
     }
@@ -1048,10 +1004,6 @@ public final class RelayStudioViewModel: ObservableObject {
             self?.selectPane(.semanticMerge)
         }
 
-        coordinator.onToggleCircuitBreakerRequested = { [weak self] laneID in
-            self?.toggleCircuitBreaker(forLane: laneID)
-        }
-
         coordinator.onUndoRequested = { [weak self] in
             self?.performUndo()
         }
@@ -1094,14 +1046,6 @@ public final class RelayStudioViewModel: ObservableObject {
 
     public var demoBadgeLabel: String {
         L("[DEMO] Synthetic Preview", "[演示数据] 合成预览")
-    }
-
-    public var isWiretapProxyRunning: Bool {
-        orchestrator.wiretapProxy.isRunning
-    }
-
-    public var wiretapProxyPort: UInt16 {
-        orchestrator.wiretapProxy.boundPort
     }
 
     public func setLanguage(_ newLanguage: RelayLanguage, postToast: Bool = false) {
@@ -1537,142 +1481,6 @@ public final class RelayStudioViewModel: ObservableObject {
             rightFiles: rightFiles
         )
         callSiteDiagnostics = detected
-    }
-
-    // MARK: - Wiretap USD Circuit Breaker & Outbound DLP Actions
-
-    public func toggleCircuitBreaker(forLane laneID: String) {
-        guard let idx = laneBudgetAccounts.firstIndex(where: { $0.laneID == laneID }) else { return }
-        let current = laneBudgetAccounts[idx]
-        let prevCeiling = current.ceilingUSD
-        let proxyLive = isWiretapProxyRunning
-
-        if current.circuitOpen {
-            let raisedCeiling = max(current.spentUSD + 1.50, current.ceilingUSD + 1.00)
-            laneBudgetAccounts[idx].ceilingUSD = raisedCeiling
-            laneBudgetAccounts[idx].circuitOpen = false
-            orchestrator.wiretapProxy.ledger.resetCircuit(forLane: laneID, newCeilingUSD: raisedCeiling)
-
-            let op = RelayJournalOperation.coreMutation(
-                .updateLaneBudget(laneID: laneID, previousCeilingUSD: prevCeiling, updatedCeilingUSD: raisedCeiling)
-            )
-            try? checkpointManager.executeJournaledOperation(
-                title: "Reset Circuit Breaker · \(laneID) ($\(String(format: "%.2f", raisedCeiling)))",
-                operation: op
-            )
-            let detailText = proxyLive
-                ? L(
-                    "Raised lane ceiling to \(RelayBauhausDesign.formatUSD(raisedCeiling)) on active loopback proxy (port \(wiretapProxyPort)).",
-                    "已在运行中的回环代理（端口 \(wiretapProxyPort)）将通道上限提升至 \(RelayBauhausDesign.formatUSD(raisedCeiling))。"
-                )
-                : L(
-                    "Raised in-memory lane ceiling to \(RelayBauhausDesign.formatUSD(raisedCeiling)); loopback proxy is not running (scheduled for M4).",
-                    "已将内存预算上限提升至 \(RelayBauhausDesign.formatUSD(raisedCeiling))；本地回环代理尚未启动（排在 M4）。"
-                )
-            coordinator.toastCenter.post(
-                severity: .success,
-                title: L("Circuit Breaker Reset: \(laneID)", "已恢复预算熔断器：\(laneID)"),
-                detail: detailText
-            )
-        } else {
-            let clampedCeiling = max(0.05, current.spentUSD - 0.01)
-            laneBudgetAccounts[idx].ceilingUSD = clampedCeiling
-            laneBudgetAccounts[idx].circuitOpen = true
-            orchestrator.wiretapProxy.ledger.registerLane(
-                laneID: laneID,
-                vendor: current.vendor,
-                ceilingUSD: clampedCeiling
-            )
-            _ = orchestrator.wiretapProxy.ledger.recordBlockedAttempt(
-                laneID: laneID,
-                vendor: current.vendor,
-                providerHost: "in-memory-ledger"
-            )
-
-            let op = RelayJournalOperation.coreMutation(
-                .updateLaneBudget(laneID: laneID, previousCeilingUSD: prevCeiling, updatedCeilingUSD: clampedCeiling)
-            )
-            try? checkpointManager.executeJournaledOperation(
-                title: "Trip Circuit Breaker · \(laneID)",
-                operation: op
-            )
-            let detailText = proxyLive
-                ? L(
-                    "Active loopback proxy on port \(wiretapProxyPort) will gate subsequent requests for \(laneID).",
-                    "运行于端口 \(wiretapProxyPort) 的回环代理将拦截 \(laneID) 的后续请求。"
-                )
-                : L(
-                    "Updated in-memory budget ceiling only; loopback proxy is not running (scheduled for M4).",
-                    "仅更新内存预算状态；本地回环代理尚未启动（排在 M4）。"
-                )
-            coordinator.toastCenter.post(
-                severity: .warning,
-                title: L("Circuit Breaker Tripped: \(laneID)", "已触发预算熔断器：\(laneID)"),
-                detail: detailText
-            )
-        }
-        refreshUndoCheckpointAndFTSState()
-    }
-
-    public func adjustLaneCeiling(laneID: String, deltaUSD: Double) {
-        guard let idx = laneBudgetAccounts.firstIndex(where: { $0.laneID == laneID }) else { return }
-        let prev = laneBudgetAccounts[idx].ceilingUSD
-        let updated = max(0.25, prev + deltaUSD)
-        laneBudgetAccounts[idx].ceilingUSD = updated
-        laneBudgetAccounts[idx].circuitOpen = laneBudgetAccounts[idx].spentUSD >= updated
-        orchestrator.wiretapProxy.ledger.resetCircuit(forLane: laneID, newCeilingUSD: updated)
-
-        let op = RelayJournalOperation.coreMutation(
-            .updateLaneBudget(laneID: laneID, previousCeilingUSD: prev, updatedCeilingUSD: updated)
-        )
-        try? checkpointManager.executeJournaledOperation(
-            title: "Adjust Ceiling · \(laneID) → \(RelayBauhausDesign.formatUSD(updated))",
-            operation: op
-        )
-        refreshUndoCheckpointAndFTSState()
-    }
-
-    private func seedDeterministicDLPAuditLedger() {
-        dlpEngine.clearAuditEvents()
-
-        let syntheticAnthropicSample = "sk-" + "ant-api03-" + "9f8e7d6c5b4a39281716151413121110abcdef9876543210"
-        let syntheticStripeSample = "sk_" + "live_" + "51N9xYzAbCdEfGhIjKlMnOpQrStUvWxYz123456"
-        let samplePayloads: [(laneID: String, vendor: AgentVendor, host: String, json: String)] = [
-            (
-                "lane-codex-auth",
-                .codex,
-                "api.openai.com",
-                #"{"model":"gpt-5-codex","messages":[{"role":"user","content":"Verify fallback key \#(syntheticAnthropicSample) before rotating HKDF epoch."}]}"#
-            ),
-            (
-                "lane-claude-quic",
-                .claudeCode,
-                "api.anthropic.com",
-                #"{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"Check staging DSN postgres://edge_admin:QuicPass99182736@db.internal.edgequic.io:5432/sessions in AuthSessionManager."}]}"#
-            ),
-            (
-                "lane-vibe-fuzz",
-                .mistralVibe,
-                "api.mistral.ai",
-                #"{"model":"devstral-medium","messages":[{"role":"user","content":"Reject live billing token \#(syntheticStripeSample) in fuzz corpus."}]}"#
-            ),
-            (
-                "lane-agy-gateway",
-                .antigravity,
-                "generativelanguage.googleapis.com",
-                #"{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"Generate RFC section 4 for zero-copy QPACK dynamic table synchronization."}]}"#
-            )
-        ]
-
-        for sample in samplePayloads {
-            _ = dlpEngine.inspectOutboundBody(
-                Data(sample.json.utf8),
-                laneID: sample.laneID,
-                vendor: sample.vendor,
-                providerHost: sample.host
-            )
-        }
-        dlpAuditEvents = dlpEngine.recentAuditEvents(limit: 20).reversed()
     }
 
     // MARK: - JavaScriptCore Guardrail Plugins & Live Scratchpad Actions
