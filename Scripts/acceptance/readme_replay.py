@@ -30,7 +30,7 @@ import sys
 import tempfile
 
 HEADLESS_SUBCOMMANDS = {
-    "init", "status", "lanes", "dag-waves", "semantic-merge", "audit-plugins", "export-html", "mcp",
+    "init", "status", "lanes", "dag-waves", "audit-plugins", "export-html", "mcp",
     "help", "--help", "-h", "version", "--version",
 }
 SHELL_OPERATORS = {"|", "||", "&&", ";", ">", ">>", "<", "2>", "2>&1", "&"}
