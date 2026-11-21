@@ -352,8 +352,7 @@ public struct RelayWorkerRecursionGuard: Sendable {
     /// Constructs a sanitized environment for a headless worker CLI (`claude`, `codex`, `vibe`, `agy`), stamping `RELAY_WORKER_ACTIVE=1`.
     public func buildWorkerEnvironment(
         inheritingFrom baseEnv: [String: String] = ProcessInfo.processInfo.environment,
-        stage: RelayKickoffStageContract,
-        wiretapProxyURL: String? = nil
+        stage: RelayKickoffStageContract
     ) -> [String: String] {
         var env = baseEnv
         // Strip conductor-only tokens so child agents cannot impersonate the orchestrator
@@ -371,9 +370,6 @@ public struct RelayWorkerRecursionGuard: Sendable {
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["CI"] = "1"
 
-        if let proxy = wiretapProxyURL, !proxy.isEmpty {
-            env["RELAY_WIRETAP_PROXY"] = proxy
-        }
         return env
     }
 }

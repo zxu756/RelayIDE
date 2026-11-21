@@ -705,8 +705,7 @@ struct WorktreeGitDiffAndHandoffTests {
                 "PATH": "/usr/bin:/bin",
                 "RELAY_CONDUCTOR_CONTROL_TOKEN": "secret-conductor-token",
             ],
-            stage: stage,
-            wiretapProxyURL: "http://127.0.0.1:19080"
+            stage: stage
         )
         #expect(workerEnv[RelayWorkerRecursionGuard.workerActiveEnvKey] == "1")
         #expect(workerEnv[RelayWorkerRecursionGuard.relayStageIDEnvKey] == "stage-codex")
