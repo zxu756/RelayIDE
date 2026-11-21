@@ -44,7 +44,7 @@ usage() {
     cat <<'EOF' >&2
 Usage:
   Scripts/test.sh scope <ModuleOrFilter...>
-  Scripts/test.sh milestone <0|1|2|3> [--record]
+  Scripts/test.sh milestone <0|1|2|3|4> [--record]
   Scripts/test.sh release [--record]
 
 Acceptance output goes to a temporary directory. Only with --record are reports/*.txt rewritten.
@@ -259,6 +259,31 @@ run_milestone() {
             fi
             echo "==> [milestone 3] git status --short after the run: ${tree_after:-(no output)}"
             ;;
+        4|m4|M4)
+            local tree_before
+            tree_before="$(git status --porcelain)"
+
+            echo "==> [milestone 4] Running M4 scoped unit test suites..."
+            run_scope RelayWorktreeGit RelayWorkspaceStore RelayOrchestrator RelayCLIAndMCP RelayStudioViews
+
+            echo "==> [milestone 4] Building RelayIDE debug executable..."
+            swift build ${SWIFT_JOBS_ARGS[@]+"${SWIFT_JOBS_ARGS[@]}"} --product RelayIDE
+
+            run_acceptance_script m4-budget.sh
+
+            if [[ "${#RECORD_ARGS[@]}" -eq 0 ]]; then
+                local tree_after
+                tree_after="$(git status --porcelain)"
+                if [[ "${tree_before}" != "${tree_after}" ]]; then
+                    echo "error: 'Scripts/test.sh milestone 4' changed the working tree:" >&2
+                    diff <(printf '%s\n' "${tree_before}") <(printf '%s\n' "${tree_after}") >&2 || true
+                    exit 1
+                fi
+                echo "==> [milestone 4] git status --short after the run: ${tree_after:-(no output)}"
+            else
+                echo "==> [milestone 4] --record: reports/*.txt were rewritten"
+            fi
+            ;;
         *)
             echo "error: milestone '${m}' acceptance suite is not implemented yet." >&2
             exit 2
@@ -286,6 +311,8 @@ run_release() {
     else
         echo "==> [release] M3 full merge corpus evaluation: SKIPPED (RELAY_MERGE_CORPUS_DIR unset)"
     fi
+
+    run_acceptance_script m4-budget.sh
 
     if [[ "${RELAY_REAL_AGENTS:-0}" == "1" ]]; then
         if [[ -x "${ROOT_DIR}/Scripts/acceptance/real-agents.sh" ]]; then
