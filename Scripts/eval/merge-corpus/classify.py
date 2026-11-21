@@ -735,6 +735,8 @@ def classify_fixed_cases(
     cli_path=None,
     cli_tsv=None,
     engine_tsv=None,
+    mergiraf_tsv=None,
+    skip_cli=False,
     env=None,
     max_workers=4,
 ):
@@ -778,8 +780,9 @@ def classify_fixed_cases(
     if needed_langs:
         parsers.describe_parsers(sorted(needed_langs), env=eff_env)
 
-    cli_records = load_tool_tsv(cli_tsv) if cli_tsv else None
+    cli_records = load_tool_tsv(cli_tsv) if (cli_tsv and not skip_cli) else None
     eng_records = load_tool_tsv(engine_tsv) if engine_tsv else None
+    mgf_records = load_tool_tsv(mergiraf_tsv) if mergiraf_tsv else None
     resolved_cli = os.path.abspath(cli_path or os.path.join(REPO_ROOT, "Scripts/acceptance/relay-cli.sh"))
 
     scratch_dir = tempfile.mkdtemp(prefix="relay-classify-fixed.")
@@ -821,49 +824,59 @@ def classify_fixed_cases(
                 item["git_parse_slot"] = len(batch_parse_items)
                 batch_parse_items.append((gp, ext))
 
-            # Run or load published CLI (`semantic-merge`)
-            if cli_records is not None:
-                crec = _lookup_fixed_record(cli_records, cid, item["short_name"])
-                if crec is None:
-                    raise ValueError("--cli-tsv is missing fixed case %r" % cid)
-                cli_rc = crec["exit_code"]
-                cli_claimed = crec["claimed_clean"]
-                cli_out = _read_bytes(crec["output_path"]) if (cli_claimed == "1" and crec["output_path"] and os.path.isfile(crec["output_path"])) else (b"" if cli_claimed != "1" else None)
-                cli_strategy = crec["strategy"] or ("-" if cli_rc in (3, 4) else ("none" if cli_rc == 1 else "line-level"))
-                cli_reason = crec["reason"] if cli_rc in (3, 4) else ""
-                if cli_rc in (3, 4) and not cli_reason:
-                    cli_reason = "exit=%d" % cli_rc
+            # Run or load published CLI (`semantic-merge`), unless skipped after M3 removal
+            if skip_cli:
+                item["cli_rc"] = None
+                item["cli_claimed"] = "skip"
+                item["cli_out"] = b""
+                item["cli_strategy"] = ""
+                item["cli_reason"] = ""
+                item["cli_utf8_ok"] = False
+                item["cli_markers"] = False
+                item["cli_parse_slot"] = None
             else:
-                cli_env = dict(eff_env)
-                cli_env["RELAY_CLI_HOME"] = cli_home
-                proc = subprocess.run(
-                    [resolved_cli, "semantic-merge", item["p_base"], item["p_left"], item["p_right"], "--lang", "en"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=cli_env,
-                )
-                cli_rc = proc.returncode
-                cli_claimed = "1" if cli_rc == 0 else "0"
-                cli_out = proc.stdout
-                cli_strategy = _extract_cli_strategy(cli_rc, proc.stderr)
-                cli_reason = extract_cli_rejection_reason(cli_rc, proc.stderr) if cli_rc in (3, 4) else ""
+                if cli_records is not None:
+                    crec = _lookup_fixed_record(cli_records, cid, item["short_name"])
+                    if crec is None:
+                        raise ValueError("--cli-tsv is missing fixed case %r" % cid)
+                    cli_rc = crec["exit_code"]
+                    cli_claimed = crec["claimed_clean"]
+                    cli_out = _read_bytes(crec["output_path"]) if (cli_claimed == "1" and crec["output_path"] and os.path.isfile(crec["output_path"])) else (b"" if cli_claimed != "1" else None)
+                    cli_strategy = crec["strategy"] or ("-" if cli_rc in (3, 4) else ("none" if cli_rc == 1 else "line-level"))
+                    cli_reason = crec["reason"] if cli_rc in (3, 4) else ""
+                    if cli_rc in (3, 4) and not cli_reason:
+                        cli_reason = "exit=%d" % cli_rc
+                else:
+                    cli_env = dict(eff_env)
+                    cli_env["RELAY_CLI_HOME"] = cli_home
+                    proc = subprocess.run(
+                        [resolved_cli, "semantic-merge", item["p_base"], item["p_left"], item["p_right"], "--lang", "en"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        env=cli_env,
+                    )
+                    cli_rc = proc.returncode
+                    cli_claimed = "1" if cli_rc == 0 else "0"
+                    cli_out = proc.stdout
+                    cli_strategy = _extract_cli_strategy(cli_rc, proc.stderr)
+                    cli_reason = extract_cli_rejection_reason(cli_rc, proc.stderr) if cli_rc in (3, 4) else ""
 
-            item["cli_rc"] = cli_rc
-            item["cli_claimed"] = cli_claimed
-            item["cli_out"] = cli_out
-            item["cli_strategy"] = cli_strategy
-            item["cli_reason"] = cli_reason
-            item["cli_utf8_ok"] = _is_valid_utf8(cli_out) if (cli_claimed == "1" and cli_out is not None) else False
-            item["cli_markers"] = (
-                has_conflict_markers(cli_out) if (cli_claimed == "1" and item["cli_utf8_ok"]) else False
-            )
-            item["cli_parse_slot"] = None
-            if cli_claimed == "1" and item["cli_utf8_ok"] and not item["cli_markers"] and has_parser:
-                cp = os.path.join(out_store, "cli_%d%s" % (idx, ext))
-                with open(cp, "wb") as fh:
-                    fh.write(cli_out)
-                item["cli_parse_slot"] = len(batch_parse_items)
-                batch_parse_items.append((cp, ext))
+                item["cli_rc"] = cli_rc
+                item["cli_claimed"] = cli_claimed
+                item["cli_out"] = cli_out
+                item["cli_strategy"] = cli_strategy
+                item["cli_reason"] = cli_reason
+                item["cli_utf8_ok"] = _is_valid_utf8(cli_out) if (cli_claimed == "1" and cli_out is not None) else False
+                item["cli_markers"] = (
+                    has_conflict_markers(cli_out) if (cli_claimed == "1" and item["cli_utf8_ok"]) else False
+                )
+                item["cli_parse_slot"] = None
+                if cli_claimed == "1" and item["cli_utf8_ok"] and not item["cli_markers"] and has_parser:
+                    cp = os.path.join(out_store, "cli_%d%s" % (idx, ext))
+                    with open(cp, "wb") as fh:
+                        fh.write(cli_out)
+                    item["cli_parse_slot"] = len(batch_parse_items)
+                    batch_parse_items.append((cp, ext))
 
             # Optional declaration-level engine TSV (Stage 4)
             if eng_records is not None:
@@ -892,6 +905,33 @@ def classify_fixed_cases(
                     item["eng_parse_slot"] = len(batch_parse_items)
                     batch_parse_items.append((ep, ext))
 
+            # Optional mergiraf TSV (Stage 4 / Stage 7)
+            if mgf_records is not None:
+                mrec = _lookup_fixed_record(mgf_records, cid, item["short_name"])
+                if mrec is None:
+                    raise ValueError("--mergiraf-tsv is missing fixed case %r" % cid)
+                mgf_rc = mrec["exit_code"]
+                mgf_claimed = mrec["claimed_clean"]
+                mgf_out = (
+                    _read_bytes(mrec["output_path"])
+                    if (mgf_claimed == "1" and mrec["output_path"] and os.path.isfile(mrec["output_path"]))
+                    else None
+                )
+                item["mgf_rc"] = mgf_rc
+                item["mgf_claimed"] = mgf_claimed
+                item["mgf_out"] = mgf_out
+                item["mgf_utf8_ok"] = _is_valid_utf8(mgf_out) if (mgf_claimed == "1" and mgf_out is not None) else False
+                item["mgf_markers"] = (
+                    has_conflict_markers(mgf_out) if (mgf_claimed == "1" and item["mgf_utf8_ok"]) else False
+                )
+                item["mgf_parse_slot"] = None
+                if mgf_claimed == "1" and item["mgf_utf8_ok"] and not item["mgf_markers"] and has_parser:
+                    mp = os.path.join(out_store, "mgf_%d%s" % (idx, ext))
+                    with open(mp, "wb") as fh:
+                        fh.write(mgf_out)
+                    item["mgf_parse_slot"] = len(batch_parse_items)
+                    batch_parse_items.append((mp, ext))
+
         batch_verdicts = (
             run_fixed_parsers(batch_parse_items, env=eff_env, max_workers=max_workers) if batch_parse_items else []
         )
@@ -900,10 +940,13 @@ def classify_fixed_cases(
         rejected_rows = []
         summary = {
             "git": Counter(),
-            "cli": Counter(),
         }
+        if not skip_cli:
+            summary["cli"] = Counter()
         if eng_records is not None:
             summary["engine"] = Counter()
+        if mgf_records is not None:
+            summary["mergiraf"] = Counter()
 
         for item in discovered:
             has_parser = item["lang"] is not None
@@ -928,36 +971,45 @@ def classify_fixed_cases(
             if git_ws:
                 summary["git"]["clean_different_ws_equal"] += 1
 
-            cli_parses = (
-                batch_verdicts[item["cli_parse_slot"]]
-                if item["cli_parse_slot"] is not None
-                else (None if not has_parser else False)
-            )
-            cli_cat, cli_ws = _classify_one(
-                "cli",
-                item["cli_rc"],
-                item["cli_claimed"],
-                item["cli_out"],
-                item["cli_utf8_ok"],
-                item["cli_markers"],
-                cli_parses,
-                ref_b,
-            )
-            summary["cli"][cli_cat] += 1
-            if cli_ws:
-                summary["cli"]["clean_different_ws_equal"] += 1
-            if cli_cat == "rejected":
-                rejected_rows.append(
-                    {
-                        "case_id": item["case_id"],
-                        "kind": "fixed",
-                        "language": item["lang"] or item["ext"].lstrip("."),
-                        "tool": "cli",
-                        "exit_code": item["cli_rc"],
-                        "git_parses": ("1" if git_parses else "0") if git_parses is not None else "-",
-                        "reason": item["cli_reason"],
-                    }
+            if skip_cli:
+                cli_cat = ""
+                cli_exit_str = ""
+                cli_strategy_str = ""
+                cli_reason_str = ""
+            else:
+                cli_parses = (
+                    batch_verdicts[item["cli_parse_slot"]]
+                    if item["cli_parse_slot"] is not None
+                    else (None if not has_parser else False)
                 )
+                cli_cat, cli_ws = _classify_one(
+                    "cli",
+                    item["cli_rc"],
+                    item["cli_claimed"],
+                    item["cli_out"],
+                    item["cli_utf8_ok"],
+                    item["cli_markers"],
+                    cli_parses,
+                    ref_b,
+                )
+                summary["cli"][cli_cat] += 1
+                if cli_ws:
+                    summary["cli"]["clean_different_ws_equal"] += 1
+                if cli_cat == "rejected":
+                    rejected_rows.append(
+                        {
+                            "case_id": item["case_id"],
+                            "kind": "fixed",
+                            "language": item["lang"] or item["ext"].lstrip("."),
+                            "tool": "cli",
+                            "exit_code": item["cli_rc"],
+                            "git_parses": ("1" if git_parses else "0") if git_parses is not None else "-",
+                            "reason": item["cli_reason"],
+                        }
+                    )
+                cli_exit_str = str(item["cli_rc"])
+                cli_strategy_str = item["cli_strategy"]
+                cli_reason_str = item["cli_reason"] if cli_cat == "rejected" else ""
 
             eng_cat = ""
             if eng_records is not None:
@@ -980,16 +1032,39 @@ def classify_fixed_cases(
                 if eng_ws:
                     summary["engine"]["clean_different_ws_equal"] += 1
 
+            if mgf_records is not None:
+                if item["mgf_claimed"] == "skip":
+                    summary["mergiraf"]["skipped"] += 1
+                else:
+                    mgf_parses = (
+                        batch_verdicts[item["mgf_parse_slot"]]
+                        if item["mgf_parse_slot"] is not None
+                        else (None if not has_parser else False)
+                    )
+                    mgf_cat, mgf_ws = _classify_one(
+                        "mergiraf",
+                        item["mgf_rc"],
+                        item["mgf_claimed"],
+                        item["mgf_out"],
+                        item["mgf_utf8_ok"],
+                        item["mgf_markers"],
+                        mgf_parses,
+                        ref_b,
+                    )
+                    summary["mergiraf"][mgf_cat] += 1
+                    if mgf_ws:
+                        summary["mergiraf"]["clean_different_ws_equal"] += 1
+
             out_rows.append(
                 {
                     "case_id": item["case_id"],
                     "ext": item["ext"],
                     "reference": item["reference_kind"],
                     "git": git_cat,
-                    "cli_exit": str(item["cli_rc"]),
-                    "cli_strategy": item["cli_strategy"],
+                    "cli_exit": cli_exit_str,
+                    "cli_strategy": cli_strategy_str,
                     "cli": cli_cat,
-                    "cli_reason": item["cli_reason"] if cli_cat == "rejected" else "",
+                    "cli_reason": cli_reason_str,
                     "engine": eng_cat,
                 }
             )
@@ -1014,7 +1089,7 @@ def _write_tsv(path, fieldnames, rows):
             writer.writerow(r)
 
 
-def _check_classified_tsv(expected_path, actual_rows, has_engine_tsv):
+def _check_classified_tsv(expected_path, actual_rows, has_engine_tsv, skip_cli=False):
     with open(expected_path, encoding="utf-8") as fh:
         expected_rows = list(csv.DictReader(fh, delimiter="\t"))
 
@@ -1027,6 +1102,7 @@ def _check_classified_tsv(expected_path, actual_rows, has_engine_tsv):
 
     exp_by_id = {r["case_id"]: r for r in expected_rows}
     act_by_id = {r["case_id"]: r for r in actual_rows}
+    cli_cols = {"cli_exit", "cli_strategy", "cli", "cli_reason"}
 
     for cid in sorted(set(exp_by_id) | set(act_by_id)):
         if cid not in exp_by_id:
@@ -1038,6 +1114,8 @@ def _check_classified_tsv(expected_path, actual_rows, has_engine_tsv):
         er = exp_by_id[cid]
         ar = act_by_id[cid]
         for col in FIXED_CLASSIFIED_FIELDS:
+            if skip_cli and col in cli_cols:
+                continue
             if col == "engine" and not has_engine_tsv and er.get("engine", "") != "":
                 problems.append(
                     "%s: %s has engine=%r but --engine-tsv was not provided" % (cid, expected_path, er.get("engine"))
@@ -1149,7 +1227,9 @@ def main(argv=None):
         help="path to Scripts/acceptance/relay-cli.sh",
     )
     ap.add_argument("--cli-tsv", default=None, help="optional pre-recorded CLI result TSV for fixed cases")
+    ap.add_argument("--skip-cli", action="store_true", help="skip published CLI column on fixed cases (post-M3 removal)")
     ap.add_argument("--engine-tsv", default=None, help="optional declaration-level engine TSV for fixed cases (Stage 4)")
+    ap.add_argument("--mergiraf-tsv", default=None, help="optional mergiraf TSV for fixed cases")
     ap.add_argument("--write-classified", default=None, help="write CLASSIFIED.tsv for fixed cases")
     ap.add_argument("--check-classified", default=None, help="verify fixed-case results match existing CLASSIFIED.tsv")
 
@@ -1163,6 +1243,8 @@ def main(argv=None):
                 cli_path=args.cli,
                 cli_tsv=args.cli_tsv,
                 engine_tsv=args.engine_tsv,
+                mergiraf_tsv=args.mergiraf_tsv,
+                skip_cli=args.skip_cli,
                 max_workers=args.workers,
             )
             if args.write_classified:
@@ -1171,7 +1253,12 @@ def main(argv=None):
                 _write_tsv(args.rejected_out, REJECTED_FIELDS, res["rejected_rows"])
             _print_fixed_report(res)
             if args.check_classified:
-                problems = _check_classified_tsv(args.check_classified, res["rows"], bool(args.engine_tsv))
+                problems = _check_classified_tsv(
+                    args.check_classified,
+                    res["rows"],
+                    bool(args.engine_tsv),
+                    skip_cli=args.skip_cli,
+                )
                 if problems:
                     for p in problems:
                         sys.stdout.write("FAIL: %s\n" % p)

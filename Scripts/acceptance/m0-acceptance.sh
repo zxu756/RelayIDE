@@ -151,10 +151,12 @@ PY
     VER_ZH="$("${RELAY_CLI}" version --lang zh)"
     echo "version (--lang en): ${VER_EN}"
     echo "version (--lang zh): ${VER_ZH}"
-    [[ "${HELP_EN}" == *"EXPERIMENTAL 3-way merge anchored on git merge-file"* ]] || fail_row "Row 2: EN --help does not describe semantic-merge as experimental and git-anchored"
-    [[ "${HELP_EN}" == *"known to corrupt Python and Swift output, so its text is never printed"* ]] || fail_row "Row 2: EN --help does not state the declaration engine's known corruption"
-    [[ "${HELP_ZH}" == *"【实验性】以 git merge-file 为准的三路合并"* ]] || fail_row "Row 2: ZH --help does not describe semantic-merge as experimental and git-anchored"
-    [[ "${HELP_ZH}" == *"已知会损坏 Python 和 Swift 的输出，所以它的文本从不输出"* ]] || fail_row "Row 2: ZH --help does not state the declaration engine's known corruption"
+    [[ "${HELP_EN}" != *"semantic-merge"* ]] || fail_row "Row 2: EN --help still lists removed semantic-merge"
+    [[ "${HELP_EN}" != *"relay_semantic_merge"* ]] || fail_row "Row 2: EN --help still lists removed relay_semantic_merge"
+    [[ "${HELP_EN}" == *"1 tool: relay_check_ownership"* ]] || fail_row "Row 2: EN --help does not list 1 MCP tool (relay_check_ownership)"
+    [[ "${HELP_ZH}" != *"semantic-merge"* ]] || fail_row "Row 2: ZH --help still lists removed semantic-merge"
+    [[ "${HELP_ZH}" != *"relay_semantic_merge"* ]] || fail_row "Row 2: ZH --help still lists removed relay_semantic_merge"
+    [[ "${HELP_ZH}" == *"1 个工具：relay_check_ownership"* ]] || fail_row "Row 2: ZH --help does not list 1 MCP tool (relay_check_ownership)"
 
     for lang in en zh; do
         EMPTY_PROJ="${WORK_TMP}/clean-empty-${lang}.relayproj"
@@ -214,135 +216,112 @@ PY
     pass_row "Row 3: Nonexistent --project exits non-zero (1) without creating directory across all 6 project subcommands (EN+ZH)"
 
     # ------------------------------------------------------------------
-    # Row 4: semantic-merge never exits 0 with a damaged result.
-    #   The original row asked for a non-zero exit on 09-py-triplequote because the old engine printed broken
-    #   Python for it. git merges that case cleanly; the command now prints git's text, which is valid Python,
-    #   so exit 0 is correct there. What the row protects ("no exit 0 with output that fails py_compile") is
-    #   checked on every case, together with the rework rule: exit 0 means no added line lost and no untouched
-    #   line altered.
+    # Row 4: `semantic-merge` CLI subcommand has been removed per M3 decision (2026-11-21) and exits 2 as unknown subcommand.
     # ------------------------------------------------------------------
     echo ""
-    echo "--- Row 4: semantic-merge on 09-py-triplequote + every case in Fixtures/merge-cases (EN + ZH) ---"
+    echo "--- Row 4: removed semantic-merge exits 2 with empty stdout across Fixtures/merge-cases & syntax-gate-cases (EN + ZH) ---"
     CASE09_DIR="${MERGE_CASES}/09-py-triplequote"
-    reference_git_merge "${CASE09_DIR}/base.py" "${CASE09_DIR}/left.py" "${CASE09_DIR}/right.py" >"${WORK_TMP}/case09.git" \
-        || fail_row "Row 4: git merge-file does not merge 09-py-triplequote cleanly"
-    for lang in en zh; do
-        OUT_STDOUT="${WORK_TMP}/case09-${lang}.py"
-        OUT_STDERR="${WORK_TMP}/case09-${lang}.stderr"
-        set +e
-        "${RELAY_CLI}" semantic-merge "${CASE09_DIR}/base.py" "${CASE09_DIR}/left.py" "${CASE09_DIR}/right.py" --lang "${lang}" >"${OUT_STDOUT}" 2>"${OUT_STDERR}"
-        RC=$?
-        set -e
-        echo "09-py-triplequote (--lang ${lang}): exit=${RC}, stdout_bytes=$(wc -c < "${OUT_STDOUT}" | tr -d ' '), stderr='$(tr '\n' ' ' < "${OUT_STDERR}")'"
-        [[ "${RC}" -eq 0 ]] || fail_row "Row 4: expected exit 0 on 09-py-triplequote (${lang}), got ${RC}"
-        cmp -s "${OUT_STDOUT}" "${WORK_TMP}/case09.git" || fail_row "Row 4: 09-py-triplequote output (${lang}) is not byte-identical to git merge-file"
-        PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m py_compile "${OUT_STDOUT}" || fail_row "Row 4: 09-py-triplequote output (${lang}) fails py_compile"
-    done
-    echo "09-py-triplequote: output is byte-identical to 'git merge-file -p' and passes py_compile (EN+ZH)"
-
-    echo ""
-    echo "Independent check of all cases (Scripts/acceptance/merge_cases_check.py, --lang en):"
-    /usr/bin/python3 "${ROOT_DIR}/Scripts/acceptance/merge_cases_check.py" --cli "${RELAY_CLI}" --cases "${MERGE_CASES}" --lang en \
-        || fail_row "Row 4: merge-case check failed (--lang en)"
-    echo ""
-    echo "Same check with --lang zh (summary lines):"
-    /usr/bin/python3 "${ROOT_DIR}/Scripts/acceptance/merge_cases_check.py" --cli "${RELAY_CLI}" --cases "${MERGE_CASES}" --lang zh >"${WORK_TMP}/merge-zh.txt" \
-        || { cat "${WORK_TMP}/merge-zh.txt"; fail_row "Row 4: merge-case check failed (--lang zh)"; }
-    tail -n 3 "${WORK_TMP}/merge-zh.txt"
-
-    echo ""
-    echo "Syntax gate (Fixtures/syntax-gate-cases: each side parses, git merges cleanly, the merged text does not parse):"
-    for lang in en zh; do
-        /usr/bin/python3 "${ROOT_DIR}/Scripts/acceptance/merge_cases_check.py" --cli "${RELAY_CLI}" --cases "${SYNTAX_CASES}" --lang "${lang}" --expect-all-exit 3 >"${WORK_TMP}/syntax-${lang}.txt" \
-            || { cat "${WORK_TMP}/syntax-${lang}.txt"; fail_row "Row 4: syntax-gate check failed (--lang ${lang})"; }
-    done
-    cat "${WORK_TMP}/syntax-en.txt"
-    tail -n 1 "${WORK_TMP}/syntax-zh.txt"
-
-    echo ""
-    echo "git not available (child PATH is an empty directory):"
+    CASE12_DIR="${MERGE_CASES}/12-swift-true-conflict"
     mkdir -p "${WORK_TMP}/empty-path"
     for lang in en zh; do
+        EXPECTED_UNKNOWN_MSG="Unknown subcommand 'semantic-merge'"
+        if [[ "${lang}" == "zh" ]]; then
+            EXPECTED_UNKNOWN_MSG="未知子命令 'semantic-merge'"
+        fi
+
+        for tag_case in "case09:${CASE09_DIR}/base.py:${CASE09_DIR}/left.py:${CASE09_DIR}/right.py" "case12:${CASE12_DIR}/base.swift:${CASE12_DIR}/left.swift:${CASE12_DIR}/right.swift"; do
+            IFS=':' read -r tag b_arg l_arg r_arg <<<"${tag_case}"
+            OUT_STDOUT="${WORK_TMP}/${tag}-${lang}.stdout"
+            OUT_STDERR="${WORK_TMP}/${tag}-${lang}.stderr"
+            set +e
+            "${RELAY_CLI}" semantic-merge "${b_arg}" "${l_arg}" "${r_arg}" --lang "${lang}" >"${OUT_STDOUT}" 2>"${OUT_STDERR}"
+            RC=$?
+            set -e
+            echo "${tag} semantic-merge (--lang ${lang}): exit=${RC}, stdout_bytes=$(wc -c < "${OUT_STDOUT}" | tr -d ' '), stderr='$(tr '\n' ' ' < "${OUT_STDERR}")'"
+            [[ "${RC}" -eq 2 ]] || fail_row "Row 4: expected exit 2 on removed semantic-merge (${tag}, ${lang}), got ${RC}"
+            [[ ! -s "${OUT_STDOUT}" ]] || fail_row "Row 4: expected empty stdout on removed semantic-merge (${tag}, ${lang})"
+            grep -qF "${EXPECTED_UNKNOWN_MSG}" "${OUT_STDERR}" || fail_row "Row 4: stderr missing '${EXPECTED_UNKNOWN_MSG}' (${tag}, ${lang})"
+        done
+
         set +e
         RELAY_CLI_CHILD_PATH="${WORK_TMP}/empty-path" "${RELAY_CLI}" semantic-merge "${CASE09_DIR}/base.py" "${CASE09_DIR}/left.py" "${CASE09_DIR}/right.py" --lang "${lang}" >"${WORK_TMP}/nogit-${lang}.stdout" 2>"${WORK_TMP}/nogit-${lang}.stderr"
-        RC=$?
+        RC_NOGIT=$?
         set -e
-        echo "no git (--lang ${lang}): exit=${RC}, stdout_bytes=$(wc -c < "${WORK_TMP}/nogit-${lang}.stdout" | tr -d ' '), stderr='$(tr '\n' ' ' < "${WORK_TMP}/nogit-${lang}.stderr")'"
-        [[ "${RC}" -eq 4 ]] || fail_row "Row 4: expected exit 4 without git (${lang}), got ${RC}"
-        [[ ! -s "${WORK_TMP}/nogit-${lang}.stdout" ]] || fail_row "Row 4: output printed although git is unavailable (${lang})"
+        [[ "${RC_NOGIT}" -eq 2 ]] || fail_row "Row 4: expected exit 2 without git on removed semantic-merge (${lang}), got ${RC_NOGIT}"
+        [[ ! -s "${WORK_TMP}/nogit-${lang}.stdout" ]] || fail_row "Row 4: expected empty stdout without git (${lang})"
     done
-    pass_row "Row 4: no case exits 0 with lost, altered or unparsable content; 09-py-triplequote equals git merge-file; unparsable clean merges exit 3 with empty stdout; without git the command exits 4 (EN+ZH)"
+
+    echo ""
+    echo "Independent removal check across all 40 cases (Scripts/acceptance/merge_cases_check.py, --lang en & zh):"
+    /usr/bin/python3 "${ROOT_DIR}/Scripts/acceptance/merge_cases_check.py" --cli "${RELAY_CLI}" --cases "${MERGE_CASES}" --lang en >"${WORK_TMP}/merge-en.txt" \
+        || { cat "${WORK_TMP}/merge-en.txt"; fail_row "Row 4: merge-case removal check failed (--lang en)"; }
+    tail -n 3 "${WORK_TMP}/merge-en.txt"
+    /usr/bin/python3 "${ROOT_DIR}/Scripts/acceptance/merge_cases_check.py" --cli "${RELAY_CLI}" --cases "${MERGE_CASES}" --lang zh >"${WORK_TMP}/merge-zh.txt" \
+        || { cat "${WORK_TMP}/merge-zh.txt"; fail_row "Row 4: merge-case removal check failed (--lang zh)"; }
+    tail -n 3 "${WORK_TMP}/merge-zh.txt"
+
+    for lang in en zh; do
+        /usr/bin/python3 "${ROOT_DIR}/Scripts/acceptance/merge_cases_check.py" --cli "${RELAY_CLI}" --cases "${SYNTAX_CASES}" --lang "${lang}" >"${WORK_TMP}/syntax-${lang}.txt" \
+            || { cat "${WORK_TMP}/syntax-${lang}.txt"; fail_row "Row 4: syntax-gate removal check failed (--lang ${lang})"; }
+    done
+    tail -n 2 "${WORK_TMP}/syntax-en.txt"
+    pass_row "Row 4: removed semantic-merge exits 2 with empty stdout and unknown-subcommand stderr across all 40 fixture cases (EN+ZH)"
 
     # ------------------------------------------------------------------
-    # Row 5: 12-swift-true-conflict -> CLI exit 1 with git's conflict text, MCP isError: true
+    # Row 5: MCP `relay_semantic_merge` removed -> returns the same error as any other unknown tool
     # ------------------------------------------------------------------
     echo ""
-    echo "--- Row 5: semantic-merge conflict contract on 12-swift-true-conflict (CLI + MCP) ---"
-    CASE12_DIR="${MERGE_CASES}/12-swift-true-conflict"
-    set +e
-    reference_git_merge "${CASE12_DIR}/base.swift" "${CASE12_DIR}/left.swift" "${CASE12_DIR}/right.swift" >"${WORK_TMP}/case12.git"
-    GIT12_RC=$?
-    set -e
-    [[ "${GIT12_RC}" -ge 1 && "${GIT12_RC}" -le 127 ]] || fail_row "Row 5: git merge-file does not report a conflict on 12-swift-true-conflict (status ${GIT12_RC})"
-    for lang in en zh; do
-        set +e
-        "${RELAY_CLI}" semantic-merge "${CASE12_DIR}/base.swift" "${CASE12_DIR}/left.swift" "${CASE12_DIR}/right.swift" --lang "${lang}" >"${WORK_TMP}/case12-${lang}.stdout" 2>"${WORK_TMP}/case12-${lang}.stderr"
-        RC12=$?
-        set -e
-        echo "12-swift-true-conflict CLI (--lang ${lang}): exit=${RC12}, stderr='$(tr '\n' ' ' < "${WORK_TMP}/case12-${lang}.stderr")'"
-        [[ "${RC12}" -eq 1 ]] || fail_row "Row 5: expected CLI exit 1 on 12-swift-true-conflict (${lang}), got ${RC12}"
-        cmp -s "${WORK_TMP}/case12-${lang}.stdout" "${WORK_TMP}/case12.git" || fail_row "Row 5: conflict output (${lang}) is not byte-identical to git merge-file"
-    done
-
-    /usr/bin/python3 - "${RELAY_CLI}" "${CASE12_DIR}" "${CASE09_DIR}" "${SYNTAX_CASES}/swift-string-delimiters" "${WORK_TMP}" <<'PY'
+    echo "--- Row 5: MCP tools/call rejects removed relay_semantic_merge identically to any other unknown tool ---"
+    /usr/bin/python3 - "${RELAY_CLI}" "${CASE12_DIR}" "${CASE09_DIR}" <<'PY'
 import json, os, subprocess, sys
 
-cli, case12, case09, syntax_case, work = sys.argv[1:6]
+cli, case12, case09 = sys.argv[1:4]
 
 def read(directory, name):
     return open(os.path.join(directory, name), encoding="utf-8").read()
 
-def call(arguments, child_path=None):
-    requests = [
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "relay_semantic_merge", "arguments": arguments}},
-    ]
-    payload = "\n".join(json.dumps(r) for r in requests) + "\n"
-    env = dict(os.environ)
-    if child_path is not None:
-        env["RELAY_CLI_CHILD_PATH"] = child_path
-    proc = subprocess.run([cli, "mcp"], input=payload, capture_output=True, text=True, timeout=60, env=env)
-    assert proc.returncode == 0, f"mcp exited {proc.returncode}: {proc.stderr}"
-    replies = {m["id"]: m["result"] for m in (json.loads(line) for line in proc.stdout.splitlines() if line.strip())}
-    result = replies[2]
-    texts = [c["text"] for c in result["content"]]
-    return result.get("isError"), texts
+requests = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+        "name": "relay_semantic_merge",
+        "arguments": {"path": "Conflict.swift", "base": read(case12, "base.swift"), "left": read(case12, "left.swift"), "right": read(case12, "right.swift")},
+    }},
+    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+        "name": "relay_semantic_merge",
+        "arguments": {"path": "tpl.py", "base": read(case09, "base.py"), "left": read(case09, "left.py"), "right": read(case09, "right.py")},
+    }},
+    {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+        "name": "unknown_tool_probe",
+        "arguments": {},
+    }},
+    {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
+        "name": "relay_check_ownership",
+        "arguments": {"relativePath": "Tests/SampleTests.swift", "allowedGlobs": ["Tests/**"]},
+    }},
+]
+payload = "\n".join(json.dumps(r) for r in requests) + "\n"
+proc = subprocess.run([cli, "mcp"], input=payload, capture_output=True, text=True, timeout=60)
+assert proc.returncode == 0, f"mcp exited {proc.returncode}: {proc.stderr}"
+replies = {m["id"]: m["result"] for m in (json.loads(line) for line in proc.stdout.splitlines() if line.strip())}
 
-conflict_args = {"path": "Conflict.swift", "base": read(case12, "base.swift"), "left": read(case12, "left.swift"), "right": read(case12, "right.swift")}
-is_error, texts = call(conflict_args)
-print("MCP 12-swift-true-conflict: isError =", is_error)
-assert is_error is True, texts
-assert texts[0] == open(os.path.join(work, "case12.git"), encoding="utf-8").read(), "MCP conflict text is not git's conflict text"
+for req_id in (2, 3):
+    res = replies[req_id]
+    print(f"MCP relay_semantic_merge call {req_id}: {res}")
+    assert res.get("isError") is True, res
+    assert res.get("content") == [{"type": "text", "text": "Unknown tool 'relay_semantic_merge'"}], res
 
-clean_args = {"path": "tpl.py", "base": read(case09, "base.py"), "left": read(case09, "left.py"), "right": read(case09, "right.py")}
-is_error, texts = call(clean_args)
-print("MCP 09-py-triplequote: isError =", is_error)
-assert is_error is False, texts
-assert texts[0] == open(os.path.join(work, "case09.git"), encoding="utf-8").read(), "MCP clean text is not git's text"
+probe = replies[4]
+print(f"MCP unknown_tool_probe call: {probe}")
+assert probe.get("isError") is True, probe
+assert probe.get("content") == [{"type": "text", "text": "Unknown tool 'unknown_tool_probe'"}], probe
 
-syntax_args = {"path": "Broken.swift", "base": read(syntax_case, "base.swift"), "left": read(syntax_case, "left.swift"), "right": read(syntax_case, "right.swift")}
-is_error, texts = call(syntax_args)
-print("MCP swift-string-delimiters (clean line merge that does not parse): isError =", is_error)
-assert is_error is True and len(texts) == 1, texts
-
-is_error, texts = call(clean_args, child_path=os.path.join(work, "empty-path"))
-print("MCP without git: isError =", is_error)
-assert is_error is True and len(texts) == 1 and "git" in texts[0], texts
+own = replies[5]
+assert own.get("isError") is False, own
 PY
-    pass_row "Row 5: 12-swift-true-conflict exits 1 with git's conflict text (EN+ZH); MCP isError is true for conflict, unparsable merge and missing git, false with git's text for 09-py-triplequote"
+    pass_row "Row 5: MCP tools/call rejects removed relay_semantic_merge with isError=true and 'Unknown tool' matching unknown_tool_probe"
 
     # ------------------------------------------------------------------
-    # Row 6: MCP tools/list matches README.md & README.zh-CN.md
+    # Row 6: MCP tools/list matches README.md & README.zh-CN.md (1 tool: relay_check_ownership)
     # ------------------------------------------------------------------
     echo ""
     echo "--- Row 6: MCP tools/list count & tool names vs README.md and README.zh-CN.md ---"
@@ -359,20 +338,26 @@ assert proc.returncode == 0
 msgs = {m["id"]: m["result"] for m in (json.loads(l) for l in proc.stdout.splitlines() if l.strip())}
 tools = msgs[2]["tools"]
 names = [t["name"] for t in tools]
-print(f"MCP tools/list returned {len(tools)} tools: {names}")
-assert names == ["relay_semantic_merge", "relay_check_ownership"], f"Unexpected tools: {names}"
+print(f"MCP tools/list returned {len(tools)} tool(s): {names}")
+assert names == ["relay_check_ownership"], f"Unexpected tools: {names}"
+assert "relay_semantic_merge" not in names
 
 en_txt = open(en_readme, encoding="utf-8").read()
 zh_txt = open(zh_readme, encoding="utf-8").read()
-assert "2 MCP tools" in en_txt, "README.md missing exact '2 MCP tools' count"
-assert "2 个 MCP 工具" in zh_txt, "README.zh-CN.md missing exact '2 个 MCP 工具' count"
+assert "1 MCP tool" in en_txt, "README.md missing exact '1 MCP tool' count"
+assert "1 个 MCP 工具" in zh_txt, "README.zh-CN.md missing exact '1 个 MCP 工具' count"
 for tool_name in names:
     assert tool_name in en_txt, f"README.md missing {tool_name}"
     assert tool_name in zh_txt, f"README.zh-CN.md missing {tool_name}"
-assert re.search(r"\b([3-9]|\d{2,})\s+MCP tools", en_txt) is None, "Inflated MCP count found in README.md"
-assert re.search(r"([3-9]|\d{2,})\s*个\s*MCP\s*工具", zh_txt) is None, "Inflated MCP count found in README.zh-CN.md"
+assert "relay_semantic_merge" not in en_txt, "README.md still mentions removed relay_semantic_merge"
+assert "relay_semantic_merge" not in zh_txt, "README.zh-CN.md still mentions removed relay_semantic_merge"
+assert re.search(r"\b([2-9]|\d{2,})\s+MCP tools?", en_txt) is None, "Inflated MCP count found in README.md"
+assert re.search(r"([2-9]|\d{2,})\s*个\s*MCP\s*工具", zh_txt) is None, "Inflated MCP count found in README.zh-CN.md"
+for token in ("reports/m3-merge-eval.md", "1/330", "0/377", "0/611"):
+    assert token in en_txt, f"README.md missing M3 removal evidence token {token!r}"
+    assert token in zh_txt, f"README.zh-CN.md missing M3 removal evidence token {token!r}"
 PY
-    pass_row "Row 6: MCP tools/list exposes 2 tools (relay_semantic_merge, relay_check_ownership), matching README.md & README.zh-CN.md"
+    pass_row "Row 6: MCP tools/list exposes 1 tool (relay_check_ownership, omitting relay_semantic_merge), matching README.md & README.zh-CN.md"
 
     # ------------------------------------------------------------------
     # Rows 7 & 8: default UI state, verified WITHOUT opening a window.

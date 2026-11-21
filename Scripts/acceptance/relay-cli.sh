@@ -53,7 +53,10 @@ for arg in "$@"; do
 done
 
 case "${subcommand}" in
-    init|run|status|lanes|dag-waves|semantic-merge|audit-plugins|export-html|mcp|help|--help|-h|version|--version) ;;
+    init|run|status|lanes|dag-waves|audit-plugins|export-html|mcp|help|--help|-h|version|--version) ;;
+    # `semantic-merge` was removed per the M3 decision (2026-11-21). Forward it to the executable so acceptance
+    # scripts can verify that `RelayIDE` itself rejects it with exit 2 as an unknown subcommand without opening GUI.
+    semantic-merge) ;;
     *)
         REFUSE_REASON="first argument '${subcommand:-<none>}' is not a headless CLI subcommand, so the executable would open the desktop GUI."
         refuse "$@"

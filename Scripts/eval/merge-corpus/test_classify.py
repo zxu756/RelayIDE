@@ -698,6 +698,44 @@ class MergeCorpusClassifierTests(unittest.TestCase):
         self.assertEqual(eng_rows["merge-cases/19-py-both-add-toplevel"]["engine"], "clean_different")
         self.assertEqual(eng_rows["merge-cases/12-py-true-conflict"]["engine"], "conflict")
 
+        # Stage 7 mode (--skip-cli + --engine-tsv + --mergiraf-tsv + --check-classified against full CLASSIFIED.tsv)
+        cls_with_eng_path = os.path.join(work, "CLASSIFIED_WITH_ENG.tsv")
+        classify._write_tsv(cls_with_eng_path, classify.FIXED_CLASSIFIED_FIELDS, res_eng["rows"])
+        mgf_tsv = os.path.join(work, "mergiraf_fixed.tsv")
+        with open(mgf_tsv, "w", encoding="utf-8") as fh:
+            fh.write("case_id\texit_code\tclaimed_clean\toutput_path\n")
+            fh.write(f"merge-cases/09-py-triplequote\t0\t1\t{os.path.join(cli_out_dir, '09.py')}\n")
+            fh.write("merge-cases/12-py-true-conflict\t1\t0\t\n")
+            fh.write(f"merge-cases/19-py-both-add-toplevel\t0\t1\t{os.path.join(cli_out_dir, '19.py')}\n")
+            fh.write("syntax-gate-cases/python-string-delimiters\t0\tskip\t\n")
+
+        p_skip_cli = subprocess.run(
+            [
+                "/usr/bin/python3",
+                "-I",
+                CLASSIFY_PY,
+                "--fixed-cases",
+                "--skip-cli",
+                "--merge-cases-dir",
+                mc_dir,
+                "--syntax-gate-dir",
+                sg_dir,
+                "--engine-tsv",
+                eng_tsv,
+                "--mergiraf-tsv",
+                mgf_tsv,
+                "--check-classified",
+                cls_with_eng_path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(p_skip_cli.returncode, 0, msg=p_skip_cli.stderr + "\n" + p_skip_cli.stdout)
+        self.assertIn("mergiraf\t4\t2\t0\t0\t1\t0\t0", p_skip_cli.stdout)
+        self.assertNotIn("\ncli\t", p_skip_cli.stdout)
+
     def test_ws_only_diff_is_clean_different_not_same(self):
         """Dedicated check for Mutation D: blank-line/trailing-space difference stays 'clean_different', never 'same'."""
         work = tempfile.mkdtemp(dir=self.tmp_root)
