@@ -24,17 +24,18 @@ struct WorkspaceStoreFTSAndUndoTests {
         let (rootDir, bundleDir) = try makeTempBundleURL(label: "migrations")
         defer { try? FileManager.default.removeItem(at: rootDir) }
 
-        #expect(RelayProjectDatabase.currentSchemaVersion == 6)
-        #expect(RelaySchemaMigrationCatalog.allMigrations.map(\.version) == [1, 2, 3, 4, 5, 6])
+        #expect(RelayProjectDatabase.currentSchemaVersion == 7)
+        #expect(RelaySchemaMigrationCatalog.allMigrations.map(\.version) == [1, 2, 3, 4, 5, 6, 7])
         #expect(RelaySchemaMigrationCatalog.descriptor(forVersion: 5) != nil)
         #expect(RelaySchemaMigrationCatalog.descriptor(forVersion: 6) != nil)
+        #expect(RelaySchemaMigrationCatalog.descriptor(forVersion: 7) != nil)
 
         do {
             let db = try RelayProjectDatabase(bundleDirectoryURL: bundleDir)
             try db.makeFTS5SearchStore().ensureExtensionTables()
             _ = try db.performWALCheckpoint(mode: .passive)
             let applied = try db.appliedSchemaMigrations()
-            #expect(applied.map(\.version) == [1, 2, 3, 4, 5, 6])
+            #expect(applied.map(\.version) == [1, 2, 3, 4, 5, 6, 7])
             #expect(applied.allSatisfy { $0.allExpectedTablesPresent })
             try db.setMeta(key: "workspace_name", value: "PersistenceCheck")
         }
@@ -42,7 +43,7 @@ struct WorkspaceStoreFTSAndUndoTests {
         // Reopen existing bundle -> migrations must be idempotent and metadata preserved
         let reopened = try RelayProjectDatabase(bundleDirectoryURL: bundleDir)
         #expect(reopened.getMeta(key: "workspace_name") == "PersistenceCheck")
-        #expect(try reopened.appliedSchemaMigrations().count == 6)
+        #expect(try reopened.appliedSchemaMigrations().count == 7)
     }
 
     // MARK: - 2. `PRAGMA integrity_check`, WAL Checkpoint, Telemetry & Online Backup
@@ -67,7 +68,7 @@ struct WorkspaceStoreFTSAndUndoTests {
         #expect(walReport.elapsedMs >= 0)
 
         let telemetry = try db.collectStorageTelemetry()
-        #expect(telemetry.schemaVersion == 6)
+        #expect(telemetry.schemaVersion == 7)
         #expect(telemetry.sqliteFileBytes > 0)
         #expect(!telemetry.tables.isEmpty)
 
@@ -214,16 +215,67 @@ struct WorkspaceStoreFTSAndUndoTests {
         try db.replaceGuardrailFindings([finding])
         #expect(try db.allGuardrailFindings().count == 1)
 
-        // 6. Aggregate Stats
+        // 6. Aggregate Stats (wiretap_spans is legacy and ignored by computeStats; spend/tokens aggregate from relay_run_lanes)
+        let statsBeforeRuns = try db.computeStats()
+        #expect(statsBeforeRuns.totalSpendUSD == 0.0)
+        #expect(statsBeforeRuns.totalTokensObserved == 0)
+
+        let crudRunID = "20261121-010000-0007"
+        try db.createRun(
+            RelayRunRecord(
+                runID: crudRunID,
+                repoPath: "/tmp/crud-repo",
+                planCopyPath: "/tmp/crud-plan.json",
+                baseRef: "main",
+                baseCommitOID: String(repeating: "a", count: 40),
+                relayShPath: "/tmp/relay.sh",
+                relayShSHA256: String(repeating: "b", count: 64),
+                startedAt: Date(timeIntervalSince1970: 1_763_680_000),
+                finishedAt: Date(timeIntervalSince1970: 1_763_680_010),
+                status: .succeeded,
+                relayidePID: 1001,
+                budgetUSD: 1.00,
+                lanes: [
+                    RelayRunLaneRecord(
+                        runID: crudRunID,
+                        laneID: "lane-claude",
+                        ordinal: 0,
+                        agent: .claude,
+                        promptPath: "/tmp/claude.md",
+                        after: [],
+                        status: .succeeded,
+                        exitCode: 0,
+                        costUSD: 0.42,
+                        tokens: nil,
+                        costSource: "usd"
+                    ),
+                    RelayRunLaneRecord(
+                        runID: crudRunID,
+                        laneID: "lane-codex",
+                        ordinal: 1,
+                        agent: .codex,
+                        promptPath: "/tmp/codex.md",
+                        after: [],
+                        status: .succeeded,
+                        exitCode: 0,
+                        costUSD: nil,
+                        tokens: 5_000,
+                        costSource: "unpriced"
+                    )
+                ]
+            )
+        )
+
         let stats = try db.computeStats()
         #expect(stats.workspaceName == "FlagshipCRUD")
-        #expect(stats.schemaVersion == 6)
+        #expect(stats.schemaVersion == 7)
         #expect(stats.activeLaneCount == 2)
         #expect(stats.taskNodeCount == 2)
         #expect(stats.semanticAutoMergeCount == 1)
         #expect(stats.unresolvedConflictCount == 1)
         #expect(stats.guardrailFindingCount == 1)
         #expect(abs(stats.totalSpendUSD - 0.42) < 0.001)
+        #expect(stats.totalTokensObserved == 5_000)
     }
 
     // MARK: - 4. `RelayFTS5SearchStore` ANSI Stripping
@@ -888,7 +940,7 @@ struct WorkspaceStoreFTSAndUndoTests {
 
         try db.makeFTS5SearchStore().ensureExtensionTables()
         let applied = try db.appliedSchemaMigrations()
-        #expect(applied.map(\.version) == [1, 2, 3, 4, 5, 6])
+        #expect(applied.map(\.version) == [1, 2, 3, 4, 5, 6, 7])
         #expect(applied.allSatisfy { $0.allExpectedTablesPresent })
         #expect(db.getMeta(key: "workspace_name") == "UpgradedFromV4")
         let preservedLanes = try db.allLanes()
@@ -1226,14 +1278,14 @@ struct WorkspaceStoreFTSAndUndoTests {
             #expect(sqlite3_exec(rawDB, v5BootstrapSQL, nil, nil, nil) == SQLITE_OK)
         }
 
-        // Open via RelayProjectDatabase -> must migrate v5 -> v6 cleanly in both migration catalog & SQLite store.
-        #expect(RelayProjectDatabase.currentSchemaVersion == 6)
+        // Open via RelayProjectDatabase -> must migrate v5 -> v7 cleanly in both migration catalog & SQLite store.
+        #expect(RelayProjectDatabase.currentSchemaVersion == 7)
         #expect(RelaySchemaMigrationCatalog.descriptor(forVersion: 6)?.expectedTables == ["relay_run_integration", "relay_run_merges"])
 
         let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: bundleDir)
         try db.makeFTS5SearchStore().ensureExtensionTables()
         let applied = try db.appliedSchemaMigrations()
-        #expect(applied.map(\.version) == [1, 2, 3, 4, 5, 6])
+        #expect(applied.map(\.version) == [1, 2, 3, 4, 5, 6, 7])
         #expect(applied.allSatisfy { $0.allExpectedTablesPresent })
         #expect(db.getMeta(key: "workspace_name") == "UpgradedFromV5")
 
@@ -1565,5 +1617,239 @@ struct WorkspaceStoreFTSAndUndoTests {
         let rawPending = try #require(try db.fetchRun(runID: pendingIntRunID, reconcileWithLock: false))
         #expect(rawPending.status == .interrupted)
         #expect(rawPending.integration?.status == .skipped)
+    }
+
+    // MARK: - 14. M4 Schema v6 -> v7 Upgrade (`relay_runs.budget_usd`) Preserves Historical Runs With `budgetUSD: null`
+
+    @Test("RelayProjectDatabase upgrades v6 bundles cleanly to Schema v7, preserving v6 runs with budgetUSD == nil and persisting budgetUSD on new v7 runs")
+    func v6DatabaseUpgradesToV7PreservingRunsAndAddingNullableBudgetUSD() throws {
+        let (rootDir, bundleDir) = try makeTempBundleURL(label: "upgrade-v6-to-v7")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        try FileManager.default.createDirectory(at: bundleDir, withIntermediateDirectories: true)
+        let sqliteURL = bundleDir.appendingPathComponent("workspace.sqlite")
+        let v6RunID = "20261117-120000-0006"
+
+        do {
+            var rawHandle: OpaquePointer?
+            let openRC = sqlite3_open_v2(
+                sqliteURL.path,
+                &rawHandle,
+                SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                nil
+            )
+            #expect(openRC == SQLITE_OK)
+            let rawDB = try #require(rawHandle)
+            defer { sqlite3_close(rawDB) }
+
+            let v6BootstrapSQL = """
+            PRAGMA journal_mode = WAL;
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL);
+            CREATE TABLE workspace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE managed_lanes (lane_id TEXT PRIMARY KEY, vendor TEXT NOT NULL, payload_json TEXT NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE dag_specs (dag_id TEXT PRIMARY KEY, name TEXT NOT NULL, payload_json TEXT NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE semantic_merge_reports (relative_path TEXT PRIMARY KEY, auto_merged_count INTEGER NOT NULL, conflict_count INTEGER NOT NULL, payload_json TEXT NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE wiretap_spans (span_id TEXT PRIMARY KEY, lane_id TEXT NOT NULL, vendor TEXT NOT NULL, total_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL, payload_json TEXT NOT NULL, recorded_at REAL NOT NULL);
+            CREATE TABLE guardrail_findings (finding_id TEXT PRIMARY KEY, plugin_id TEXT NOT NULL, severity TEXT NOT NULL, payload_json TEXT NOT NULL, created_at REAL NOT NULL);
+            CREATE TABLE undo_redo_stack (seq INTEGER PRIMARY KEY AUTOINCREMENT, stack_kind TEXT NOT NULL, title TEXT NOT NULL, mutation_json TEXT NOT NULL, created_at REAL NOT NULL);
+            CREATE TABLE relay_runs (
+                run_id TEXT PRIMARY KEY,
+                repo_path TEXT NOT NULL,
+                plan_copy_path TEXT NOT NULL,
+                base_ref TEXT NOT NULL,
+                base_commit_oid TEXT NOT NULL,
+                verify_command TEXT,
+                relay_sh_path TEXT NOT NULL,
+                relay_sh_sha256 TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                finished_at REAL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                relayide_pid INTEGER NOT NULL
+            );
+            CREATE TABLE relay_run_lanes (
+                run_id TEXT NOT NULL REFERENCES relay_runs(run_id) ON DELETE CASCADE,
+                lane_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                agent TEXT NOT NULL,
+                prompt_path TEXT NOT NULL,
+                after_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                signal INTEGER,
+                reason TEXT,
+                started_at REAL,
+                finished_at REAL,
+                pid INTEGER,
+                cost_usd REAL,
+                tokens INTEGER,
+                cost_source TEXT,
+                branch TEXT,
+                commit_oid TEXT,
+                worktree_path TEXT,
+                uncommitted_files_json TEXT,
+                PRIMARY KEY (run_id, lane_id)
+            );
+            CREATE TABLE relay_run_integration (
+                run_id TEXT PRIMARY KEY REFERENCES relay_runs(run_id) ON DELETE CASCADE,
+                branch TEXT,
+                worktree_path TEXT,
+                base_commit_oid TEXT NOT NULL,
+                head_commit_oid TEXT,
+                status TEXT NOT NULL,
+                reason TEXT,
+                ready INTEGER NOT NULL DEFAULT 0,
+                verify_command TEXT,
+                verify_timeout_sec INTEGER,
+                verify_status TEXT,
+                verify_exit_code INTEGER,
+                verify_signal INTEGER,
+                verify_pid INTEGER,
+                verify_started_at REAL,
+                verify_finished_at REAL,
+                verify_log_path TEXT,
+                verify_log_bytes INTEGER,
+                verify_log_truncated INTEGER,
+                verify_modified_tracked_files_json TEXT
+            );
+            CREATE TABLE relay_run_merges (
+                run_id TEXT NOT NULL REFERENCES relay_runs(run_id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                lane_id TEXT NOT NULL,
+                lane_commit_oid TEXT,
+                status TEXT NOT NULL,
+                merge_commit_oid TEXT,
+                conflicts_json TEXT NOT NULL,
+                conflict_lines_json TEXT NOT NULL,
+                started_at REAL,
+                finished_at REAL,
+                PRIMARY KEY (run_id, lane_id)
+            );
+            INSERT INTO schema_migrations (version, applied_at) VALUES
+                (1, 1763000001), (2, 1763000002), (3, 1763000003),
+                (4, 1763000004), (5, 1763000005), (6, 1763000006);
+            INSERT INTO workspace_meta (key, value) VALUES ('workspace_name', 'UpgradedFromV6');
+            INSERT INTO relay_runs (
+                run_id, repo_path, plan_copy_path, base_ref, base_commit_oid,
+                verify_command, relay_sh_path, relay_sh_sha256,
+                started_at, finished_at, status, reason, relayide_pid
+            ) VALUES (
+                '\(v6RunID)', '/tmp/v6-repo', '/tmp/v6-plan.json', 'main',
+                '1111111111111111111111111111111111111111',
+                'true', '/tmp/relay.sh',
+                '2222222222222222222222222222222222222222222222222222222222222222',
+                1763300000, 1763300030, 'succeeded', NULL, 7777
+            );
+            INSERT INTO relay_run_lanes (
+                run_id, lane_id, ordinal, agent, prompt_path, after_json,
+                status, exit_code, signal, reason, started_at, finished_at,
+                pid, cost_usd, tokens, cost_source, branch, commit_oid,
+                worktree_path, uncommitted_files_json
+            ) VALUES
+            (
+                '\(v6RunID)', 'api', 0, 'claude', '/tmp/p/api.md', '[]',
+                'succeeded', 0, NULL, NULL, 1763300001, 1763300015,
+                7778, 0.15, NULL, 'usd', 'relay/\(v6RunID)/api',
+                '3333333333333333333333333333333333333333', '/tmp/wt/api', NULL
+            ),
+            (
+                '\(v6RunID)', 'docs', 1, 'agy', '/tmp/p/docs.md', '["api"]',
+                'succeeded', 0, NULL, NULL, 1763300016, 1763300028,
+                7779, NULL, 2400, 'unpriced', 'relay/\(v6RunID)/docs',
+                '4444444444444444444444444444444444444444', '/tmp/wt/docs', NULL
+            );
+            INSERT INTO relay_run_integration (
+                run_id, branch, worktree_path, base_commit_oid, head_commit_oid,
+                status, reason, ready, verify_command, verify_timeout_sec,
+                verify_status, verify_exit_code, verify_started_at, verify_finished_at,
+                verify_log_path, verify_log_bytes, verify_log_truncated, verify_modified_tracked_files_json
+            ) VALUES (
+                '\(v6RunID)', 'relay/\(v6RunID)/integration', '/tmp/wt/int',
+                '1111111111111111111111111111111111111111',
+                '5555555555555555555555555555555555555555',
+                'verified', NULL, 1, 'true', 1800,
+                'succeeded', 0, 1763300028, 1763300030,
+                '/tmp/wt/int/verify.pty', 12, 0, '[]'
+            );
+            """
+            #expect(sqlite3_exec(rawDB, v6BootstrapSQL, nil, nil, nil) == SQLITE_OK)
+        }
+
+        #expect(RelayProjectDatabase.currentSchemaVersion == 7)
+        #expect(RelaySchemaMigrationCatalog.descriptor(forVersion: 7) != nil)
+
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: bundleDir)
+        try db.makeFTS5SearchStore().ensureExtensionTables()
+        let applied = try db.appliedSchemaMigrations()
+        #expect(applied.map(\.version) == [1, 2, 3, 4, 5, 6, 7])
+        #expect(applied.allSatisfy { $0.allExpectedTablesPresent })
+
+        let loadedV6 = try #require(try db.fetchRun(runID: v6RunID))
+        #expect(loadedV6.budgetUSD == nil)
+        #expect(abs(loadedV6.totalCostUSD - 0.15) < 1e-9)
+        #expect(loadedV6.unpricedTokens == 2400)
+        #expect(loadedV6.pricedLaneCount == 1)
+        #expect(loadedV6.unpricedLaneCount == 1)
+        #expect(loadedV6.noRecordLaneCount == 0)
+        #expect(loadedV6.budgetExhausted == false)
+
+        let encodedV6 = try RelayRunJSONCodec.encode(loadedV6)
+        let roundTrippedV6 = try RelayRunJSONCodec.decode(RelayRunRecord.self, from: encodedV6)
+        #expect(roundTrippedV6 == loadedV6)
+        let v6Obj = try #require(try JSONSerialization.jsonObject(with: Data(encodedV6.utf8)) as? [String: Any])
+        #expect(v6Obj["budgetUSD"] is NSNull)
+        #expect(abs((v6Obj["totalCostUSD"] as? Double ?? -1) - 0.15) < 1e-9)
+        #expect(v6Obj["unpricedTokens"] as? Int == 2400)
+        #expect(v6Obj["pricedLaneCount"] as? Int == 1)
+        #expect(v6Obj["unpricedLaneCount"] as? Int == 1)
+        #expect(v6Obj["noRecordLaneCount"] as? Int == 0)
+        #expect(v6Obj["budgetExhausted"] as? Bool == false)
+
+        let stats = try db.computeStats()
+        #expect(stats.schemaVersion == 7)
+        #expect(abs(stats.totalSpendUSD - 0.15) < 1e-9)
+        #expect(stats.totalTokensObserved == 2400)
+
+        // New v7 run with explicit budgetUSD persists and reloads cleanly alongside upgraded v6 run
+        let v7RunID = "20261121-120000-0007"
+        let v7Run = RelayRunRecord(
+            runID: v7RunID,
+            repoPath: "/tmp/v7-repo",
+            planCopyPath: "/tmp/v7-plan.json",
+            baseRef: "main",
+            baseCommitOID: String(repeating: "7", count: 40),
+            relayShPath: "/tmp/relay.sh",
+            relayShSHA256: String(repeating: "8", count: 64),
+            startedAt: Date(timeIntervalSince1970: 1_763_690_000),
+            finishedAt: Date(timeIntervalSince1970: 1_763_690_010),
+            status: .succeeded,
+            relayidePID: 8001,
+            budgetUSD: 1.25,
+            lanes: [
+                RelayRunLaneRecord(
+                    runID: v7RunID,
+                    laneID: "core",
+                    ordinal: 0,
+                    agent: .vibe,
+                    promptPath: "/tmp/core.md",
+                    after: [],
+                    status: .succeeded,
+                    exitCode: 0,
+                    costUSD: 0.25,
+                    tokens: nil,
+                    costSource: "usd"
+                )
+            ]
+        )
+        try db.createRun(v7Run)
+        let loadedV7 = try #require(try db.fetchRun(runID: v7RunID))
+        #expect(loadedV7.budgetUSD == 1.25)
+        #expect(abs(loadedV7.totalCostUSD - 0.25) < 1e-9)
+        #expect(loadedV7.budgetExhausted == false)
+        let allAfterV7 = try db.allRuns(reconcileWithLock: false)
+        #expect(allAfterV7.map(\.runID) == [v6RunID, v7RunID])
+        #expect(allAfterV7[0].budgetUSD == nil)
+        #expect(allAfterV7[1].budgetUSD == 1.25)
     }
 }

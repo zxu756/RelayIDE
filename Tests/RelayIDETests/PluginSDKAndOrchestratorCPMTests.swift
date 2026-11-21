@@ -623,12 +623,21 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(campaign.laneBudgetAccounts.reduce(0.0) { $0 + $1.spentUSD } > 0)
         #expect(!campaign.guardrailFindings.isEmpty)
 
-        // Verify persisted SQLite database matches synthesized campaign (wiretap_spans stays untouched)
+        // Verify persisted SQLite database aggregates [DEMO] spend from relay_run_lanes (wiretap_spans stays empty)
         let stats = try db.computeStats()
         #expect(stats.activeLaneCount == 4)
         #expect(stats.taskNodeCount == campaign.dagSpec.tasks.count)
         #expect(try db.allWiretapSpans().isEmpty)
-        #expect(stats.totalSpendUSD == 0)
+        let demoRuns = try db.allRuns(reconcileWithLock: false)
+        #expect(demoRuns.count == 1)
+        let firstDemoRun = try #require(demoRuns.first)
+        #expect(firstDemoRun.reason?.contains("[DEMO]") == true)
+        let laneSpendSum = demoRuns.flatMap(\.lanes).reduce(0.0) { $0 + ($1.costUSD ?? 0.0) }
+        let laneTokenSum = demoRuns.flatMap(\.lanes).reduce(0) { $0 + ($1.tokens ?? 0) }
+        #expect(stats.totalSpendUSD > 0)
+        #expect(abs(stats.totalSpendUSD - laneSpendSum) < 1e-9)
+        #expect(stats.totalTokensObserved == laneTokenSum)
+        #expect(stats.totalTokensObserved > 0)
     }
 
     // MARK: - 15. `MultiVendorDAGOrchestrator.seedIndustrialDemoWorkspace` End-to-End
@@ -650,6 +659,16 @@ struct PluginSDKAndOrchestratorCPMTests {
         #expect(stats.taskNodeCount >= 4)
         #expect(stats.semanticAutoMergeCount >= 1)
         #expect(try db.allWiretapSpans().isEmpty)
+        let seededRuns = try db.allRuns(reconcileWithLock: false)
+        #expect(seededRuns.count == 1)
+        let firstSeededRun = try #require(seededRuns.first)
+        #expect(firstSeededRun.reason?.contains("[DEMO]") == true)
+        let seededSpendSum = seededRuns.flatMap(\.lanes).reduce(0.0) { $0 + ($1.costUSD ?? 0.0) }
+        let seededTokenSum = seededRuns.flatMap(\.lanes).reduce(0) { $0 + ($1.tokens ?? 0) }
+        #expect(stats.totalSpendUSD > 0)
+        #expect(abs(stats.totalSpendUSD - seededSpendSum) < 1e-9)
+        #expect(stats.totalTokensObserved == seededTokenSum)
+        #expect(stats.totalTokensObserved > 0)
     }
 
     // MARK: - 16. JavaScript Runtime Exception Resilience in `RelayJSScratchpadEvaluator`

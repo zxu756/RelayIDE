@@ -325,6 +325,119 @@ public final class MultiVendorDAGOrchestrator: @unchecked Sendable {
         )
         let allFindings = pluginOutputs.flatMap(\.findings)
         try database.replaceGuardrailFindings(allFindings)
+
+        // 5. Seed a [DEMO] RelayRunRecord into relay_runs / relay_run_lanes so status & export-html aggregate lane spend honestly without wiretap_spans
+        let demoRunID = "demo-20261121-0001"
+        if try database.fetchRun(runID: demoRunID, reconcileWithLock: false) == nil {
+            let t0 = Date(timeIntervalSince1970: 1_763_683_200)
+            let demoLanes: [RelayRunLaneRecord] = [
+                RelayRunLaneRecord(
+                    runID: demoRunID,
+                    laneID: "lane-claude-core",
+                    ordinal: 0,
+                    agent: .claude,
+                    promptPath: "\(demoRepoDir)/prompts/ledger-core.md",
+                    after: [],
+                    status: .succeeded,
+                    exitCode: 0,
+                    reason: "[DEMO] synthetic fixture",
+                    startedAt: t0,
+                    finishedAt: t0.addingTimeInterval(24),
+                    costUSD: 0.1850,
+                    tokens: nil,
+                    costSource: "usd",
+                    branch: "relay/lane-claude-core",
+                    commitOID: "c91b42e0a8173920184726354819203948571625",
+                    worktreePath: "\(demoRepoDir)/.worktrees/lane-claude-core"
+                ),
+                RelayRunLaneRecord(
+                    runID: demoRunID,
+                    laneID: "lane-codex-tax",
+                    ordinal: 1,
+                    agent: .codex,
+                    promptPath: "\(demoRepoDir)/prompts/tax-fx.md",
+                    after: [],
+                    status: .succeeded,
+                    exitCode: 0,
+                    reason: "[DEMO] synthetic fixture",
+                    startedAt: t0,
+                    finishedAt: t0.addingTimeInterval(29),
+                    costUSD: nil,
+                    tokens: 76_720,
+                    costSource: "unpriced",
+                    branch: "relay/lane-codex-tax",
+                    commitOID: "d83f19c4b0029384756102938475610293847111",
+                    worktreePath: "\(demoRepoDir)/.worktrees/lane-codex-tax"
+                ),
+                RelayRunLaneRecord(
+                    runID: demoRunID,
+                    laneID: "lane-agy-docs",
+                    ordinal: 2,
+                    agent: .agy,
+                    promptPath: "\(demoRepoDir)/prompts/gateway-docs.md",
+                    after: ["lane-claude-core"],
+                    status: .succeeded,
+                    exitCode: 0,
+                    reason: "[DEMO] synthetic fixture",
+                    startedAt: t0.addingTimeInterval(25),
+                    finishedAt: t0.addingTimeInterval(52),
+                    costUSD: nil,
+                    tokens: 103_490,
+                    costSource: "unpriced",
+                    branch: "relay/lane-agy-docs",
+                    commitOID: "e72a88b1c9928374650192837465019283746222",
+                    worktreePath: "\(demoRepoDir)/.worktrees/lane-agy-docs"
+                ),
+                RelayRunLaneRecord(
+                    runID: demoRunID,
+                    laneID: "lane-vibe-tests",
+                    ordinal: 3,
+                    agent: .vibe,
+                    promptPath: "\(demoRepoDir)/prompts/property-tests.md",
+                    after: ["lane-agy-docs"],
+                    status: .succeeded,
+                    exitCode: 0,
+                    reason: "[DEMO] synthetic fixture",
+                    startedAt: t0.addingTimeInterval(53),
+                    finishedAt: t0.addingTimeInterval(78),
+                    costUSD: 0.0640,
+                    tokens: nil,
+                    costSource: "usd",
+                    branch: "relay/lane-vibe-tests",
+                    commitOID: "f10d77e3d4455667788990011223344556677333",
+                    worktreePath: "\(demoRepoDir)/.worktrees/lane-vibe-tests"
+                )
+            ]
+            let demoRun = RelayRunRecord(
+                runID: demoRunID,
+                repoPath: demoRepoDir,
+                planCopyPath: "\(demoRepoDir)/.relay-demo-plan.json",
+                baseRef: "main",
+                baseCommitOID: headOID,
+                verifyCommand: "swift test",
+                relayShPath: "demo/relay.sh",
+                relayShSHA256: String(repeating: "0", count: 64),
+                startedAt: t0,
+                finishedAt: t0.addingTimeInterval(80),
+                status: .succeeded,
+                reason: "[DEMO] Synthetic preview run seeded by --seed-demo (not a live agent-relay execution)",
+                relayidePID: 0,
+                budgetUSD: 18.00,
+                lanes: demoLanes,
+                integration: RelayRunIntegrationRecord(
+                    branch: "relay/\(demoRunID)/integration",
+                    worktreePath: "\(demoRepoDir)/.worktrees/integration",
+                    baseCommitOID: headOID,
+                    headCommitOID: "f10d77e3d4455667788990011223344556677333",
+                    status: .verified,
+                    reason: "[DEMO] synthetic fixture",
+                    ready: true,
+                    merges: [],
+                    verify: nil
+                )
+            )
+            try database.createRun(demoRun)
+        }
     }
 
     private static func sampleANSIOutput(for lane: ManagedWorktreeLane) -> String {

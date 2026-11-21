@@ -2,12 +2,12 @@ import Foundation
 import RelayModels
 import SQLite3
 
-// MARK: - .relayproj SQLite3 WAL Persistence Engine (Schema v1..v6)
+// MARK: - .relayproj SQLite3 WAL Persistence Engine (Schema v1..v7)
 
 private let RELAY_SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 public final class RelayProjectDatabase: @unchecked Sendable {
-    public static let currentSchemaVersion = 6
+    public static let currentSchemaVersion = 7
     private let lock = NSLock()
     public let bundleDirectoryURL: URL
     public let sqliteFileURL: URL
@@ -226,6 +226,12 @@ public final class RelayProjectDatabase: @unchecked Sendable {
             INSERT INTO schema_migrations (version, applied_at) VALUES (6, strftime('%s','now'));
             """)
         }
+        if current < 7 {
+            if !tableHasColumn(table: "relay_runs", column: "budget_usd") {
+                try execRaw("ALTER TABLE relay_runs ADD COLUMN budget_usd REAL;")
+            }
+            try execRaw("INSERT INTO schema_migrations (version, applied_at) VALUES (7, strftime('%s','now'));")
+        }
     }
 
     // MARK: - Workspace Metadata & Lanes
@@ -373,8 +379,8 @@ public final class RelayProjectDatabase: @unchecked Sendable {
                     INSERT INTO relay_runs (
                         run_id, repo_path, plan_copy_path, base_ref, base_commit_oid,
                         verify_command, relay_sh_path, relay_sh_sha256,
-                        started_at, finished_at, status, reason, relayide_pid
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);
+                        started_at, finished_at, status, reason, relayide_pid, budget_usd
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);
                     """
                 ) { stmt in
                     Self.bindText(stmt, 1, run.runID)
@@ -390,6 +396,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
                     Self.bindText(stmt, 11, run.status.rawValue)
                     Self.bindOptionalText(stmt, 12, run.reason)
                     sqlite3_bind_int(stmt, 13, run.relayidePID)
+                    Self.bindOptionalDouble(stmt, 14, run.budgetUSD)
                 }
 
                 for lane in run.lanes {
@@ -816,7 +823,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
             let sql = """
             SELECT run_id, repo_path, plan_copy_path, base_ref, base_commit_oid,
                    verify_command, relay_sh_path, relay_sh_sha256,
-                   started_at, finished_at, status, reason, relayide_pid
+                   started_at, finished_at, status, reason, relayide_pid, budget_usd
             FROM relay_runs
             WHERE run_id = ?1;
             """
@@ -847,7 +854,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
             let sql = """
             SELECT run_id, repo_path, plan_copy_path, base_ref, base_commit_oid,
                    verify_command, relay_sh_path, relay_sh_sha256,
-                   started_at, finished_at, status, reason, relayide_pid
+                   started_at, finished_at, status, reason, relayide_pid, budget_usd
             FROM relay_runs
             ORDER BY started_at ASC, run_id ASC;
             """
@@ -989,6 +996,7 @@ public final class RelayProjectDatabase: @unchecked Sendable {
             status: status,
             reason: columnText(stmt, 11),
             relayidePID: sqlite3_column_int(stmt, 12),
+            budgetUSD: columnOptionalDouble(stmt, 13),
             lanes: []
         )
     }
@@ -1220,8 +1228,9 @@ public final class RelayProjectDatabase: @unchecked Sendable {
         let taskCount = dags.reduce(0) { $0 + $1.tasks.count }
         let autoMerges = queryInt("SELECT COALESCE(SUM(auto_merged_count), 0) FROM semantic_merge_reports;")
         let conflicts = queryInt("SELECT COALESCE(SUM(conflict_count), 0) FROM semantic_merge_reports;")
-        let tokens = queryInt("SELECT COALESCE(SUM(total_tokens), 0) FROM wiretap_spans;")
-        let spend = queryDouble("SELECT COALESCE(SUM(cost_usd), 0.0) FROM wiretap_spans;")
+        let tokens = queryInt("SELECT COALESCE(SUM(tokens), 0) FROM relay_run_lanes;")
+        let rawSpend = queryDouble("SELECT COALESCE(SUM(cost_usd), 0.0) FROM relay_run_lanes;")
+        let spend = (rawSpend * 100_000_000).rounded() / 100_000_000
         let findings = queryInt("SELECT COUNT(*) FROM guardrail_findings;")
         let undoCount = queryInt("SELECT COUNT(*) FROM undo_redo_stack WHERE stack_kind = 'undo';")
         let redoCount = queryInt("SELECT COUNT(*) FROM undo_redo_stack WHERE stack_kind = 'redo';")
@@ -1359,6 +1368,24 @@ public final class RelayProjectDatabase: @unchecked Sendable {
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0.0 }
         defer { sqlite3_finalize(stmt) }
         return sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_double(stmt, 0) : 0.0
+    }
+
+    private func tableHasColumn(table: String, column: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let db else { return false }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(table));", -1, &stmt, nil) == SQLITE_OK,
+              let prepared = stmt else {
+            return false
+        }
+        defer { sqlite3_finalize(prepared) }
+        while sqlite3_step(prepared) == SQLITE_ROW {
+            if Self.columnText(prepared, 1) == column {
+                return true
+            }
+        }
+        return false
     }
 
     private func fileSize(at path: String) -> Int64 {

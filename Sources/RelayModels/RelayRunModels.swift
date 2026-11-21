@@ -402,6 +402,7 @@ public struct RelayValidatedRunPlan: Sendable, Hashable, Equatable {
     public let lanes: [RelayValidatedLaneSpec]
     public let verifyCommand: String?
     public let verifyTimeoutSec: Int?
+    public let budgetUSD: Double?
 
     public init(
         planFileURL: URL,
@@ -412,7 +413,8 @@ public struct RelayValidatedRunPlan: Sendable, Hashable, Equatable {
         baseCommitOID: String,
         lanes: [RelayValidatedLaneSpec],
         verifyCommand: String?,
-        verifyTimeoutSec: Int? = nil
+        verifyTimeoutSec: Int? = nil,
+        budgetUSD: Double? = nil
     ) {
         self.planFileURL = planFileURL
         self.rawPlanData = rawPlanData
@@ -423,6 +425,7 @@ public struct RelayValidatedRunPlan: Sendable, Hashable, Equatable {
         self.lanes = lanes
         self.verifyCommand = verifyCommand
         self.verifyTimeoutSec = verifyTimeoutSec
+        self.budgetUSD = budgetUSD
     }
 }
 
@@ -919,8 +922,48 @@ public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codab
     public var status: RelayRunStatus
     public var reason: String?
     public let relayidePID: Int32
+    public var budgetUSD: Double?
     public var lanes: [RelayRunLaneRecord]
     public var integration: RelayRunIntegrationRecord?
+
+    /// Sum of `costUSD` across all `costSource == "usd"` lanes, matching `relay_util.py spent` across lane worktrees.
+    public var totalCostUSD: Double {
+        let raw = lanes.reduce(0.0) { acc, lane in
+            guard lane.costSource == "usd", let usd = lane.costUSD else { return acc }
+            return acc + usd
+        }
+        return (raw * 100_000_000).rounded() / 100_000_000
+    }
+
+    /// Sum of `tokens` across all `costSource == "unpriced"` lanes (`codex`, `agy`).
+    public var unpricedTokens: Int {
+        lanes.reduce(0) { acc, lane in
+            guard lane.costSource == "unpriced", let tok = lane.tokens else { return acc }
+            return acc + tok
+        }
+    }
+
+    public var pricedLaneCount: Int {
+        lanes.filter { $0.costSource == "usd" }.count
+    }
+
+    public var unpricedLaneCount: Int {
+        lanes.filter { $0.costSource == "unpriced" }.count
+    }
+
+    public var noRecordLaneCount: Int {
+        lanes.filter { $0.costSource == "no_record" }.count
+    }
+
+    public var budgetExhausted: Bool {
+        guard let budget = budgetUSD else { return false }
+        if totalCostUSD + 1e-9 >= budget {
+            return true
+        }
+        return lanes.contains { lane in
+            lane.status == .refused && (lane.reason?.contains("not started: the job budget") == true)
+        }
+    }
 
     private enum CodingKeys: String, CodingKey {
         case runID
@@ -936,6 +979,13 @@ public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codab
         case status
         case reason
         case relayidePID
+        case budgetUSD
+        case totalCostUSD
+        case unpricedTokens
+        case pricedLaneCount
+        case unpricedLaneCount
+        case noRecordLaneCount
+        case budgetExhausted
         case lanes
         case integration
     }
@@ -954,6 +1004,7 @@ public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codab
         status: RelayRunStatus,
         reason: String? = nil,
         relayidePID: Int32,
+        budgetUSD: Double? = nil,
         lanes: [RelayRunLaneRecord] = [],
         integration: RelayRunIntegrationRecord? = nil
     ) {
@@ -970,8 +1021,29 @@ public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codab
         self.status = status
         self.reason = reason
         self.relayidePID = relayidePID
+        self.budgetUSD = budgetUSD
         self.lanes = lanes
         self.integration = integration
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.runID = try c.decode(String.self, forKey: .runID)
+        self.repoPath = try c.decode(String.self, forKey: .repoPath)
+        self.planCopyPath = try c.decode(String.self, forKey: .planCopyPath)
+        self.baseRef = try c.decode(String.self, forKey: .baseRef)
+        self.baseCommitOID = try c.decode(String.self, forKey: .baseCommitOID)
+        self.verifyCommand = try c.decodeIfPresent(String.self, forKey: .verifyCommand)
+        self.relayShPath = try c.decode(String.self, forKey: .relayShPath)
+        self.relayShSHA256 = try c.decode(String.self, forKey: .relayShSHA256)
+        self.startedAt = try c.decode(Date.self, forKey: .startedAt)
+        self.finishedAt = try c.decodeIfPresent(Date.self, forKey: .finishedAt)
+        self.status = try c.decode(RelayRunStatus.self, forKey: .status)
+        self.reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        self.relayidePID = try c.decode(Int32.self, forKey: .relayidePID)
+        self.budgetUSD = try c.decodeIfPresent(Double.self, forKey: .budgetUSD)
+        self.lanes = try c.decode([RelayRunLaneRecord].self, forKey: .lanes)
+        self.integration = try c.decodeIfPresent(RelayRunIntegrationRecord.self, forKey: .integration)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -989,6 +1061,13 @@ public struct RelayRunRecord: Sendable, Hashable, Equatable, Identifiable, Codab
         try c.encode(status, forKey: .status)
         try encodeNullable(reason, into: &c, forKey: .reason)
         try c.encode(relayidePID, forKey: .relayidePID)
+        try encodeNullable(budgetUSD, into: &c, forKey: .budgetUSD)
+        try c.encode(totalCostUSD, forKey: .totalCostUSD)
+        try c.encode(unpricedTokens, forKey: .unpricedTokens)
+        try c.encode(pricedLaneCount, forKey: .pricedLaneCount)
+        try c.encode(unpricedLaneCount, forKey: .unpricedLaneCount)
+        try c.encode(noRecordLaneCount, forKey: .noRecordLaneCount)
+        try c.encode(budgetExhausted, forKey: .budgetExhausted)
         try c.encode(lanes, forKey: .lanes)
         try encodeNullable(integration, into: &c, forKey: .integration)
     }

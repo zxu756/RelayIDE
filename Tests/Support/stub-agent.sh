@@ -31,6 +31,7 @@ PROMPT_FILE=""
 CODEX_OUT_FILE=""
 VIBE_OUTPUT_DIR=""
 REQ_MODEL=""
+CLI_BUDGET_CAP=""
 
 ARGS=("$@")
 NARGS=${#ARGS[@]}
@@ -92,6 +93,12 @@ case "$VENDOR" in
                 --model=*)
                     REQ_MODEL="${ARGS[$i]#--model=}"
                     ;;
+                --max-budget-usd)
+                    (( i + 1 < NARGS )) && { CLI_BUDGET_CAP="${ARGS[$((i+1))]}"; i=$((i+1)); }
+                    ;;
+                --max-budget-usd=*)
+                    CLI_BUDGET_CAP="${ARGS[$i]#--max-budget-usd=}"
+                    ;;
             esac
         done
         PROMPT_TEXT="$(cat; printf x)"
@@ -146,6 +153,12 @@ case "$VENDOR" in
                     ;;
                 --output-dir=*)
                     VIBE_OUTPUT_DIR="${ARGS[$i]#--output-dir=}"
+                    ;;
+                --max-price)
+                    (( i + 1 < NARGS )) && { CLI_BUDGET_CAP="${ARGS[$((i+1))]}"; i=$((i+1)); }
+                    ;;
+                --max-price=*)
+                    CLI_BUDGET_CAP="${ARGS[$i]#--max-price=}"
                     ;;
             esac
         done
@@ -203,6 +216,9 @@ ensure_start_trace_written() {
         if [[ -n "${STUB_TRACE_DIR:-}" ]]; then
             mkdir -p "$STUB_TRACE_DIR"
             printf 'start %s %s %s %s\n' "$START_TS" "$$" "$VENDOR" "$LANE_NAME" >> "${STUB_TRACE_DIR}/${LANE_NAME}.trace"
+            if [[ -n "${RELAY_BUDGET_USD:-}" || -n "${CLI_BUDGET_CAP:-}" ]]; then
+                printf 'RELAY_BUDGET_USD=%s\nCLI_BUDGET_CAP=%s\n' "${RELAY_BUDGET_USD:-}" "${CLI_BUDGET_CAP:-}" > "${STUB_TRACE_DIR}/${LANE_NAME}.budget"
+            fi
         fi
     fi
 }
@@ -508,19 +524,24 @@ if [[ $NO_JSON -eq 1 ]]; then
     finish_and_exit "$EXIT_CODE"
 fi
 
-/usr/bin/python3 -I - "$VENDOR" "$LANE_NAME" "$COST_USD" "$TOTAL_TOKENS" "$WORKER_STATUS" "$MESSAGE_BODY" "$CODEX_OUT_FILE" "$VIBE_OUTPUT_DIR" "$REQ_MODEL" <<'PY'
+/usr/bin/python3 -I - "$VENDOR" "$LANE_NAME" "$COST_USD" "$TOTAL_TOKENS" "$WORKER_STATUS" "$MESSAGE_BODY" "$CODEX_OUT_FILE" "$VIBE_OUTPUT_DIR" "$REQ_MODEL" "$CLI_BUDGET_CAP" <<'PY'
 import json
 import os
 import sys
 
-vendor, lane, cost_s, tokens_s, status_word, body, codex_out, vibe_dir, req_model = sys.argv[1:10]
+vendor, lane, cost_s, tokens_s, status_word, body, codex_out, vibe_dir, req_model, cli_cap = sys.argv[1:11]
 cost_val = float(cost_s)
 total_tokens = int(tokens_s)
 in_tokens = (total_tokens * 2) // 3
 out_tokens = total_tokens - in_tokens
 
 if not body:
-    body = f"Stub agent ({vendor}) completed lane {lane}."
+    env_budget = os.environ.get("RELAY_BUDGET_USD", "")
+    if env_budget:
+        cap_part = f", cli_cap=${cli_cap}" if cli_cap else ""
+        body = f"Stub agent ({vendor}) completed lane {lane} (budget=${env_budget}{cap_part})."
+    else:
+        body = f"Stub agent ({vendor}) completed lane {lane}."
 final_message = f"{body}\nSTATUS: {status_word}"
 
 if vendor == "claude":

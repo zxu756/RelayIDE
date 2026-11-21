@@ -228,8 +228,8 @@ public struct RelayCLIRunner: Sendable {
 
             case "version", "--version":
                 let msg = lang.isChinese
-                    ? "RelayIDE 1.4.0 (macOS arm64 · M2：可用 run 经 agent-relay 在各自 git worktree 中运行智能体，全部通道成功后按固定顺序 git merge --no-ff 合入集成分支并在伪终端执行 verify，需先安装 agent-relay；不修改 base，尚不支持多前置通道、整单预算及桌面界面实时接入)"
-                    : "RelayIDE 1.4.0 (macOS arm64 · M2: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first], merges succeeded lanes onto an integration branch with git merge --no-ff, and runs verify in a PTY; never modifies base, and does not support multi-predecessor lanes, whole-job budgets, or live desktop UI yet)"
+                    ? "RelayIDE 1.4.0 (macOS arm64 · M4：可用 run 经 agent-relay 在各自 git worktree 中运行智能体、按固定顺序 git merge --no-ff 合入集成分支并在伪终端执行 verify，从 .relay/LOG.md 汇总花费与 token 并支持整单美元预算 RELAY_BUDGET_USD，需先安装 agent-relay；不修改 base，尚不支持多前置通道及桌面界面实时接入)"
+                    : "RelayIDE 1.4.0 (macOS arm64 · M4: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first], merges succeeded lanes onto an integration branch with git merge --no-ff, runs verify in a PTY, aggregates .relay/LOG.md spend/tokens, and enforces whole-job budgets via RELAY_BUDGET_USD; never modifies base, and does not support multi-predecessor lanes or live desktop UI yet)"
                 return RelayCLIExecutionResult(stdout: msg, exitCode: 0)
 
             case "init":
@@ -665,7 +665,7 @@ public struct RelayCLIRunner: Sendable {
     public static func helpBanner(language: RelayLanguage) -> String {
         if language.isChinese {
             return """
-            RelayIDE 1.4.0 · 基于 agent-relay 的多智能体工作树运行器、合并流水线与工作区工具（M2：可用 run 经 agent-relay 在各自 git worktree 中运行智能体、按固定顺序 git merge --no-ff 合入集成分支并在伪终端执行 verify，需先安装 agent-relay；不修改 base，尚不支持多前置通道、整单预算及桌面界面实时接入）
+            RelayIDE 1.4.0 · 基于 agent-relay 的多智能体工作树运行器、合并流水线与工作区工具（M4：可用 run 经 agent-relay 在各自 git worktree 中运行智能体、按固定顺序 git merge --no-ff 合入集成分支并在伪终端执行 verify，从 .relay/LOG.md 汇总花费与 token 并支持整单预算 RELAY_BUDGET_USD，需先安装 agent-relay；不修改 base，尚不支持多前置通道及桌面界面实时接入）
             命令（可执行文件名：RelayIDE；Homebrew Cask 软链名：relayide）：
               init [--project <path.relayproj>] [--seed-demo]       新建 .relayproj SQLite WAL 工作区（--seed-demo 会写入带 [演示数据] 标记的合成样本）
               run <plan.json> --project <path.relayproj> [--relay-sh <path>]
@@ -673,17 +673,18 @@ public struct RelayCLIRunner: Sendable {
                                                                     全部通道成功（含无改动）且有提交时，从 base 建 relay/<run-id>/integration 并按拓扑序（并列按计划序）逐条 git merge --no-ff
                                                                     （遇冲突撤销当次合并并停下），全部合入后在集成 worktree 伪终端中执行 verify（verify_timeout 1..86400 秒，默认 1800 秒）。
                                                                     仓库钩子一律跳过（-c core.hooksPath=/dev/null），仓库自身检查请放入 verify；不修改 base；可合入只看 JSON 的 integration.ready
-                                                                    （仅全部通道成功且集成状态为 verified 时为 true，无 verify 时为 false）；不支持多前置通道与 RELAY_BUDGET_USD。
+                                                                    （仅全部通道成功且集成状态为 verified 时为 true，无 verify 时为 false）；不支持多前置通道。设置 RELAY_BUDGET_USD 时须为有限正数
+                                                                    （非法值返回 2），按已结束通道的 LOG.md 美元花费扣减剩余额度传给 relay.sh（并行同波共享启动时刻剩余额度，耗尽后后续通道被拒为 refused）。
                                                                     <lane>.pty 与 verify.pty（上限 16 MiB）均为伪终端记录（\\n 变为 \\r\\n），非逐字节程序原始输出（agent 原始输出见 .relay/NN-<agent>.log）。
-                                                                    退出码：0 全部通道成功且集成状态为 verified、merged（无 verify）或 nothing-to-merge；1 有通道不成功（skipped）、合并冲突或 verify 失败/超时；
-                                                                    2 计划或参数错误（stdout 为空）；125 环境或内部错误（stdout 为空）；130/143 收到 SIGINT/SIGTERM
+                                                                    退出码：0 全部通道成功且集成状态为 verified、merged（无 verify）或 nothing-to-merge；1 有通道不成功（含预算耗尽 refused / skipped）、合并冲突或 verify 失败/超时；
+                                                                    2 计划、参数或 RELAY_BUDGET_USD 错误（stdout 为空）；125 环境或内部错误（stdout 为空）；130/143 收到 SIGINT/SIGTERM
               status [--project <path.relayproj>] [--run <id> | --runs] [--json]
-                                                                    输出已有工作区的 JSON 统计，或输出指定运行 (--run) / 全部运行 (--runs) 的台账 JSON（status 本来就只输出 JSON，写不写 --json 结果相同；
-                                                                    工程不存在或多传位置参数时报错，不自动新建）
+                                                                    输出工作区 JSON 统计（含从 relay_run_lanes 汇总的 totalSpendUSD 与 totalTokensObserved），或输出指定运行 (--run) / 全部运行 (--runs)
+                                                                    含预算与花费汇总字段的台账 JSON（status 本来就只输出 JSON，写不写 --json 结果相同；工程不存在或多传位置参数时报错，不自动新建）
               lanes [--project <path.relayproj>]                    列出工作区已登记的通道与路径归属规则
               dag-waves [--project <path.relayproj>]                按拓扑排序计算已登记 DAG 的并行执行波次
               audit-plugins [--project <path.relayproj>]            列出工作区已保存的 JavaScriptCore 护栏记录
-              export-html <out.html> [--project <path>]             导出双语单文件 HTML 报告（演示工作区带 [演示数据] 标记）
+              export-html <out.html> [--project <path>]             导出含运行与通道花费/token 台账的双语单文件 HTML 报告（演示工作区带 [演示数据] 标记）
               mcp [--project <path.relayproj>]                      在 stdio 上启动 JSON-RPC 2.0 MCP 服务（1 个工具：relay_check_ownership）
               --demo                                                启动桌面界面并显式载入演示数据（默认空状态启动）
               --export-screenshots <output-dir> [--lang zh|en]      导出 2x Retina 演示界面截图（2720x1680，带 DEMO 标记）
@@ -691,7 +692,7 @@ public struct RelayCLIRunner: Sendable {
             """
         }
         return """
-        RelayIDE 1.4.0 · Multi-Agent Worktree Runner, Merge Pipeline & Workspace Tool over agent-relay (M2: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first], merges succeeded lanes onto an integration branch with git merge --no-ff, and runs verify in a PTY; never modifies base, and does not support multi-predecessor lanes, whole-job budgets, or live desktop UI yet)
+        RelayIDE 1.4.0 · Multi-Agent Worktree Runner, Merge Pipeline & Workspace Tool over agent-relay (M4: runs coding agents in isolated git worktrees via agent-relay with 'run' [install agent-relay first], merges succeeded lanes onto an integration branch with git merge --no-ff, runs verify in a PTY, aggregates .relay/LOG.md spend/tokens, and enforces whole-job budgets via RELAY_BUDGET_USD; never modifies base, and does not support multi-predecessor lanes or live desktop UI yet)
         Commands (built executable: RelayIDE; Homebrew Cask symlink: relayide):
           init [--project <path.relayproj>] [--seed-demo]       Initialize .relayproj SQLite WAL workspace (--seed-demo writes [DEMO] synthetic fixtures)
           run <plan.json> --project <path.relayproj> [--relay-sh <path>]
@@ -701,18 +702,20 @@ public struct RelayCLIRunner: Sendable {
                                                                 and stopping on conflict), then run optional verify in a PTY (verify_timeout 1..86400s, default 1800s).
                                                                 Repository hooks are skipped (-c core.hooksPath=/dev/null; put repository checks in verify); base is never modified;
                                                                 merge readiness is determined solely by integration.ready in JSON (true only when verified; false without verify);
-                                                                multi-predecessor lanes and RELAY_BUDGET_USD are rejected. <lane>.pty and verify.pty (16 MiB cap) are PTY terminal
-                                                                transcripts (\\n becomes \\r\\n), not byte-for-byte program output (raw agent output is in .relay/NN-<agent>.log).
+                                                                multi-predecessor lanes are rejected. Optional RELAY_BUDGET_USD must be a finite positive number (invalid exits 2)
+                                                                and passes max(0, budget - completedSpend) to relay.sh (parallel waves share remaining cap at launch; exhausted lanes are refused).
+                                                                <lane>.pty and verify.pty (16 MiB cap) are PTY terminal transcripts (\\n becomes \\r\\n), not byte-for-byte program output (raw agent output is in .relay/NN-<agent>.log).
                                                                 Exit codes: 0 all lanes succeeded and integration is verified, merged (no verify), or nothing-to-merge;
-                                                                1 non-succeeded lane (skipped), merge conflict, or verify failed/timed out; 2 plan/usage error (empty stdout);
+                                                                1 non-succeeded lane (including budget-refused/skipped), merge conflict, or verify failed/timed out; 2 plan/usage/budget error (empty stdout);
                                                                 125 environment/internal error (empty stdout); 130/143 SIGINT/SIGTERM
           status [--project <path.relayproj>] [--run <id> | --runs] [--json]
-                                                                Print workspace JSON statistics, or JSON ledger for one run (--run) or all runs (--runs) (status always outputs JSON,
+                                                                Print workspace JSON statistics (aggregating totalSpendUSD & totalTokensObserved from relay_run_lanes), or JSON ledger
+                                                                with run-level spend/budget totals for one run (--run) or all runs (--runs) (status always outputs JSON,
                                                                 so --json produces identical output to omitting it; errors if --project does not exist or positional args are given)
           lanes [--project <path.relayproj>]                    List registered worktree lanes & ownership globs
           dag-waves [--project <path.relayproj>]                Compute topological execution waves for registered DAG
           audit-plugins [--project <path.relayproj>]            List saved JavaScriptCore guardrail findings in workspace
-          export-html <out.html> [--project <path>]             Export bilingual standalone HTML report (carries [DEMO] banner on seeded demo workspaces)
+          export-html <out.html> [--project <path>]             Export bilingual standalone HTML report with run/lane spend ledger (carries [DEMO] banner on seeded demo workspaces)
           mcp [--project <path.relayproj>]                      Start JSON-RPC 2.0 MCP server on stdio (1 tool: relay_check_ownership)
           --demo                                                Launch desktop GUI with synthetic demo campaign (starts empty by default)
           --export-screenshots <output-dir> [--lang zh|en]      Render 2x Retina demo screenshots (2720x1680, with visible DEMO badge)

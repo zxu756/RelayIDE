@@ -282,13 +282,24 @@ public enum RelaySchemaMigrationCatalog {
         expectedTables: ["relay_run_integration", "relay_run_merges"]
     )
 
+    public static let v7RelayRunBudgetUSD = RelaySchemaMigrationDescriptor(
+        version: 7,
+        codename: "v7_relay_run_budget_usd",
+        summary: "Adds budget_usd column to relay_runs for M4 cross-lane RELAY_BUDGET_USD tracking and LOG.md spend aggregation.",
+        ddlStatements: [
+            "ALTER TABLE relay_runs ADD COLUMN budget_usd REAL;"
+        ],
+        expectedTables: ["relay_runs", "relay_run_lanes"]
+    )
+
     public static let allMigrations: [RelaySchemaMigrationDescriptor] = [
         v1CoreWorkspaceAndDAG,
         v2SemanticMergeLedger,
         v3WiretapAndGuardrails,
         v4UndoJournalAndFTS5Index,
         v5RelayRunsAndRunLanes,
-        v6RelayRunIntegrationAndMerges
+        v6RelayRunIntegrationAndMerges,
+        v7RelayRunBudgetUSD
     ]
 
     public static func descriptor(forVersion version: Int) -> RelaySchemaMigrationDescriptor? {
@@ -1282,10 +1293,24 @@ public extension RelayProjectDatabase {
                 }
             }
 
+            var relayRunsHasBudgetColumn = false
+            var colStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "PRAGMA table_info(relay_runs);", -1, &colStmt, nil) == SQLITE_OK,
+               let preparedCol = colStmt {
+                defer { sqlite3_finalize(preparedCol) }
+                while sqlite3_step(preparedCol) == SQLITE_ROW {
+                    if RelayFTS5SearchStore.colString(preparedCol, 1) == "budget_usd" {
+                        relayRunsHasBudgetColumn = true
+                        break
+                    }
+                }
+            }
+
             var records: [RelayAppliedMigrationRecord] = []
             for desc in RelaySchemaMigrationCatalog.allMigrations {
                 guard let ts = appliedEpochs[desc.version] else { continue }
-                let verified = desc.expectedTables.allSatisfy { existingTables.contains($0) }
+                let tablesOK = desc.expectedTables.allSatisfy { existingTables.contains($0) }
+                let verified = desc.version == 7 ? (tablesOK && relayRunsHasBudgetColumn) : tablesOK
                 records.append(
                     RelayAppliedMigrationRecord(
                         version: desc.version,

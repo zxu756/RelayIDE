@@ -866,7 +866,21 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
                 return SingleLaneCompletion(record: preSpawnCancelled, headCommitOID: startCommitOID)
             }
 
-            // 2. Spawn `<relay.sh> <agent> <worktree-abs-path> <prompt-abs-path>` inside a real PTY
+            // 2. Spawn `<relay.sh> <agent> <worktree-abs-path> <prompt-abs-path>` inside a real PTY,
+            // injecting remaining whole-job budget `max(0, budget - spentSoFar)` formatted as `%.4f` (P2 = A).
+            var childEnvironment = environment
+            let spentBeforeSpawn = snapshotCompletedSpendSoFarUSD()
+            if let jobBudget = validatedPlan.budgetUSD {
+                let remaining = max(0.0, jobBudget - spentBeforeSpawn)
+                childEnvironment["RELAY_BUDGET_USD"] = String(
+                    format: "%.4f",
+                    locale: Locale(identifier: "en_US_POSIX"),
+                    remaining
+                )
+            } else {
+                childEnvironment.removeValue(forKey: "RELAY_BUDGET_USD")
+            }
+
             let session = POSIXPseudoTerminalSession(laneID: spec.id)
             try session.spawn(
                 executablePath: relayScript.url.standardizedFileURL.path,
@@ -876,7 +890,7 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
                     spec.resolvedPromptURL.standardizedFileURL.path
                 ],
                 workingDirectory: worktreeURL.path,
-                baseEnvironment: environment,
+                baseEnvironment: childEnvironment,
                 rawOutputFilePath: ptyURL.path
             )
 
@@ -980,6 +994,27 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
                     exitCode: exitReason.exitCode,
                     signal: exitReason.terminationSignal,
                     reason: isZh ? "已取消（收到 \(sigName)）" : "cancelled (received \(sigName))"
+                )
+            } else if let jobBudget = validatedPlan.budgetUSD,
+                      baseClassified.status == .refused,
+                      baseClassified.exitCode == 2,
+                      !spend.didAppendStepEntry,
+                      (ptyText.contains("not started: the job budget") || (baseClassified.reason?.contains("not started: the job budget") == true)) {
+                let isZh = language.isChinese
+                let posix = Locale(identifier: "en_US_POSIX")
+                let spentAtRefusal = max(spentBeforeSpawn, snapshotCompletedSpendSoFarUSD())
+                let spentStr = String(format: "%.4f", locale: posix, spentAtRefusal)
+                let budgetStr = String(format: "%.4f", locale: posix, jobBudget)
+                let relayRefusal = RelayLaneOutcomeClassifier.extractLastRelayRefusalLine(from: ptyText)
+                    ?? (baseClassified.reason ?? "relay: not started: the job budget is spent")
+                let budgetReason = isZh
+                    ? "预算已用完（已花费 $\(spentStr) / 预算 $\(budgetStr)）；\(relayRefusal)"
+                    : "budget spent ($\(spentStr) / $\(budgetStr)); \(relayRefusal)"
+                effectiveOutcome = RelayClassifiedLaneOutcome(
+                    status: .refused,
+                    exitCode: 2,
+                    signal: nil,
+                    reason: budgetReason
                 )
             } else {
                 effectiveOutcome = baseClassified
@@ -1208,6 +1243,18 @@ public final class RelayDAGRunScheduler: @unchecked Sendable {
         let values = Array(laneRecordsByID.values)
         stateLock.unlock()
         return values.sorted { $0.ordinal < $1.ordinal }
+    }
+
+    private func snapshotCompletedSpendSoFarUSD() -> Double {
+        stateLock.lock()
+        let raw = laneRecordsByID.values.reduce(0.0) { acc, rec in
+            guard rec.status.isTerminal, rec.costSource == "usd", let usd = rec.costUSD else {
+                return acc
+            }
+            return acc + usd
+        }
+        stateLock.unlock()
+        return (raw * 100_000_000).rounded() / 100_000_000
     }
 
     private func persistLaneRecord(_ record: RelayRunLaneRecord) throws {

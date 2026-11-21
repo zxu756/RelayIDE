@@ -48,6 +48,36 @@ public enum RelayPlanValidator {
         RelayPlanLaneSpec.isValidLaneID(id)
     }
 
+    private static let positiveDecimalBudgetRegex = try! NSRegularExpression(
+        pattern: #"^[+]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$"#
+    )
+
+    /// Parses `RELAY_BUDGET_USD` when non-empty. Empty or unset returns `nil` (no whole-job cap);
+    /// `<= 0`, `NaN`, `inf`, or non-numeric literals throw `RelayIDEError.invalidRunPlan` (`exit 2`).
+    public static func parseWholeJobBudgetUSD(
+        from environment: [String: String],
+        language: RelayLanguage
+    ) throws -> Double? {
+        guard let rawEnvBudget = environment["RELAY_BUDGET_USD"], !rawEnvBudget.isEmpty else {
+            return nil
+        }
+        let isZh = language.isChinese
+        let trimmed = rawEnvBudget.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fullRange = NSRange(location: 0, length: (trimmed as NSString).length)
+        guard !trimmed.isEmpty,
+              positiveDecimalBudgetRegex.firstMatch(in: trimmed, options: [], range: fullRange) != nil,
+              let parsed = Double(trimmed),
+              parsed.isFinite,
+              parsed > 0.0 else {
+            throw RelayIDEError.invalidRunPlan(
+                isZh
+                    ? "环境变量 RELAY_BUDGET_USD 非法（'\(rawEnvBudget)'）：必须为有限正数（例如 0.50 或 2.00）"
+                    : "Invalid RELAY_BUDGET_USD ('\(rawEnvBudget)'): must be a finite positive number in USD (for example 0.50 or 2.00)"
+            )
+        }
+        return parsed
+    }
+
     /// Validates `plan.json`, environment preconditions (`RELAY_BUDGET_USD`), lane IDs, prompts, single-predecessor DAG,
     /// target Git repository, `--project` outside `repo` working tree, `base` commit OID, and Git committer identity.
     /// Throws `RelayIDEError.invalidRunPlan` (`cliExitCode == 2`) before any worktree, branch, directory, or DB row is created.
@@ -59,15 +89,8 @@ public enum RelayPlanValidator {
     ) throws -> RelayValidatedRunPlan {
         let isZh = language.isChinese
 
-        // 1. Reject RELAY_BUDGET_USD prior to M4 (R44, R63)
-        if let rawBudget = environment["RELAY_BUDGET_USD"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !rawBudget.isEmpty {
-            throw RelayIDEError.invalidRunPlan(
-                isZh
-                    ? "当前不支持环境变量 RELAY_BUDGET_USD（各通道在独立 worktree 中不累计整单预算，预算控制排在 M4）"
-                    : "RELAY_BUDGET_USD is not supported yet (spend does not accumulate across isolated lane worktrees; whole-job budget enforcement is scheduled for M4)"
-            )
-        }
+        // 1. Validate optional whole-job budget RELAY_BUDGET_USD (unset/empty = unlimited; non-empty must be finite positive USD)
+        let parsedBudgetUSD = try parseWholeJobBudgetUSD(from: environment, language: language)
 
         // 2. Read & decode plan.json
         let standardizedPlanURL = planFileURL.standardizedFileURL
@@ -391,7 +414,8 @@ public enum RelayPlanValidator {
             baseCommitOID: baseCommitOID,
             lanes: validatedLanes,
             verifyCommand: normalizedVerify,
-            verifyTimeoutSec: effectiveVerifyTimeoutSec
+            verifyTimeoutSec: effectiveVerifyTimeoutSec,
+            budgetUSD: parsedBudgetUSD
         )
     }
 
@@ -820,6 +844,7 @@ public struct RelayRunExecutor: Sendable {
                 status: .running,
                 reason: nil,
                 relayidePID: getpid(),
+                budgetUSD: validatedPlan.budgetUSD,
                 lanes: pendingLanes,
                 integration: pendingIntegration
             )

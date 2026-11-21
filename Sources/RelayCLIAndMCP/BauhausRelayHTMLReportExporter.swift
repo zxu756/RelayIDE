@@ -15,7 +15,7 @@ public struct BauhausRelayHTMLReportExporter: Sendable {
         let stats = try orchestrator.database.computeStats()
         let lanes = try orchestrator.database.allLanes()
         let mergeReports = try orchestrator.database.allMergeReports()
-        let spans = try orchestrator.database.allWiretapSpans()
+        let runs = try orchestrator.database.allRuns(reconcileWithLock: true)
         let findings = try orchestrator.database.allGuardrailFindings()
         let isDemoWorkspace = (orchestrator.database.getMeta(key: "is_demo_workspace") == "1")
 
@@ -73,20 +73,39 @@ public struct BauhausRelayHTMLReportExporter: Sendable {
             """
         }.joined(separator: "\n")
 
-        let spanRowsHTML = spans.map { s in
-            let vendorEN = s.vendor.localizedDisplayName(in: .en)
-            let vendorZH = s.vendor.localizedDisplayName(in: .zhHans)
-            return """
-            <tr>
-              <td class="mono">\(escapeHTML(s.laneID))</td>
-              <td>\(bilingualSpan(en: vendorEN, zh: vendorZH, initial: initialLanguage))</td>
-              <td class="mono">\(escapeHTML(s.modelIdentifier))</td>
-              <td class="num">\(s.inputTokens)</td>
-              <td class="num">\(s.cachedReadTokens)</td>
-              <td class="num">\(s.outputTokens + s.reasoningTokens)</td>
-              <td class="num">$\(String(format: "%.4f", s.costUSD))</td>
-            </tr>
-            """
+        let posix = Locale(identifier: "en_US_POSIX")
+        let runLaneRowsHTML = runs.flatMap { run in
+            run.lanes.map { lane in
+                let vendorEN = lane.agent.agentVendor.localizedDisplayName(in: .en)
+                let vendorZH = lane.agent.agentVendor.localizedDisplayName(in: .zhHans)
+                let statusEN = lane.status.rawValue
+                let statusZH = lane.status.localizedLabel(in: .zhHans)
+                let sourceText = lane.costSource ?? "-"
+                let tokensCell = lane.tokens.map(String.init) ?? "-"
+                let costCell: String
+                if let usd = lane.costUSD {
+                    costCell = "$" + String(format: "%.4f", locale: posix, usd)
+                } else if lane.costSource == "unpriced" {
+                    costCell = bilingualSpan(en: "unpriced", zh: "未计价", initial: initialLanguage)
+                } else {
+                    costCell = bilingualSpan(en: "no record", zh: "无记录", initial: initialLanguage)
+                }
+                let budgetSuffixEN = run.budgetUSD.map { " (cap $" + String(format: "%.4f", locale: posix, $0) + ")" } ?? ""
+                let budgetSuffixZH = run.budgetUSD.map { "（上限 $" + String(format: "%.4f", locale: posix, $0) + "）" } ?? ""
+                let runLabelEN = "\(run.runID)\(budgetSuffixEN)"
+                let runLabelZH = "\(run.runID)\(budgetSuffixZH)"
+                return """
+                <tr>
+                  <td class="mono">\(bilingualSpan(en: runLabelEN, zh: runLabelZH, initial: initialLanguage))</td>
+                  <td class="mono">\(escapeHTML(lane.laneID))</td>
+                  <td>\(bilingualSpan(en: vendorEN, zh: vendorZH, initial: initialLanguage))</td>
+                  <td>\(bilingualSpan(en: statusEN, zh: statusZH, initial: initialLanguage))</td>
+                  <td class="mono">\(escapeHTML(sourceText))</td>
+                  <td class="num">\(escapeHTML(tokensCell))</td>
+                  <td class="num">\(costCell)</td>
+                </tr>
+                """
+            }
         }.joined(separator: "\n")
 
         let findingRowsHTML = findings.map { f in
@@ -427,22 +446,22 @@ public struct BauhausRelayHTMLReportExporter: Sendable {
             </section>
 
             <section>
-              <h2 data-en="3. Recorded Token &amp; USD Budget Ledger" data-zh="3. 已记录令牌与美元预算台账">\(escapeHTML(pick("3. Recorded Token & USD Budget Ledger", "3. 已记录令牌与美元预算台账")))</h2>
+              <h2 data-en="3. Recorded Run &amp; Lane Spend Ledger (LOG.md)" data-zh="3. 已记录运行与通道花费台账 (LOG.md)">\(escapeHTML(pick("3. Recorded Run & Lane Spend Ledger (LOG.md)", "3. 已记录运行与通道花费台账 (LOG.md)")))</h2>
               <div class="table-wrap">
                 <table>
                   <thead>
                     <tr>
+                      <th data-en="Run" data-zh="运行编号">\(pick("Run", "运行编号"))</th>
                       <th data-en="Lane" data-zh="通道">\(pick("Lane", "通道"))</th>
                       <th data-en="Vendor" data-zh="智能体厂商">\(pick("Vendor", "智能体厂商"))</th>
-                      <th data-en="Model" data-zh="模型标识">\(pick("Model", "模型标识"))</th>
-                      <th class="num" data-en="Input" data-zh="输入令牌">\(pick("Input", "输入令牌"))</th>
-                      <th class="num" data-en="Cached" data-zh="缓存命中">\(pick("Cached", "缓存命中"))</th>
-                      <th class="num" data-en="Output" data-zh="输出令牌">\(pick("Output", "输出令牌"))</th>
+                      <th data-en="Status" data-zh="状态">\(pick("Status", "状态"))</th>
+                      <th data-en="Cost Source" data-zh="计费来源">\(pick("Cost Source", "计费来源"))</th>
+                      <th class="num" data-en="Tokens" data-zh="令牌数">\(pick("Tokens", "令牌数"))</th>
                       <th class="num" data-en="Cost (USD)" data-zh="费用 (USD)">\(pick("Cost (USD)", "费用 (USD)"))</th>
                     </tr>
                   </thead>
                   <tbody>
-                    \(spanRowsHTML)
+                    \(runLaneRowsHTML)
                   </tbody>
                 </table>
               </div>

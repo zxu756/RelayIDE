@@ -68,13 +68,15 @@ struct CLIMCPAndWorkbenchShellTests {
 
         let versionOut = try await cli.execute(arguments: ["--version"])
         #expect(versionOut.contains("RelayIDE 1.4.0"))
-        #expect(versionOut.contains("M2"))
+        #expect(versionOut.contains("M4"))
+        #expect(versionOut.contains("RELAY_BUDGET_USD"))
         #expect(versionOut.contains("agent-relay"))
         #expect(!versionOut.contains("does not launch coding agents yet"))
         #expect(!versionOut.contains("does not merge branches"))
 
         let versionZhOut = try await cli.execute(arguments: ["version", "--lang", "zh"])
-        #expect(versionZhOut.contains("M2"))
+        #expect(versionZhOut.contains("M4"))
+        #expect(versionZhOut.contains("RELAY_BUDGET_USD"))
         #expect(versionZhOut.contains("agent-relay"))
         #expect(!versionZhOut.contains("尚不会启动任何 coding agent"))
         #expect(!versionZhOut.contains("还不合并分支"))
@@ -104,7 +106,9 @@ struct CLIMCPAndWorkbenchShellTests {
         let stats = try JSONDecoder().decode(RelayWorkspaceStats.self, from: Data(statusJSON.utf8))
         #expect(stats.activeLaneCount >= 4)
         #expect(stats.taskNodeCount >= 4)
-        #expect(stats.schemaVersion == 6)
+        #expect(stats.schemaVersion == 7)
+        #expect(stats.totalSpendUSD > 0)
+        #expect(stats.totalTokensObserved > 0)
 
         // 3. lanes --project <path>
         let lanesOut = try await cli.execute(arguments: ["lanes", "--project", bundlePath])
@@ -1366,7 +1370,7 @@ struct CLIMCPAndWorkbenchShellTests {
         )
         #expect(plainStatusRes.exitCode == 0)
         let m0Stats = try JSONDecoder().decode(RelayWorkspaceStats.self, from: Data(plainStatusRes.stdout.utf8))
-        #expect(m0Stats.schemaVersion == 6)
+        #expect(m0Stats.schemaVersion == 7)
     }
 
     // MARK: - 27. M1 `RelayIDE run` Pre-Run Helpers & Exhaustive Unit Tests (§2, §3, §4, §9, §12)
@@ -1514,10 +1518,12 @@ struct CLIMCPAndWorkbenchShellTests {
         await expectExit2("project inside repo", args: ["run", validPlanPath, "--project", insideRepoProj.path, "--relay-sh", fx.fakeRelayShURL.path])
         try FileManager.default.removeItem(at: insideRepoProj)
 
-        // 5. RELAY_BUDGET_USD set in environment (R44)
-        var budgetEnv = fx.baseEnvironment
-        budgetEnv["RELAY_BUDGET_USD"] = "10.00"
-        await expectExit2("RELAY_BUDGET_USD set", args: ["run", validPlanPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path], env: budgetEnv)
+        // 5. Invalid RELAY_BUDGET_USD in environment (`0` and `bad`)
+        for badBudget in ["0", "bad"] {
+            var budgetEnv = fx.baseEnvironment
+            budgetEnv["RELAY_BUDGET_USD"] = badBudget
+            await expectExit2("invalid RELAY_BUDGET_USD=\(badBudget)", args: ["run", validPlanPath, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path], env: budgetEnv)
+        }
 
         // 6. Malformed JSON & wrong field type
         let malformedPath = try writePlan("malformed.json", rawJSON: "{not valid json")
@@ -3605,7 +3611,7 @@ struct CLIMCPAndWorkbenchShellTests {
 
         let cli = RelayCLIRunner()
         var budgetEnv = fx.baseEnvironment
-        budgetEnv["RELAY_BUDGET_USD"] = "10.00"
+        budgetEnv["RELAY_BUDGET_USD"] = "-1.50"
 
         for lang in ["en", "zh"] {
             let budgetRes = await cli.executeCommand(
@@ -3615,7 +3621,7 @@ struct CLIMCPAndWorkbenchShellTests {
             #expect(budgetRes.exitCode == 2)
             #expect(budgetRes.stdout.isEmpty)
             #expect(budgetRes.stderr.contains("RELAY_BUDGET_USD"))
-            #expect(budgetRes.stderr.contains("M4"), "(\(lang)): expected M4 in budget error, got '\(budgetRes.stderr)'")
+            #expect(!budgetRes.stderr.contains("M4"), "(\(lang)): stale M4 promise found in budget error: '\(budgetRes.stderr)'")
             #expect(!budgetRes.stderr.contains("M1"), "(\(lang)): stale M1 found in budget error: '\(budgetRes.stderr)'")
             #expect(!budgetRes.stderr.contains("M2"), "(\(lang)): stale M2 found in budget error: '\(budgetRes.stderr)'")
 
@@ -4269,6 +4275,7 @@ struct CLIMCPAndWorkbenchShellTests {
                 status: copy.status,
                 reason: copy.reason,
                 relayidePID: 1,
+                budgetUSD: copy.budgetUSD,
                 lanes: copy.lanes.map { l in
                     RelayRunLaneRecord(
                         runID: "RUN",
@@ -4876,8 +4883,10 @@ struct CLIMCPAndWorkbenchShellTests {
 
         let dossierURL = Self.repositoryRootURL.appendingPathComponent("docs/demo-relay-dossier.html")
         let dossierHTML = try String(contentsOf: dossierURL, encoding: .utf8)
-        #expect(dossierHTML.contains("Schema v6"))
-        #expect(dossierHTML.contains("架构 v6"))
+        #expect(dossierHTML.contains("Schema v7"))
+        #expect(dossierHTML.contains("架构 v7"))
+        #expect(!dossierHTML.contains("Schema v6"))
+        #expect(!dossierHTML.contains("架构 v6"))
         #expect(!dossierHTML.contains("Schema v5"))
         #expect(!dossierHTML.contains("架构 v5"))
     }
@@ -4972,5 +4981,469 @@ struct CLIMCPAndWorkbenchShellTests {
 
         #expect(removedContent == [["type": "text", "text": "Unknown tool 'relay_semantic_merge'"]])
         #expect(unknownContent == [["type": "text", "text": "Unknown tool 'unknown_tool_probe'"]])
+    }
+
+    // MARK: - 43. M4 Spend Aggregation, Workspace Stats, HTML Dossier & Whole-Job `RELAY_BUDGET_USD` (Real `relay.sh` + `stub-agent.sh`)
+
+    private struct RealRelayStubFixture {
+        let base: IsolatedRunFixture
+        let realRelay: ResolvedRelayScript
+        let stubBinURL: URL
+        let decoyDirURL: URL
+        let decoyMarkerURL: URL
+        let tracesDirURL: URL
+        let environment: [String: String]
+    }
+
+    private func makeRealRelayStubFixture(prefix: String) throws -> RealRelayStubFixture {
+        let base = try makeIsolatedRunFixture(prefix: prefix)
+        let realRelay = try RelayRunExecutor.resolveAndVerifyRelayScript(
+            explicitPath: nil,
+            environment: ProcessInfo.processInfo.environment,
+            language: .en
+        )
+
+        let stubDir = base.rootURL.appendingPathComponent("stub-bin", isDirectory: true)
+        let decoyDir = base.rootURL.appendingPathComponent("decoys", isDirectory: true)
+        let tracesDir = base.rootURL.appendingPathComponent("traces", isDirectory: true)
+        try FileManager.default.createDirectory(at: stubDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: decoyDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tracesDir, withIntermediateDirectories: true)
+
+        let sourceStubURL = Self.repositoryRootURL.appendingPathComponent("Tests/Support/stub-agent.sh")
+        let stubBinURL = stubDir.appendingPathComponent("stub-agent.sh")
+        try FileManager.default.copyItem(at: sourceStubURL, to: stubBinURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stubBinURL.path)
+
+        let decoyMarkerURL = base.rootURL.appendingPathComponent("decoy-invoked.marker")
+        for cliName in ["claude", "codex", "agy", "vibe", "opencode"] {
+            let decoyURL = decoyDir.appendingPathComponent(cliName)
+            let script = """
+            #!/usr/bin/env bash
+            printf 'decoy %s invoked: %s\\n' "\(cliName)" "$*" >> "\(decoyMarkerURL.path)"
+            exit 99
+            """
+            try script.write(to: decoyURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: decoyURL.path)
+        }
+
+        var env = base.baseEnvironment
+        env["PATH"] = "\(decoyDir.path):/usr/bin:/bin:/usr/sbin:/sbin"
+        env["RELAYIDE_RELAY_SH"] = realRelay.url.path
+        env["RELAY_CLAUDE_BIN"] = stubBinURL.path
+        env["RELAY_CODEX_BIN"] = stubBinURL.path
+        env["RELAY_AGY_BIN"] = stubBinURL.path
+        env["RELAY_VIBE_BIN"] = stubBinURL.path
+        env["STUB_TRACE_DIR"] = tracesDir.path
+        env.removeValue(forKey: "RELAY_BUDGET_USD")
+        env.removeValue(forKey: "RELAY_WORKER")
+        env.removeValue(forKey: "RELAY_REAL_AGENTS")
+        env.removeValue(forKey: "CLAUDECODE")
+
+        return RealRelayStubFixture(
+            base: base,
+            realRelay: realRelay,
+            stubBinURL: stubBinURL,
+            decoyDirURL: decoyDir,
+            decoyMarkerURL: decoyMarkerURL,
+            tracesDirURL: tracesDir,
+            environment: env
+        )
+    }
+
+    @Test("M4 Spend: 4-vendor run via real relay.sh + stub-agent.sh records usd/unpriced spend matching relay_util.py spent, status --project, and export-html")
+    func m4FourVendorSpendSummaryWorkspaceStatsAndHTMLExport() async throws {
+        let fx = try makeRealRelayStubFixture(prefix: "m4-four-vendor")
+        defer { try? FileManager.default.removeItem(at: fx.base.rootURL) }
+
+        let promptsDir = fx.base.rootURL.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "STUB LANE c1\nSTUB WRITE c1.txt claude\nSTUB COST 0.1234\n".write(
+            to: promptsDir.appendingPathComponent("c1.md"), atomically: true, encoding: .utf8
+        )
+        try "STUB LANE v1\nSTUB WRITE v1.txt vibe\nSTUB COST 0.2500\n".write(
+            to: promptsDir.appendingPathComponent("v1.md"), atomically: true, encoding: .utf8
+        )
+        try "STUB LANE a1\nSTUB WRITE a1.txt agy\nSTUB TOKENS 4500\n".write(
+            to: promptsDir.appendingPathComponent("a1.md"), atomically: true, encoding: .utf8
+        )
+        try "STUB LANE x1\nSTUB WRITE x1.txt codex\nSTUB TOKENS 1200\n".write(
+            to: promptsDir.appendingPathComponent("x1.md"), atomically: true, encoding: .utf8
+        )
+
+        let planURL = fx.base.rootURL.appendingPathComponent("plan.json")
+        try JSONSerialization.data(
+            withJSONObject: [
+                "repo": fx.base.repoURL.path,
+                "base": "main",
+                "lanes": [
+                    ["id": "c1", "agent": "claude", "prompt": "prompts/c1.md", "after": []],
+                    ["id": "v1", "agent": "vibe",   "prompt": "prompts/v1.md", "after": []],
+                    ["id": "a1", "agent": "agy",    "prompt": "prompts/a1.md", "after": []],
+                    ["id": "x1", "agent": "codex",  "prompt": "prompts/x1.md", "after": []]
+                ],
+                "verify": "true"
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        ).write(to: planURL, options: .atomic)
+
+        let cli = RelayCLIRunner()
+        let runRes = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.base.projectURL.path, "--lang", "en"],
+            environment: fx.environment
+        )
+        #expect(runRes.exitCode == 0, "stderr=\(runRes.stderr)")
+        #expect(!FileManager.default.fileExists(atPath: fx.decoyMarkerURL.path))
+
+        let runObj = try #require(try JSONSerialization.jsonObject(with: Data(runRes.stdout.utf8)) as? [String: Any])
+        let runID = try #require(runObj["runID"] as? String)
+
+        let statusRunRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.base.projectURL.path, "--run", runID, "--lang", "en"],
+            environment: fx.environment
+        )
+        #expect(statusRunRes.exitCode == 0)
+        #expect(statusRunRes.stdout == runRes.stdout)
+
+        let statusRunsRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.base.projectURL.path, "--runs", "--lang", "en"],
+            environment: fx.environment
+        )
+        #expect(statusRunsRes.exitCode == 0)
+        let runsArr = try #require(try JSONSerialization.jsonObject(with: Data(statusRunsRes.stdout.utf8)) as? [[String: Any]])
+        #expect(runsArr.count == 1)
+
+        // Top-level run summary fields
+        #expect(runObj["budgetUSD"] is NSNull)
+        #expect(abs((runObj["totalCostUSD"] as? Double ?? -1) - 0.3734) < 1e-9)
+        #expect(runObj["unpricedTokens"] as? Int == 5700)
+        #expect(runObj["pricedLaneCount"] as? Int == 2)
+        #expect(runObj["unpricedLaneCount"] as? Int == 2)
+        #expect(runObj["noRecordLaneCount"] as? Int == 0)
+        #expect(runObj["budgetExhausted"] as? Bool == false)
+
+        // Per-lane verification + independent relay_util.py spent check
+        let lanesArr = try #require(runObj["lanes"] as? [[String: Any]])
+        let laneByID = Dictionary(uniqueKeysWithValues: lanesArr.compactMap { l in (l["laneID"] as? String).map { ($0, l) } })
+        let c1 = try #require(laneByID["c1"])
+        let v1 = try #require(laneByID["v1"])
+        let a1 = try #require(laneByID["a1"])
+        let x1 = try #require(laneByID["x1"])
+
+        #expect(abs((c1["costUSD"] as? Double ?? -1) - 0.1234) < 1e-9)
+        #expect(c1["costSource"] as? String == "usd")
+        #expect(c1["tokens"] is NSNull)
+        #expect(abs((v1["costUSD"] as? Double ?? -1) - 0.25) < 1e-9)
+        #expect(v1["costSource"] as? String == "usd")
+        #expect(v1["tokens"] is NSNull)
+
+        #expect(a1["costUSD"] is NSNull)
+        #expect(a1["tokens"] as? Int == 4500)
+        #expect(a1["costSource"] as? String == "unpriced")
+        #expect(x1["costUSD"] is NSNull)
+        #expect(x1["tokens"] as? Int == 1200)
+        #expect(x1["costSource"] as? String == "unpriced")
+
+        var utilSpentSum = 0.0
+        for lid in ["c1", "v1", "a1", "x1"] {
+            let wt = try #require(laneByID[lid]?["worktreePath"] as? String)
+            let logPath = (wt as NSString).appendingPathComponent(".relay/LOG.md")
+            let utilOut = try runTool("/usr/bin/python3", ["-I", fx.realRelay.utilURL.path, "spent", logPath], environment: fx.environment)
+            let val = try #require(Double(utilOut.stdout.trimmingCharacters(in: .whitespacesAndNewlines)))
+            utilSpentSum += val
+        }
+        #expect(abs(utilSpentSum - 0.3734) < 1e-9)
+
+        // Workspace-level status --project & export-html
+        let projStatusRes = await cli.executeCommand(
+            arguments: ["status", "--project", fx.base.projectURL.path, "--lang", "en"],
+            environment: fx.environment
+        )
+        #expect(projStatusRes.exitCode == 0)
+        let stats = try JSONDecoder().decode(RelayWorkspaceStats.self, from: Data(projStatusRes.stdout.utf8))
+        #expect(stats.schemaVersion == 7)
+        #expect(abs(stats.totalSpendUSD - 0.3734) < 1e-9)
+        #expect(stats.totalTokensObserved == 5700)
+
+        let htmlURL = fx.base.rootURL.appendingPathComponent("real-dossier.html")
+        let htmlRes = await cli.executeCommand(
+            arguments: ["export-html", htmlURL.path, "--project", fx.base.projectURL.path, "--lang", "en"],
+            environment: fx.environment
+        )
+        #expect(htmlRes.exitCode == 0)
+        let html = try String(contentsOf: htmlURL, encoding: .utf8)
+        #expect(html.contains("$0.3734"))
+        #expect(html.contains("5700"))
+        #expect(html.contains("$0.1234"))
+        #expect(html.contains("$0.2500"))
+        #expect(html.contains("4500"))
+        #expect(html.contains("1200"))
+        #expect(!html.contains("[DEMO]"))
+        #expect(!html.contains("[演示数据]"))
+    }
+
+    @Test("M4 Budget: a->b->c->d chain with RELAY_BUDGET_USD=0.50 refuses c via relay.sh, skips d, and exits 1 in EN and ZH")
+    func m4ChainBudgetExhaustionRefusesThirdLaneAndSkipsDownstreamInENAndZH() async throws {
+        for lang in ["en", "zh"] {
+            let fx = try makeRealRelayStubFixture(prefix: "m4-chain-exhaust-\(lang)")
+            defer { try? FileManager.default.removeItem(at: fx.base.rootURL) }
+
+            let promptsDir = fx.base.rootURL.appendingPathComponent("prompts", isDirectory: true)
+            try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+            try "STUB LANE a\nSTUB WRITE a.txt ok\nSTUB COST 0.3000\n".write(
+                to: promptsDir.appendingPathComponent("a.md"), atomically: true, encoding: .utf8
+            )
+            try "STUB LANE b\nSTUB WRITE b.txt ok\nSTUB COST 0.2500\n".write(
+                to: promptsDir.appendingPathComponent("b.md"), atomically: true, encoding: .utf8
+            )
+            try "STUB LANE c\nSTUB WRITE c.txt should-not-run\nSTUB COST 0.1000\n".write(
+                to: promptsDir.appendingPathComponent("c.md"), atomically: true, encoding: .utf8
+            )
+            try "STUB LANE d\nSTUB WRITE d.txt should-be-skipped\nSTUB TOKENS 900\n".write(
+                to: promptsDir.appendingPathComponent("d.md"), atomically: true, encoding: .utf8
+            )
+
+            let planURL = fx.base.rootURL.appendingPathComponent("plan.json")
+            try JSONSerialization.data(
+                withJSONObject: [
+                    "repo": fx.base.repoURL.path,
+                    "base": "main",
+                    "lanes": [
+                        ["id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []],
+                        ["id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": ["a"]],
+                        ["id": "c", "agent": "claude", "prompt": "prompts/c.md", "after": ["b"]],
+                        ["id": "d", "agent": "codex",  "prompt": "prompts/d.md", "after": ["c"]]
+                    ]
+                ],
+                options: [.prettyPrinted, .sortedKeys]
+            ).write(to: planURL, options: .atomic)
+
+            var env = fx.environment
+            env["RELAY_BUDGET_USD"] = "0.50"
+
+            let cli = RelayCLIRunner()
+            let res = await cli.executeCommand(
+                arguments: ["run", planURL.path, "--project", fx.base.projectURL.path, "--lang", lang],
+                environment: env
+            )
+            #expect(res.exitCode == 1, "(\(lang)): expected exit 1, got \(res.exitCode) stderr=\(res.stderr)")
+            #expect(!FileManager.default.fileExists(atPath: fx.decoyMarkerURL.path))
+
+            let runObj = try #require(try JSONSerialization.jsonObject(with: Data(res.stdout.utf8)) as? [String: Any])
+            #expect(abs((runObj["budgetUSD"] as? Double ?? -1) - 0.50) < 1e-9)
+            #expect(abs((runObj["totalCostUSD"] as? Double ?? -1) - 0.55) < 1e-9)
+            #expect(runObj["pricedLaneCount"] as? Int == 2)
+            #expect(runObj["noRecordLaneCount"] as? Int == 1)
+            #expect(runObj["budgetExhausted"] as? Bool == true)
+
+            let lanesArr = try #require(runObj["lanes"] as? [[String: Any]])
+            let byID = Dictionary(uniqueKeysWithValues: lanesArr.compactMap { l in (l["laneID"] as? String).map { ($0, l) } })
+            let laneA = try #require(byID["a"])
+            let laneB = try #require(byID["b"])
+            let laneC = try #require(byID["c"])
+            let laneD = try #require(byID["d"])
+
+            #expect(laneA["status"] as? String == "succeeded")
+            #expect(!(laneA["commitOID"] is NSNull))
+            #expect(laneB["status"] as? String == "succeeded")
+            #expect(!(laneB["commitOID"] is NSNull))
+
+            #expect(laneC["status"] as? String == "refused")
+            #expect(laneC["exitCode"] as? Int == 2)
+            #expect(laneC["commitOID"] is NSNull)
+            #expect(laneC["costUSD"] is NSNull)
+            #expect(laneC["costSource"] as? String == "no_record")
+            #expect(!FileManager.default.fileExists(atPath: fx.tracesDirURL.appendingPathComponent("c.trace").path))
+            if let wtC = laneC["worktreePath"] as? String {
+                let logC = (wtC as NSString).appendingPathComponent(".relay/LOG.md")
+                #expect(!FileManager.default.fileExists(atPath: logC))
+            }
+            let reasonC = try #require(laneC["reason"] as? String)
+            #expect(reasonC.contains("not started: the job budget"))
+            #expect(reasonC.contains("$0.5500"))
+            #expect(reasonC.contains("$0.5000"))
+            if lang == "zh" {
+                #expect(reasonC.contains("预算已用完"))
+            } else {
+                #expect(reasonC.contains("budget spent"))
+            }
+
+            #expect(laneD["status"] as? String == "skipped")
+            #expect(laneD["worktreePath"] is NSNull)
+            #expect(!FileManager.default.fileExists(atPath: fx.tracesDirURL.appendingPathComponent("d.trace").path))
+
+            let integration = try #require(runObj["integration"] as? [String: Any])
+            #expect(integration["status"] as? String == "skipped")
+            #expect(integration["ready"] as? Bool == false)
+        }
+    }
+
+    @Test("M4 Budget: RELAY_BUDGET_USD=1.00 passes remaining $0.7000 to second lane b after a spends $0.3000 and succeeds with verify")
+    func m4SufficientBudgetPassesRemainingPointSevenThousandToSecondLaneAndVerifies() async throws {
+        let fx = try makeRealRelayStubFixture(prefix: "m4-sufficient-budget")
+        defer { try? FileManager.default.removeItem(at: fx.base.rootURL) }
+
+        let promptsDir = fx.base.rootURL.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "STUB LANE a\nSTUB WRITE a.txt ok\nSTUB COST 0.3000\n".write(
+            to: promptsDir.appendingPathComponent("a.md"), atomically: true, encoding: .utf8
+        )
+        try "STUB LANE b\nSTUB WRITE b.txt ok\nSTUB COST 0.2500\n".write(
+            to: promptsDir.appendingPathComponent("b.md"), atomically: true, encoding: .utf8
+        )
+
+        let planURL = fx.base.rootURL.appendingPathComponent("plan.json")
+        try JSONSerialization.data(
+            withJSONObject: [
+                "repo": fx.base.repoURL.path,
+                "base": "main",
+                "lanes": [
+                    ["id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []],
+                    ["id": "b", "agent": "vibe",   "prompt": "prompts/b.md", "after": ["a"]]
+                ],
+                "verify": "true"
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        ).write(to: planURL, options: .atomic)
+
+        var env = fx.environment
+        env["RELAY_BUDGET_USD"] = "1.00"
+
+        let cli = RelayCLIRunner()
+        let res = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.base.projectURL.path, "--lang", "en"],
+            environment: env
+        )
+        #expect(res.exitCode == 0, "stderr=\(res.stderr)")
+        #expect(!FileManager.default.fileExists(atPath: fx.decoyMarkerURL.path))
+
+        let runObj = try #require(try JSONSerialization.jsonObject(with: Data(res.stdout.utf8)) as? [String: Any])
+        let runID = try #require(runObj["runID"] as? String)
+        #expect(abs((runObj["budgetUSD"] as? Double ?? -1) - 1.0) < 1e-9)
+        #expect(abs((runObj["totalCostUSD"] as? Double ?? -1) - 0.55) < 1e-9)
+        #expect(runObj["budgetExhausted"] as? Bool == false)
+
+        let integration = try #require(runObj["integration"] as? [String: Any])
+        #expect(integration["status"] as? String == "verified")
+        #expect(integration["ready"] as? Bool == true)
+
+        let bPtyURL = fx.base.projectURL.appendingPathComponent("runs/\(runID)/lanes/b.pty")
+        let bPtyText = try String(contentsOf: bPtyURL, encoding: .utf8)
+        #expect(bPtyText.contains("0.7000"))
+
+        let bBudgetTrace = try String(contentsOf: fx.tracesDirURL.appendingPathComponent("b.budget"), encoding: .utf8)
+        #expect(bBudgetTrace.contains("RELAY_BUDGET_USD=0.7000"))
+        #expect(bBudgetTrace.contains("CLI_BUDGET_CAP=0.7000"))
+    }
+
+    @Test("M4 Budget: unpriced agy lane is refused by relay.sh after prior dollar lane exhausts RELAY_BUDGET_USD")
+    func m4UnpricedAgyLaneRefusedAfterPriorDollarLaneExhaustsBudget() async throws {
+        let fx = try makeRealRelayStubFixture(prefix: "m4-agy-refused")
+        defer { try? FileManager.default.removeItem(at: fx.base.rootURL) }
+
+        let promptsDir = fx.base.rootURL.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "STUB LANE a\nSTUB WRITE a.txt spend\nSTUB COST 0.6000\n".write(
+            to: promptsDir.appendingPathComponent("a.md"), atomically: true, encoding: .utf8
+        )
+        try "STUB LANE b\nSTUB WRITE b.txt agy-should-not-run\nSTUB TOKENS 3000\n".write(
+            to: promptsDir.appendingPathComponent("b.md"), atomically: true, encoding: .utf8
+        )
+
+        let planURL = fx.base.rootURL.appendingPathComponent("plan.json")
+        try JSONSerialization.data(
+            withJSONObject: [
+                "repo": fx.base.repoURL.path,
+                "base": "main",
+                "lanes": [
+                    ["id": "a", "agent": "claude", "prompt": "prompts/a.md", "after": []],
+                    ["id": "b", "agent": "agy",    "prompt": "prompts/b.md", "after": ["a"]]
+                ]
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        ).write(to: planURL, options: .atomic)
+
+        var env = fx.environment
+        env["RELAY_BUDGET_USD"] = "0.50"
+
+        let cli = RelayCLIRunner()
+        let res = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.base.projectURL.path, "--lang", "zh"],
+            environment: env
+        )
+        #expect(res.exitCode == 1, "stderr=\(res.stderr)")
+        #expect(!FileManager.default.fileExists(atPath: fx.decoyMarkerURL.path))
+        #expect(!FileManager.default.fileExists(atPath: fx.tracesDirURL.appendingPathComponent("b.trace").path))
+
+        let runObj = try #require(try JSONSerialization.jsonObject(with: Data(res.stdout.utf8)) as? [String: Any])
+        #expect(abs((runObj["budgetUSD"] as? Double ?? -1) - 0.50) < 1e-9)
+        #expect(abs((runObj["totalCostUSD"] as? Double ?? -1) - 0.60) < 1e-9)
+        #expect(runObj["budgetExhausted"] as? Bool == true)
+
+        let lanesArr = try #require(runObj["lanes"] as? [[String: Any]])
+        let byID = Dictionary(uniqueKeysWithValues: lanesArr.compactMap { l in (l["laneID"] as? String).map { ($0, l) } })
+        let laneB = try #require(byID["b"])
+        #expect(laneB["status"] as? String == "refused")
+        #expect(laneB["exitCode"] as? Int == 2)
+        #expect(laneB["costUSD"] is NSNull)
+        #expect(laneB["tokens"] is NSNull)
+        #expect(laneB["costSource"] as? String == "no_record")
+        let reasonB = try #require(laneB["reason"] as? String)
+        #expect(reasonB.contains("not started: the job budget"))
+    }
+
+    @Test("M4 Budget: 5 invalid RELAY_BUDGET_USD values exit 2 before touching disk in EN and ZH, while empty string means unlimited")
+    func m4InvalidBudgetValuesExit2WithoutSideEffectsAndEmptyBudgetIsUnlimited() async throws {
+        let fx = try makeIsolatedRunFixture(prefix: "m4-invalid-budgets")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let promptsDir = fx.rootURL.appendingPathComponent("plans/prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "STUB WRITE out.txt ok\n".write(to: promptsDir.appendingPathComponent("task.md"), atomically: true, encoding: .utf8)
+        let planURL = fx.rootURL.appendingPathComponent("plans/valid.json")
+        try """
+        {
+          "repo": "\(fx.repoURL.path)",
+          "base": "main",
+          "lanes": [{"id": "a", "agent": "claude", "prompt": "prompts/task.md", "after": []}]
+        }
+        """.write(to: planURL, atomically: true, encoding: .utf8)
+
+        let cli = RelayCLIRunner()
+        let invalidValues = ["0", "-2.5", "NaN", "inf", "abc"]
+
+        for bad in invalidValues {
+            for lang in ["en", "zh"] {
+                var env = fx.baseEnvironment
+                env["RELAY_BUDGET_USD"] = bad
+                let res = await cli.executeCommand(
+                    arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", lang],
+                    environment: env
+                )
+                #expect(res.exitCode == 2, "(\(bad), \(lang)): expected 2, got \(res.exitCode)")
+                #expect(res.stdout.isEmpty)
+                #expect(res.stderr.contains("RELAY_BUDGET_USD"))
+                #expect(!res.stderr.contains("not supported yet"))
+                #expect(!res.stderr.contains("当前不支持"))
+                #expect(!res.stderr.contains("M4"))
+            }
+        }
+
+        let db = try RelayProjectDatabase.openExisting(bundleDirectoryURL: fx.projectURL)
+        #expect(try db.allRuns().isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: fx.projectURL.appendingPathComponent("runs").path))
+        let branches = try runTool("/usr/bin/git", ["branch", "--format=%(refname:short)"], environment: fx.baseEnvironment, currentDirectory: fx.repoURL)
+        #expect(branches.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "main")
+
+        // Empty RELAY_BUDGET_USD="" means no limit (accepted!)
+        var emptyBudgetEnv = fx.baseEnvironment
+        emptyBudgetEnv["RELAY_BUDGET_USD"] = ""
+        let okRes = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--relay-sh", fx.fakeRelayShURL.path, "--lang", "en"],
+            environment: emptyBudgetEnv
+        )
+        #expect(okRes.exitCode == 0, "stderr=\(okRes.stderr)")
+        let okObj = try #require(try JSONSerialization.jsonObject(with: Data(okRes.stdout.utf8)) as? [String: Any])
+        #expect(okObj["budgetUSD"] is NSNull)
     }
 }
