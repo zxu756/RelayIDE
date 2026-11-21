@@ -7,7 +7,7 @@
 `RelayIDE` 是建立在 `agent-relay`（`relay.sh`，使用前必须先安装 `agent-relay`）之上的原生 macOS 命令行工具、SQLite 工作区存储库、MCP 服务与 SwiftUI 桌面工作台。**当前状态（M2）：可通过 `RelayIDE run` 经 `agent-relay` 在各自的隔离 Git worktree 中无界面运行 coding agent（`claude`、`codex`、`agy`、`vibe`），将成功或部分完成的通道提交到各自分支，并在全部通道成功且有改动时按确定性顺序经 `git merge --no-ff` 合入集成分支 `relay/<run-id>/integration`（遇冲突干净撤销并停下）、在伪终端中执行可选的 `verify` 验证命令，全程不修改 `base`；是否可合入只看输出 JSON 中的 `integration.ready`（仅全部通道成功且集成状态为 `verified` 时为 `true`）。当前版本不把集成分支合入 `base`、不支持多前置通道、没有整单预算（`RELAY_BUDGET_USD`），桌面界面也尚未接入真实运行。**
 
 ![RelayIDE 合成演示预览](docs/screenshot-pty-grid-zh.png)
-*图 1（`[演示数据]`）：传入 `--demo`（`--export-screenshots`）渲染的四通道合成预览界面。不带 `--demo` 启动 `RelayIDE` 时默认进入空状态：0 条泳道、无终端假输出、无费用数字、无代理地址。*
+*图 1（`[演示数据]`）：传入 `--demo`（`--export-screenshots`）渲染的四通道合成预览界面。不带 `--demo` 启动 `RelayIDE` 时默认进入空状态：0 条泳道、无终端假输出、无费用数字。*
 
 ---
 
@@ -42,24 +42,23 @@
     | `130` / `143` | 通道、合并或 `verify` 任一阶段收到 `SIGINT`（`130`）/ `SIGTERM`（`143`） |
 
   - **当前 M2 边界。** 不更新也不合入 `base`（由人在确认 `integration.ready == true` 后自行合入 `relay/<run-id>/integration`）；多前置通道（`after` 超过 1 项）仍拒绝并返回 `2`；只用 Git 自带的合并（`git merge --no-ff`），不提供自动冲突解决/重试、重跑合并或 `verify` 的子命令、或清理旧 worktree 的子命令；设了 `RELAY_BUDGET_USD` 时返回 `2`（各 worktree 的 `LOG.md` 跨通道不累计，整单预算排在 M4）；桌面界面尚未接入真实运行（排在 M5），未知的非选项非 `.relayproj` 首参数报错并以退出码 `2` 结束，不会打开桌面窗口。
-- **默认空启动的 `中文 / EN` 双语桌面工作台**：不带 `--demo` 启动 macOS 桌面端时，界面保持真实空状态（`0` 条通道、空终端缓冲区、无预算金额、无回环代理地址）。支持通过顶部工具栏 `中文 | EN` 胶囊、菜单快捷键 `⇧⌘L`、`⌘,` 偏好设置弹窗、CLI `--lang zh|en` 或环境变量 `RELAYIDE_LANG=zh|en` 实时切换中英文。仅在显式传入 `--demo`（或点击界面中的「载入演示数据」）时才会在临时目录载入带 `[演示数据]` 徽章的合成样本，绝不污染用户的 `.relayproj` 目录。
+- **默认空启动的 `中文 / EN` 双语桌面工作台**：不带 `--demo` 启动 macOS 桌面端时，界面保持真实空状态（`0` 条通道、空终端缓冲区、无预算金额）。支持通过顶部工具栏 `中文 | EN` 胶囊、菜单快捷键 `⇧⌘L`、`⌘,` 偏好设置弹窗、CLI `--lang zh|en` 或环境变量 `RELAYIDE_LANG=zh|en` 实时切换中英文。仅在显式传入 `--demo`（或点击界面中的「载入演示数据」）时才会在临时目录载入带 `[演示数据]` 徽章的合成样本，绝不污染用户的 `.relayproj` 目录。
 - **`.relayproj` SQLite WAL 存储、运行与集成台账、FTS5 检索与检查点（`RelayWorkspaceStore`）**：数据库 v6 迁移（启用 `busy_timeout`）持久化保存 M1/M2 运行、通道、集成与合并步台账（`relay_runs`、`relay_run_lanes`、`relay_run_integration`、`relay_run_merges`；M1 的 v5 库可平滑升级，旧运行的 `integration` 为 `null`，由 `status --run <id> [--json]` 与 `status --runs [--json]` 查询）以及工作区元数据、通道定义、DAG 拓扑描述、合并报告、护栏审计记录、FTS5 `BM25` 全文检索索引、SHA-256 快照与 Undo/Redo 历史。所有只读/查询类 CLI 子命令（`status`、`lanes`、`dag-waves`、`audit-plugins`、`export-html`、`mcp --project`）在 `--project <dir>` 不存在时均立即报错并以非 0 状态码退出，不会在后台偷偷创建空目录或数据库。对 `init` 建出来的工作区，不带参数的 `status` 报告 `activeLaneCount: 0` 与 `schemaVersion: 6`，`status --runs` 输出 `[]`，`lanes` 没有输出，`dag-waves` 输出“当前工作区尚未注册任何 DAG”；`init --seed-demo` 会向 M0 预览表写入带 `[演示数据]` 标记的合成数据。
 - **独立基础库组件（已通过单元测试验证）**：
   - `RelayPTYCore`：基于 `posix_openpt(2)` 的本地子进程伪终端会话封装、`<sys/wait.h>` 退出码与信号解码（`POSIXWaitStatus`）、首个信号前的后代进程组枚举（`proc_listchildpids` 加 `sysctl(KERN_PROC_ALL)` 回退）与按组排空取消阶梯、可选 `.pty` 原始记录字节上限、VT100 / `xterm-256color` / 24 位真彩色屏幕缓冲区、Boyer-Moore 历史检索与 `.cast` v2 编解码。
   - `RelayWorktreeGit`：全路径跳过钩子（`-c core.hooksPath=/dev/null`）的通道与集成 `git worktree add -b` 创建、通道改动暂存与提交（排除 `.relay/`）、`git merge --no-ff` 集成合并与 porcelain 冲突项提取及 `git merge --abort` 三项干净校验、基于 glob 的文件领地规则匹配（`FileOwnershipRule`）以及 `.relay/LOG.md` 交接日志解析。
   - `RelayOrchestrator`：无波次单前置事件驱动调度器（`RelayDAGRunScheduler`）、拓扑加计划序集成合并运行器（`RelayIntegrationMergeRunner`）、伪终端 `verify` 运行器（`RelayVerifyRunner`）、`.relay/LOG.md` 花费与 token 解析器、Kahn 拓扑波次排序与关键路径法（`ES`/`EF`/`LS`/`LF`/松弛时间）计算器。
   - `RelayPluginSDK`：沙箱化 `JavaScriptCore` 策略包与钩子演练台求值器（支持 `audit-plugins` 与 GUI 交互演练）。
-  - `RelayWiretapProxy`：独立本地回环 HTTP/1.1 + SSE 流解析器、敏感凭据正则扫描器与内存预算熔断账本。
 - **基于 stdio 的 JSON-RPC 2.0 MCP 服务器（共 `1` 个工具）**：`RelayIDE mcp [--project <dir>]` 通过标准输入/输出暴露 **1 个 MCP 工具**：`relay_check_ownership`（校验指定相对路径是否符合 `--project` 工作区中对应通道的 `FileOwnershipRule` 领地规则）。
 - **独立双语 HTML 报告导出（`export-html`）**：从已有 `.relayproj` 导出单文件 `中文 | EN` HTML 报告（当数据源来自 `--seed-demo` 时自动标注 `[DEMO]` / `[演示数据]`）。
 
-> **本版已删除（M3，2026-11-21）：** `v1.4.0` 及以前附带的 `semantic-merge` 子命令（及其对应 MCP 工具）已在这一版删除，原因和 2026-11-21 由 `Scripts/acceptance/m3-merge-eval.sh` 在 9 个开源仓库真实合并冲突语料上测得的数字见 [reports/m3-merge-eval.md](reports/m3-merge-eval.md)（发布的命令“与人工相同”：Python `1/330`、Swift `0/377`、TypeScript `0/611`）。
+> **本版已删除（2026-11-21）：** `v1.4.0` 及以前附带的 `semantic-merge` 子命令（及其对应 MCP 工具）已在这一版删除，原因和 2026-11-21 由 `Scripts/acceptance/m3-merge-eval.sh` 在 9 个开源仓库真实合并冲突语料上测得的数字见 [reports/m3-merge-eval.md](reports/m3-merge-eval.md)（发布的命令“与人工相同”：Python `1/330`、Swift `0/377`、TypeScript `0/611`）。本地代理已删除；单个请求的分析用 `agent-xray`（桌面界面原有的对应标签页也一并移除）。
 
 ---
 
 ## 后续路线图（尚未实现）
 
-- **M4（花费汇总与整单预算）**：跨通道整单预算控制，以及决定保留还是删除独立本地回环代理。
+- **M4（花费汇总与整单预算）**：跨通道整单预算控制。
 - **M5（桌面界面接入真实运行）**：将 SwiftUI 终端网格、通道状态与花费列表、文件归属视图与冲突视图接到 M1/M2 的真实运行上，并接入真实广播命令（当前触发 `⌘⇧B` 仍提示「广播命令尚未实现（排在 M5）」）。
 
 ---
@@ -68,21 +67,21 @@
 
 - **建 worktree、提交与合并时一律跳过仓库 Git 钩子。** `RelayIDE` 自身的全部 Git 写入都带 `-c core.hooksPath=/dev/null`，依赖 `post-checkout` 等钩子（如 `husky`）做工作树初始化的仓库不会自动执行那些钩子；所需的初始化与仓库检查请写进 `verify`。
 - **合并途中或 `verify` 含独立进程组后代时遭遇 `SIGKILL`（`kill -9`）。** 若 `RelayIDE` 在单步 `git merge` 执行途中被 `kill -9` 强杀，集成 worktree 可能停在未完成的合并（存在 `MERGE_HEAD`）上；随后 `status` 会将运行与集成对账为 `interrupted` 并在 `reason` 中写明。若 `RelayIDE` 在 `verify` 期间被 `kill -9`，同进程组的子进程会因伪终端主端关闭收到 `SIGHUP` 挂断退出，但自行调用 `setpgrp` 另起进程组且忽略 `SIGHUP` 的后台子进程因无法触发取消阶梯而不会被自动清掉。
-- **旧工作区检视表与 M1/M2 运行台账尚未在界面打通（以及 M0 演示截图）。** `RelayIDE run` 将运行、通道、集成状态与合并步记入数据库 v6 的 `relay_runs`、`relay_run_lanes`、`relay_run_integration` 与 `relay_run_merges` 表（通过 `status --run <id>` 和 `status --runs` 查询）；旧的 `lanes`、`dag-waves`、`audit-plugins`、`export-html` 子命令与桌面界面仍读取 M0 工作区表（仅 `init --seed-demo` 会写入合成样本），等 M5 接入真实运行；`docs/` 下的 8 张 `[演示数据]` 截图仍为 M0 时渲染（左下角状态栏显示 `SQLite WAL v4`）。
+- **旧工作区检视表与 M1/M2 运行台账尚未在界面打通（以及 M0 演示截图）。** `RelayIDE run` 将运行、通道、集成状态与合并步记入数据库 v6 的 `relay_runs`、`relay_run_lanes`、`relay_run_integration` 与 `relay_run_merges` 表（通过 `status --run <id>` 和 `status --runs` 查询）；旧的 `lanes`、`dag-waves`、`audit-plugins`、`export-html` 子命令与桌面界面仍读取 M0 工作区表（仅 `init --seed-demo` 会写入合成样本），等 M5 接入真实运行；`docs/` 下的 6 张 `[演示数据]` 截图仍为 M0 时渲染（左下角状态栏显示 `SQLite WAL v4`）。
 
 ---
 
 ## 合成演示界面预览（`--demo`，`[演示数据]` 样本）
 
-以下四张截图均由合成样本数据渲染（`--export-screenshots` 内部启用 `loadDemoWorkspace: true`），窗口顶栏均带有醒目的 `[演示数据]` 标识：
+以下三张截图均由合成样本数据渲染（`--export-screenshots` 内部启用 `loadDemoWorkspace: true`），窗口顶栏均带有醒目的 `[演示数据]` 标识：
 
 | 2x2 并行终端网格（`[演示数据]`） | 合并冲突检视台（`[演示数据]`） |
 |---|---|
 | ![并行终端网格演示](docs/screenshot-pty-grid-zh.png) | ![合并冲突演示](docs/screenshot-semantic-merge-zh.png) |
 
-| 等轴测领地围栏地图（`[演示数据]`） | Wiretap 遥测与护栏插件（`[演示数据]`） |
-|---|---|
-| ![领地围栏地图演示](docs/screenshot-territory-map-zh.png) | ![Wiretap 与插件演示](docs/screenshot-wiretap-guardrails-zh.png) |
+| 等轴测领地围栏地图（`[演示数据]`） |
+|---|
+| ![领地围栏地图演示](docs/screenshot-territory-map-zh.png) |
 
 ---
 

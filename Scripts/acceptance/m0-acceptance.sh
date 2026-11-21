@@ -406,10 +406,10 @@ PY
     pass_row "Added row A: the test run added no RelayIDE file to ~/Library/Preferences (entries before=${PREFS_BEFORE}, after=${PREFS_AFTER})"
 
     # ------------------------------------------------------------------
-    # Row 9: repo-wide search for the fake broadcast echo and the fake proxy endpoint
+    # Row 9: repo-wide search for the fake broadcast echo and verification that the local proxy has been removed (M4)
     # ------------------------------------------------------------------
     echo ""
-    echo "--- Row 9: Repo-wide grep for forbidden fake echo & fake proxy endpoint ---"
+    echo "--- Row 9: Repo-wide grep for forbidden fake echo & verification that local proxy is removed ---"
     PAT_ECHO="Executed across isolated"
     PAT_ECHO="${PAT_ECHO} worktree"
     PAT_PORT="127.0.0.1"
@@ -422,6 +422,31 @@ root, pat_echo, pat_port = sys.argv[1], sys.argv[2], sys.argv[3]
 skip_dirs = {".git", ".build", "build"}
 hits_outside_tests = []
 hits_in_tests = []
+
+removed_paths = [
+    "Sources/" + "RelayWiretap" + "Proxy",
+    "Tests/RelayIDETests/" + "WiretapSSEAndDLP" + "CircuitBreakerTests.swift",
+    "docs/" + "screenshot-wiretap" + "-guardrails.png",
+    "docs/" + "screenshot-wiretap" + "-guardrails-zh.png",
+]
+for rel_removed in removed_paths:
+    assert not os.path.exists(os.path.join(root, rel_removed)), f"Removed proxy path still exists: {rel_removed}"
+
+pkg_text = open(os.path.join(root, "Package.swift"), encoding="utf-8").read()
+mod_name = "RelayWiretap" + "Proxy"
+assert mod_name not in pkg_text, f"Package.swift still references {mod_name}"
+
+proxy_tokens = [
+    mod_name,
+    "LoopbackWiretap" + "ProxyServer",
+    "OutboundSecret" + "DLPEngine",
+    "screenshot-wiretap" + "-guardrails",
+    pat_port,
+]
+proxy_ci_tokens = [
+    "outbound secret " + "dlp",
+]
+checked_proxy_hits = []
 
 for dirpath, dirnames, filenames in os.walk(root):
     dirnames[:] = [d for d in dirnames if d not in skip_dirs]
@@ -440,12 +465,23 @@ for dirpath, dirnames, filenames in os.walk(root):
                     hits_in_tests.append((rel, pat))
                 else:
                     hits_outside_tests.append((rel, pat))
+        if rel in ("Package.swift", "README.md", "README.zh-CN.md") or rel.startswith(("Sources/", "Tests/")):
+            lower = text.lower()
+            for tok in proxy_tokens:
+                if tok in text:
+                    checked_proxy_hits.append((rel, tok))
+            for tok_ci in proxy_ci_tokens:
+                if tok_ci in lower:
+                    checked_proxy_hits.append((rel, tok_ci))
 
+print(f"Removed proxy paths verified absent: {removed_paths}")
 print(f"Occurrences inside Tests/: {len(hits_in_tests)} -> {[h[0] for h in hits_in_tests]}")
 print(f"Occurrences outside Tests/: {len(hits_outside_tests)}")
+print(f"Proxy/DLP hits in Package.swift, Sources/, Tests/, README*: {len(checked_proxy_hits)}")
 assert not hits_outside_tests, f"Forbidden fake strings found outside Tests/: {hits_outside_tests}"
+assert not checked_proxy_hits, f"Removed proxy/DLP symbols still present: {checked_proxy_hits}"
 PY
-    pass_row "Row 9: Zero occurrences of fake broadcast echo or fake wiretap port outside Tests/"
+    pass_row "Row 9: Local proxy removed (Package.swift, Sources/, Tests/, README*) and zero occurrences of fake broadcast echo or fake wiretap port"
 
     # ------------------------------------------------------------------
     # Added row B (C5): no path of a real machine in committed files.

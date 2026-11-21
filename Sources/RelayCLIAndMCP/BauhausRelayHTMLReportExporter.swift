@@ -139,7 +139,7 @@ public struct BauhausRelayHTMLReportExporter: Sendable {
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
-          <meta name="description" content="RelayIDE v1.4.0 bilingual multi-vendor coding agent worktree matrix, declaration AST merge ledger, and wiretap spend dossier.">
+          <meta name="description" content="RelayIDE v1.4.0 bilingual multi-vendor coding agent worktree matrix, declaration AST merge ledger, and spend dossier.">
           <title>\(escapeHTML(pick(pageTitleEN, pageTitleZH)))</title>
           <style>
             /* Hallmark · v2.0.0 · scope: app · genre: modern-minimal · posture: restrained · shape: app screen · surface: absolute */
