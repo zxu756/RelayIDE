@@ -1,0 +1,69 @@
+================================================================
+RelayIDE M4 Acceptance Suite (Spend Ledger & Whole-Job Budget)
+Timestamp: 2026-11-21T07:04:01Z
+Commit:    e7e1743 (branch: m4/cost; working tree clean outside reports/)
+Mode:      full
+relay.sh sha256 (start):      bfa2ecaa82f3f8fb33173ccd15079cfd48f62d7e71d98dd56e6d220438204868
+relay_util.py sha256 (start): 4045f18261151d520bf68f5044bd4e30d0fa20d9b64894c4a22cf32b39050629
+================================================================
+
+--- Row 1: 4-vendor run (c1 $0.1234, v1 $0.25, a1 4500 tok, x1 1200 tok) matches relay_util.py spent, status --run byte-identical, status --runs ---
+Row 1 verified: runID=20261121-070402-4d44, byte-identical status --run, c1=$0.1234, v1=$0.2500, a1=null/4500 tok, x1=null/1200 tok, totalCostUSD=0.3734, unpricedTokens=5700, budgetUSD=null
+[PASS] Row 1: 4-vendor run (c1 $0.1234, v1 $0.25, a1 4500 tok, x1 1200 tok) matches relay_util.py spent, status --run byte-identical, status --runs (2.73s)
+
+--- Row 2: Workspace status --project P and export-html report $0.3734 & 5700 tokens without [DEMO] ---
+Row 2 verified: status totalSpendUSD=0.3734, totalTokensObserved=5700, HTML (EN+ZH) contains $0.3734 & 4 lanes without [DEMO]
+[PASS] Row 2: Workspace status --project P and export-html report $0.3734 & 5700 tokens without [DEMO] (0.41s)
+
+--- Row 3: Chain a->b->c->d with RELAY_BUDGET_USD=0.50 refuses c (exit 2) and skips d (exit 1) ---
+Row 3 (en) verified: exit=1, a=$0.30 & b=$0.25 succeeded, c refused (exit=2, reason='budget spent ($0.5500 / $0.5000); relay: not started: the job budget of $0.0000 is spent ($0.000000 recorded in LOG.md)'), d skipped
+Row 3 (zh) verified: exit=1, a=$0.30 & b=$0.25 succeeded, c refused (exit=2, reason='预算已用完（已花费 $0.5500 / 预算 $0.5000）；relay: not started: the job budget of $0.0000 is spent ($0.000000 recorded in LOG.md)'), d skipped
+[PASS] Row 3: Chain a->b->c->d with RELAY_BUDGET_USD=0.50 refuses c (exit 2) and skips d (exit 1) (3.97s)
+
+--- Row 4: Sufficient RELAY_BUDGET_USD=1.00 passes remaining $0.7000 to lane b and verifies ready=true ---
+Row 4 verified: exit=0, budgetUSD=1.0, totalCostUSD=0.55, b received $0.7000 in b.pty & --max-price, integration.ready=true
+[PASS] Row 4: Sufficient RELAY_BUDGET_USD=1.00 passes remaining $0.7000 to lane b and verifies ready=true (1.80s)
+
+--- Row 5: Exhausted RELAY_BUDGET_USD=0.50 after $0.60 dollar lane refuses subsequent unpriced agy lane ---
+Row 5 verified: after a=$0.60 >= $0.50, unpriced agy lane b refused with exit=2 (run exit=1)
+[PASS] Row 5: Exhausted RELAY_BUDGET_USD=0.50 after $0.60 dollar lane refuses subsequent unpriced agy lane (1.42s)
+
+--- Row 6: Invalid RELAY_BUDGET_USD (0, -2.5, abc, NaN, inf) exit 2 with empty stdout and zero side effects ---
+Row 6 verified: 5 invalid RELAY_BUDGET_USD values (0, -2.5, abc, NaN, inf) x (en, zh) all exited 2 with empty stdout and zero disk/git/SQLite side effects
+[PASS] Row 6: Invalid RELAY_BUDGET_USD (0, -2.5, abc, NaN, inf) exit 2 with empty stdout and zero side effects (1.20s)
+
+--- Row 7: Proxy removed across Package.swift/Sources/README* and default empty StudioViewModel/workspace spend is 0 ---
+Static check passed: Sources/RelayWiretapProxy absent, Package.swift clean, 0 proxy/port/DLP hits in Sources/ & README*.
+Headless ViewModel check passed: StudioViewModelAndHonestyTests/defaultInitWithoutDemoIsCompletelyEmpty exited 0.
+[PASS] Row 7: Proxy removed across Package.swift/Sources/README* and default empty StudioViewModel/workspace spend is 0 (4.45s)
+
+--- Row 8: Genuine Schema v6 SQLite bundle upgrades to v7 (legacy budgetUSD=null preserved) and accepts new v7 run ---
+Constructed genuine Schema v6 SQLite database (max_version=6, budget_usd absent).
+Row 8 verified: v6 DB upgraded cleanly to Schema v7, legacy run budgetUSD=null & $0.042/1800 tok preserved, new v7 run ($0.15 / cap $0.80) persisted (workspace total $0.192).
+[PASS] Row 8: Genuine Schema v6 SQLite bundle upgrades to v7 (legacy budgetUSD=null preserved) and accepts new v7 run (1.37s)
+
+--- Row 9: Post-suite hygiene (0 decoy hits, 0 leftover processes, ~/Library unchanged, relay.sh sha256 & git status; scoped/full tests chained by Scripts/test.sh) ---
+[PASS] Row 9: 0 decoy CLI hits, 0 leftover processes, ~/Library/Preferences unchanged, relay.sh & relay_util.py sha256 unchanged, working tree unchanged (0.20s; swift test & milestones chained in Scripts/test.sh)
+
+--- Row 10 (Record-Only): Per-row timings, agent-relay checksums, and binary size ---
+Build elapsed:                17.77s
+  Row 1    [PASS]  2.73s
+  Row 2    [PASS]  0.41s
+  Row 3    [PASS]  3.97s
+  Row 4    [PASS]  1.80s
+  Row 5    [PASS]  1.42s
+  Row 6    [PASS]  1.20s
+  Row 7    [PASS]  4.45s
+  Row 8    [PASS]  1.37s
+  Row 9    [PASS]  0.20s
+Suite total wall-clock:       36.09s
+relay.sh sha256 (end):        bfa2ecaa82f3f8fb33173ccd15079cfd48f62d7e71d98dd56e6d220438204868
+relay_util.py sha256 (end):   4045f18261151d520bf68f5044bd4e30d0fa20d9b64894c4a22cf32b39050629
+Tested binary:                <repo>/.build/debug/RelayIDE
+Tested binary size:           20670544 bytes (19.71 MiB)
+Tested binary sha256:         58e1beedf78e2178732b668bd2e30b506c0f875040a1b821ef80a4ee58a3dc6b
+[RECORD] Row 10: total=36.09s, build=17.77s, binary=20670544 B (19.71 MiB), relay.sh=bfa2ecaa82f3f8fb33173ccd15079cfd48f62d7e71d98dd56e6d220438204868
+
+================================================================
+ALL M4 BUDGET ACCEPTANCE CHECKS PASSED (Rows 1..9 hard checks + Row 10 recorded; total=36.09s)
+================================================================
