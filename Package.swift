@@ -105,6 +105,7 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("CoreServices"),
                 .linkedFramework("SwiftUI")
             ]
         ),
@@ -135,6 +136,10 @@ let package = Package(
                 "RelayCLIAndMCP",
                 "RelayWorkbenchShell",
                 "RelayStudioViews"
+            ],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("PDFKit")
             ]
         )
     ]

@@ -77,7 +77,7 @@ map_module_to_filter() {
             echo "WorktreeGitDiffAndHandoffTests"
             ;;
         RelayWorkspaceStore)
-            echo "WorkspaceStoreFTSAndUndoTests|CLIMCPAndWorkbenchShellTests|StudioViewModelAndHonestyTests"
+            echo "WorkspaceStoreFTSAndUndoTests|CLIMCPAndWorkbenchShellTests|StudioViewModelAndHonestyTests|M5LiveWorkspaceObserverTests|M5StudioViewsHeadlessTests"
             ;;
         RelaySemanticMerge)
             # The guarded merge is exercised both directly and through the CLI / MCP entry points.
@@ -90,7 +90,7 @@ map_module_to_filter() {
             echo "CLIMCPAndWorkbenchShellTests"
             ;;
         RelayStudioViews)
-            echo "StudioViewModelAndHonestyTests"
+            echo "StudioViewModelAndHonestyTests|M5LiveWorkspaceObserverTests|M5StudioViewsHeadlessTests"
             ;;
         *)
             echo "${token}"
