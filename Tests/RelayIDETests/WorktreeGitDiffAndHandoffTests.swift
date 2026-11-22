@@ -1566,4 +1566,304 @@ struct WorktreeGitDiffAndHandoffTests {
             #expect(statusAfter.isEmpty)
         }
     }
+
+    // MARK: - 14. M5-02 Read-Only Worktree File Ownership Watcher & `git merge-file -p` Conflict Reconstruction
+
+    @Test("RelayWorktreeOwnershipLiveWatcher detects tracked edit and untracked new file within <2s, excludes .relay/.git, and retains files as committed after lane commit")
+    func liveWorktreeOwnershipWatcherRefreshesWithinTwoSecondsAndRetainsCommittedFiles() async throws {
+        let rootDir = try makeIsolatedTempDirectory(prefix: "m5-wt-ownership-live")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let homeDir = rootDir.appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir.appendingPathComponent("Library/Preferences"), withIntermediateDirectories: true)
+        let repoDir = rootDir.appendingPathComponent("repo", isDirectory: true)
+        let wtRoot = rootDir.appendingPathComponent("worktrees", isDirectory: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+
+        let gitEnv: [String: String] = [
+            "HOME": homeDir.path,
+            "CFFIXED_USER_HOME": homeDir.path,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": "/usr/bin:/bin"
+        ]
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "M5 Ownership Tester"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "ownership@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+        try "public struct CoreService {\n    public static let v = 1\n}\n".write(
+            to: repoDir.appendingPathComponent("CoreService.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "# Readme\n".write(
+            to: repoDir.appendingPathComponent("README.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        _ = try engine.runGit(["add", "CoreService.swift", "README.md"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "seed"], cwd: repoDir.path, environment: gitEnv)
+        let baseOID = try engine.headCommitOID(at: repoDir.path)
+
+        let laneA = try engine.createLaneWorktree(
+            repositoryPath: repoDir.path,
+            runID: "20261122-m5wt",
+            laneID: "lane-alpha",
+            displayName: "lane-alpha",
+            vendor: .claudeCode,
+            baseRef: baseOID,
+            worktreesRootDirectory: wtRoot.path,
+            environment: gitEnv
+        )
+        let laneB = try engine.createLaneWorktree(
+            repositoryPath: repoDir.path,
+            runID: "20261122-m5wt",
+            laneID: "lane-beta",
+            displayName: "lane-beta",
+            vendor: .mistralVibe,
+            baseRef: baseOID,
+            worktreesRootDirectory: wtRoot.path,
+            environment: gitEnv
+        )
+
+        final class OwnershipStateBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var latest: [String: RelayLaneFileOwnershipSnapshot] = [:]
+
+            func update(_ snap: [String: RelayLaneFileOwnershipSnapshot]) {
+                lock.lock()
+                latest = snap
+                lock.unlock()
+            }
+
+            func get() -> [String: RelayLaneFileOwnershipSnapshot] {
+                lock.lock()
+                defer { lock.unlock() }
+                return latest
+            }
+        }
+
+        let box = OwnershipStateBox()
+        let watcher = RelayWorktreeOwnershipLiveWatcher(
+            targets: [
+                RelayWatchedLaneWorktreeTarget(laneID: laneA.id, worktreePath: laneA.worktreePath, startCommitOID: baseOID),
+                RelayWatchedLaneWorktreeTarget(laneID: laneB.id, worktreePath: laneB.worktreePath, startCommitOID: baseOID)
+            ],
+            repositoryPath: repoDir.path,
+            environment: gitEnv
+        ) { updated in
+            box.update(updated)
+        }
+        watcher.start()
+        defer { watcher.stop() }
+
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let wtA = URL(fileURLWithPath: laneA.worktreePath, isDirectory: true)
+        let relayDirA = wtA.appendingPathComponent(".relay", isDirectory: true)
+        try FileManager.default.createDirectory(at: relayDirA, withIntermediateDirectories: true)
+        try "step log noise\n".write(to: relayDirA.appendingPathComponent("01-claude.log"), atomically: true, encoding: .utf8)
+
+        // 1. Modify tracked file CoreService.swift -> must appear in < 2.0s as uncommitted with +2/-1
+        let editStartEpoch = Date().timeIntervalSince1970
+        try "public struct CoreService {\n    public static let v = 2\n    public static let ready = true\n}\n".write(
+            to: wtA.appendingPathComponent("CoreService.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+        var editObservedEpoch: Double?
+        let editDeadline = Date().addingTimeInterval(3.0)
+        while Date() < editDeadline {
+            if let snapA = box.get()[laneA.id],
+               snapA.files.contains(where: { $0.relativePath == "CoreService.swift" && $0.worktreeState == .uncommittedInWorktree }) {
+                editObservedEpoch = Date().timeIntervalSince1970
+                break
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let observedEdit = try #require(editObservedEpoch, "Tracked file CoreService.swift never appeared in ownership snapshot")
+        #expect(observedEdit - editStartEpoch <= 2.0, "Tracked edit latency \(observedEdit - editStartEpoch)s exceeded 2.0s")
+
+        // 2. Create untracked new file BrandNewHelper.swift -> must appear in < 2.0s as uncommitted, with zero .relay/.git leakage
+        let createStartEpoch = Date().timeIntervalSince1970
+        try "public enum BrandNewHelper {\n    public static let answer = 42\n}\n".write(
+            to: wtA.appendingPathComponent("BrandNewHelper.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+        var createObservedEpoch: Double?
+        let createDeadline = Date().addingTimeInterval(3.0)
+        while Date() < createDeadline {
+            if let snapA = box.get()[laneA.id],
+               snapA.files.contains(where: { $0.relativePath == "BrandNewHelper.swift" && $0.worktreeState == .uncommittedInWorktree }) {
+                createObservedEpoch = Date().timeIntervalSince1970
+                break
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let observedCreate = try #require(createObservedEpoch, "Untracked file BrandNewHelper.swift never appeared in ownership snapshot")
+        #expect(observedCreate - createStartEpoch <= 2.0, "Untracked file latency \(observedCreate - createStartEpoch)s exceeded 2.0s")
+
+        let midSnapA = try #require(box.get()[laneA.id])
+        #expect(midSnapA.files.map(\.relativePath) == ["BrandNewHelper.swift", "CoreService.swift"])
+        #expect(!midSnapA.files.contains(where: { $0.relativePath.contains(".relay") || $0.relativePath.contains(".git") }))
+        #expect(midSnapA.files.first(where: { $0.relativePath == "BrandNewHelper.swift" })?.additions == 3)
+        #expect(midSnapA.files.first(where: { $0.relativePath == "CoreService.swift" })?.additions == 2)
+        #expect(midSnapA.files.first(where: { $0.relativePath == "CoreService.swift" })?.deletions == 1)
+        #expect(box.get()[laneB.id]?.files.isEmpty == true)
+
+        // 3. Commit on lane-alpha's branch -> both files MUST remain in ownership list (diffed against startCommitOID) as `.committedToLane`
+        _ = try engine.commitLaneChangesIfNeeded(
+            worktreePath: laneA.worktreePath,
+            startCommitOID: baseOID,
+            runID: "20261122-m5wt",
+            laneID: laneA.id,
+            agent: .claude,
+            status: .succeeded,
+            environment: gitEnv
+        )
+        var postCommitSnap: RelayLaneFileOwnershipSnapshot?
+        let commitDeadline = Date().addingTimeInterval(2.0)
+        while Date() < commitDeadline {
+            if let snapA = box.get()[laneA.id],
+               snapA.files.count == 2,
+               snapA.files.allSatisfy({ $0.worktreeState == .committedToLane }) {
+                postCommitSnap = snapA
+                break
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        let committedA = try #require(postCommitSnap, "Files disappeared or failed to transition to committedToLane after lane commit")
+        #expect(committedA.files.map(\.relativePath) == ["BrandNewHelper.swift", "CoreService.swift"])
+        #expect(committedA.committedFileCount == 2)
+        #expect(committedA.uncommittedFileCount == 0)
+    }
+
+    @Test("RelayReadOnlyGitRunInspector reconstructs M2 conflict blocks in temp directory matching git merge-file -p byte-for-byte without touching worktrees")
+    func readOnlyGitInspectorReconstructsConflictBlocksMatchingGitMergeFile() throws {
+        let rootDir = try makeIsolatedTempDirectory(prefix: "m5-merge-file-reconstruct")
+        defer { try? FileManager.default.removeItem(at: rootDir) }
+
+        let homeDir = rootDir.appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(at: homeDir.appendingPathComponent("Library/Preferences"), withIntermediateDirectories: true)
+        let repoDir = rootDir.appendingPathComponent("repo", isDirectory: true)
+        let projectDir = rootDir.appendingPathComponent("Proj.relayproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        let gitEnv: [String: String] = [
+            "HOME": homeDir.path,
+            "CFFIXED_USER_HOME": homeDir.path,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": "/usr/bin:/bin"
+        ]
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.runGit(["init", "-b", "main"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.name", "M5 Conflict Tester"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["config", "user.email", "conflict@relay.invalid"], cwd: repoDir.path, environment: gitEnv)
+
+        let baseContent = "public struct App {\n    public static let version = \"1.0.0\"\n}\n"
+        try baseContent.write(to: repoDir.appendingPathComponent("App.swift"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "App.swift"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "base"], cwd: repoDir.path, environment: gitEnv)
+        let baseOID = try engine.headCommitOID(at: repoDir.path)
+
+        let leftContent = "public struct App {\n    public static let version = \"2.0.0-left\"\n}\n"
+        _ = try engine.runGit(["checkout", "-b", "relay/r1/lane-left", baseOID], cwd: repoDir.path, environment: gitEnv)
+        try leftContent.write(to: repoDir.appendingPathComponent("App.swift"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "App.swift"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "left"], cwd: repoDir.path, environment: gitEnv)
+        let leftOID = try engine.headCommitOID(at: repoDir.path)
+
+        let rightContent = "public struct App {\n    public static let version = \"2.0.0-right\"\n}\n"
+        _ = try engine.runGit(["checkout", "-b", "relay/r1/lane-right", baseOID], cwd: repoDir.path, environment: gitEnv)
+        try rightContent.write(to: repoDir.appendingPathComponent("App.swift"), atomically: true, encoding: .utf8)
+        _ = try engine.runGit(["add", "App.swift"], cwd: repoDir.path, environment: gitEnv)
+        _ = try engine.runGit(["commit", "-m", "right"], cwd: repoDir.path, environment: gitEnv)
+        let rightOID = try engine.headCommitOID(at: repoDir.path)
+        _ = try engine.runGit(["checkout", "main"], cwd: repoDir.path, environment: gitEnv)
+
+        let wt = try engine.createIntegrationWorktree(
+            repositoryPath: repoDir.path,
+            projectBundlePath: projectDir.path,
+            runID: "r1",
+            baseCommitOID: baseOID,
+            environment: gitEnv
+        )
+        let step0 = try engine.mergeLaneCommitInIntegrationWorktree(
+            integrationWorktreePath: wt.worktreePath,
+            runID: "r1",
+            laneID: "lane-left",
+            agent: .claude,
+            laneCommitOID: leftOID,
+            environment: gitEnv
+        )
+        guard case .merged(let step0MergeOID) = step0 else {
+            Issue.record("Expected lane-left to merge cleanly")
+            return
+        }
+        let step1 = try engine.mergeLaneCommitInIntegrationWorktree(
+            integrationWorktreePath: wt.worktreePath,
+            runID: "r1",
+            laneID: "lane-right",
+            agent: .vibe,
+            laneCommitOID: rightOID,
+            environment: gitEnv
+        )
+        guard case .conflict(let conflictItems, let conflictLines, _) = step1 else {
+            Issue.record("Expected lane-right to conflict")
+            return
+        }
+
+        let integration = RelayRunIntegrationRecord(
+            branch: wt.branchName,
+            worktreePath: wt.worktreePath,
+            baseCommitOID: baseOID,
+            headCommitOID: step0MergeOID,
+            status: .conflict,
+            reason: "merge conflict on lane-right",
+            ready: false,
+            merges: [
+                RelayRunMergeRecord(ordinal: 0, laneID: "lane-left", laneCommitOID: leftOID, status: .merged, mergeCommitOID: step0MergeOID),
+                RelayRunMergeRecord(ordinal: 1, laneID: "lane-right", laneCommitOID: rightOID, status: .conflict, conflicts: conflictItems, conflictLines: conflictLines)
+            ]
+        )
+
+        // Compute independent reference `git merge-file -p` output in our own temp dir
+        let refTemp = rootDir.appendingPathComponent("ref-mergefile", isDirectory: true)
+        try FileManager.default.createDirectory(at: refTemp, withIntermediateDirectories: true)
+        let oursPath = refTemp.appendingPathComponent("ours").path
+        let basePath = refTemp.appendingPathComponent("base").path
+        let theirsPath = refTemp.appendingPathComponent("theirs").path
+        try leftContent.write(toFile: oursPath, atomically: true, encoding: .utf8)
+        try baseContent.write(toFile: basePath, atomically: true, encoding: .utf8)
+        try rightContent.write(toFile: theirsPath, atomically: true, encoding: .utf8)
+        let refCmd = try engine.runGitCommand(
+            ["merge-file", "-p", "-L", "integration", "-L", "base", "-L", "lane-right", oursPath, basePath, theirsPath],
+            cwd: refTemp.path,
+            environment: gitEnv
+        )
+        #expect(refCmd.exitCode > 0 && refCmd.exitCode < 128)
+        let expectedConflictText = refCmd.stdout
+
+        let inspector = RelayReadOnlyGitRunInspector()
+        let blocks = inspector.reconstructIntegrationConflictBlocks(
+            repositoryPath: repoDir.path,
+            integration: integration,
+            environment: gitEnv
+        )
+        #expect(blocks.count == 1)
+        let block = try #require(blocks.first)
+        #expect(block.path == "App.swift")
+        #expect(block.code == "UU")
+        #expect(block.laneID == "lane-right")
+        #expect(block.conflictText == expectedConflictText)
+
+        // Integration and main repo worktrees remain 100% clean
+        #expect(try engine.runGit(["status", "--porcelain=v1", "-uall"], cwd: wt.worktreePath, environment: gitEnv).isEmpty)
+        #expect(try engine.runGit(["status", "--porcelain=v1", "-uall"], cwd: repoDir.path, environment: gitEnv).isEmpty)
+    }
 }
