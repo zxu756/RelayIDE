@@ -231,7 +231,7 @@ public struct RelayStudioRootWorkbenchView: View {
             )
 
             // Total Spend USD Pill (hidden when empty and non-demo so zero fake spend numbers appear)
-            if viewModel.isDemoMode || !viewModel.laneBudgetAccounts.isEmpty {
+            if viewModel.isDemoMode {
                 RelayBauhausPill(
                     viewModel.L(
                         "Spend \(RelayBauhausDesign.formatUSD(viewModel.totalWorkspaceSpendUSD)) / \(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))",
@@ -243,6 +243,37 @@ public struct RelayStudioRootWorkbenchView: View {
                     symbolName: "dollarsign.circle.fill",
                     monospaced: !isZh
                 )
+            } else if let run = viewModel.activeRun {
+                if run.pricedLaneCount > 0 || run.budgetUSD != nil {
+                    let spendText = RelayBauhausDesign.formatRunUSD(run.totalCostUSD)
+                    let capSuffix = run.budgetUSD.map { " / \(RelayBauhausDesign.formatRunUSD($0))" } ?? ""
+                    let unpricedSuffix = run.unpricedTokens > 0
+                        ? viewModel.L(" · \(run.unpricedTokens) tokens unpriced", " · \(run.unpricedTokens) tokens 未计价")
+                        : ""
+                    RelayBauhausPill(
+                        viewModel.L(
+                            "Spend \(spendText)\(capSuffix)\(unpricedSuffix)",
+                            "花费 \(spendText)\(capSuffix)\(unpricedSuffix)"
+                        ),
+                        foreground: RelayBauhausDesign.espressoInk,
+                        background: RelayBauhausDesign.warmIvory,
+                        border: RelayBauhausDesign.hairlineBorder,
+                        symbolName: "dollarsign.circle.fill",
+                        monospaced: !isZh
+                    )
+                } else if run.unpricedTokens > 0 {
+                    RelayBauhausPill(
+                        viewModel.L(
+                            "\(run.unpricedTokens) tokens · unpriced",
+                            "\(run.unpricedTokens) tokens · 未计价"
+                        ),
+                        foreground: RelayBauhausDesign.espressoInk,
+                        background: RelayBauhausDesign.warmIvory,
+                        border: RelayBauhausDesign.hairlineBorder,
+                        symbolName: "number.circle.fill",
+                        monospaced: !isZh
+                    )
+                }
             }
 
             // Bauhaus `中文 | EN` Live Language Toggle Pill (`⇧⌘L`)
@@ -404,16 +435,23 @@ public struct RelayStudioRootWorkbenchView: View {
 
             Spacer(minLength: 6)
 
-            Text(
-                viewModel.L(
-                    "AST Auto-Merged: \(autoCount) · Conflicts: \(conflictCount)",
-                    "AST 自动合并：\(autoCount) · 待裁决冲突：\(conflictCount)"
+            if viewModel.isDemoMode {
+                Text(
+                    viewModel.L(
+                        "AST Auto-Merged: \(autoCount) · Conflicts: \(conflictCount)",
+                        "AST 自动合并：\(autoCount) · 待裁决冲突：\(conflictCount)"
+                    )
                 )
-            )
-            .font(.system(size: 9.5, weight: .semibold))
-            .monospacedDigit()
-            .foregroundStyle(conflictCount > 0 ? RelayBauhausDesign.terracottaAccent : RelayBauhausDesign.agySignalGreen)
-            .fixedSize(horizontal: true, vertical: false)
+                .font(.system(size: 9.5, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(conflictCount > 0 ? RelayBauhausDesign.terracottaAccent : RelayBauhausDesign.agySignalGreen)
+                .fixedSize(horizontal: true, vertical: false)
+            } else {
+                Text(viewModel.L("Read-Only Live Observer", "只读实时观察模式"))
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(RelayBauhausDesign.agySignalGreen)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
 
             Text("·")
                 .font(.system(size: 10, weight: .bold))
@@ -588,7 +626,7 @@ public struct RelayStudioRootWorkbenchView: View {
         case .territoryMap:
             return "\(viewModel.isometricTiles.count)"
         case .guardrailPlugins:
-            return "\(viewModel.policyPack.entries.count)"
+            return viewModel.isDemoMode ? "\(viewModel.policyPack.entries.count)" : nil
         }
     }
 
@@ -596,6 +634,7 @@ public struct RelayStudioRootWorkbenchView: View {
         let isSelected = (viewModel.selectedLaneID == lane.id)
         let accent = RelayBauhausDesign.vendorColor(lane.assignedVendor)
         let acct = viewModel.budgetAccount(forLane: lane.id)
+        let liveRec = viewModel.liveRunLane(forID: lane.id)
 
         return Button {
             viewModel.selectedLaneID = lane.id
@@ -613,34 +652,78 @@ public struct RelayStudioRootWorkbenchView: View {
 
                     Spacer(minLength: 2)
 
-                    if let acct {
+                    if viewModel.isDemoMode, let acct {
                         Text(RelayBauhausDesign.formatUSD(acct.spentUSD))
                             .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                             .monospacedDigit()
                             .foregroundStyle(acct.circuitOpen ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.graphiteInk)
                             .fixedSize(horizontal: true, vertical: false)
+                    } else if let spendLabel = viewModel.formattedLiveLaneSpend(forLane: lane.id) {
+                        Text(spendLabel)
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                 }
 
-                Text(lane.id)
-                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
-                    .fixedSize(horizontal: true, vertical: false)
-
                 HStack(spacing: 5) {
-                    Text("+\(lane.totalAdditions)/-\(lane.totalDeletions)")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .monospacedDigit()
-                        .foregroundStyle(RelayBauhausDesign.agySignalGreen)
+                    Text(lane.id)
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
                         .fixedSize(horizontal: true, vertical: false)
 
                     Spacer(minLength: 2)
 
-                    Text(viewModel.L("\(lane.dirtyFiles.count) files", "\(lane.dirtyFiles.count) 个文件"))
-                        .font(.system(size: 9))
-                        .monospacedDigit()
-                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
-                        .fixedSize(horizontal: true, vertical: false)
+                    if !viewModel.isDemoMode, let liveRec {
+                        Text(liveRec.status.localizedLabel(in: viewModel.currentLanguage))
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(RelayBauhausDesign.runStatusColor(liveRec.status))
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+
+                if viewModel.isDemoMode {
+                    HStack(spacing: 5) {
+                        Text("+\(lane.totalAdditions)/-\(lane.totalDeletions)")
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(RelayBauhausDesign.agySignalGreen)
+                            .fixedSize(horizontal: true, vertical: false)
+
+                        Spacer(minLength: 2)
+
+                        Text(viewModel.L("\(lane.dirtyFiles.count) files", "\(lane.dirtyFiles.count) 个文件"))
+                            .font(.system(size: 9))
+                            .monospacedDigit()
+                            .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                } else if let liveRec {
+                    HStack(spacing: 5) {
+                        if let ec = liveRec.exitCode {
+                            Text(viewModel.L("exit \(ec)", "退出码 \(ec)"))
+                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(ec == 0 ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.claudeVermilion)
+                                .fixedSize(horizontal: true, vertical: false)
+                        } else {
+                            Text(liveRec.status == .running ? viewModel.L("in progress", "执行中") : "—")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+
+                        Spacer(minLength: 2)
+
+                        if let durLabel = viewModel.formattedLiveLaneDuration(forLane: lane.id) {
+                            Text(durLabel)
+                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                    }
                 }
             }
             .padding(7)
@@ -1049,26 +1132,28 @@ public struct RelayPreferencesModalView: View {
                         RelayLanguageTogglePill(viewModel: viewModel)
                     }
 
-                    Divider().overlay(RelayBauhausDesign.hairlineBorder)
+                    if viewModel.isDemoMode {
+                        Divider().overlay(RelayBauhausDesign.hairlineBorder)
 
-                    Toggle(
-                        viewModel.L(
-                            "Auto-Run 3-Way Semantic AST Merge on .relay Handoff (Disabled before M3)",
-                            "收到 .relay 交接产物时自动执行三路 AST 语义合并（M3 前默认关闭）"
-                        ),
-                        isOn: Binding(
-                            get: { viewModel.coordinator.preferences.snapshot.autoRunSemanticMergeOnHandoff },
-                            set: { viewModel.coordinator.preferences.snapshot.autoRunSemanticMergeOnHandoff = $0 }
+                        Toggle(
+                            viewModel.L(
+                                "Auto-Run 3-Way Semantic AST Merge on .relay Handoff (Disabled before M3)",
+                                "收到 .relay 交接产物时自动执行三路 AST 语义合并（M3 前默认关闭）"
+                            ),
+                            isOn: Binding(
+                                get: { viewModel.coordinator.preferences.snapshot.autoRunSemanticMergeOnHandoff },
+                                set: { viewModel.coordinator.preferences.snapshot.autoRunSemanticMergeOnHandoff = $0 }
+                            )
                         )
-                    )
-                    .font(.system(size: 12))
+                        .font(.system(size: 12))
+                    }
 
-                    if viewModel.isDemoMode || viewModel.globalBudgetCeilingUSD > 0 {
+                    if let cap = viewModel.activeBudgetCeilingUSD {
                         HStack {
                             Text(viewModel.L("Global Workspace USD Budget Ceiling", "工作区全局美元预算上限"))
                                 .font(.system(size: 12, weight: .semibold))
                             Spacer()
-                            Text(RelayBauhausDesign.formatUSD(viewModel.globalBudgetCeilingUSD))
+                            Text(viewModel.isDemoMode ? RelayBauhausDesign.formatUSD(cap) : RelayBauhausDesign.formatRunUSD(cap))
                                 .font(.system(size: 12, weight: .bold, design: .monospaced))
                                 .monospacedDigit()
                         }
@@ -1172,9 +1257,11 @@ public struct RelayStudioMenuCommands: Commands {
             .keyboardShortcut("k", modifiers: [.command])
 
             Button(viewModel.L("Broadcast Input to PTY Lanes", "向 PTY 终端通道广播输入")) {
+                guard viewModel.isBroadcastInputEnabled else { return }
                 viewModel.selectPane(.ptyGrid)
                 viewModel.isBroadcastBarExpanded.toggle()
             }
+            .disabled(!viewModel.isBroadcastInputEnabled)
             .keyboardShortcut("b", modifiers: [.command, .shift])
 
             Button(viewModel.L("Toggle Bottom Search & Trace Drawer", "切换底部检索与轨迹抽屉")) {

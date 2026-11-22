@@ -162,6 +162,24 @@ public enum RelayBauhausDesign {
         String(format: "$%.3f", amount)
     }
 
+    /// Formats real `relay.sh` / `LOG.md` USD spend with 4 decimal places (`$0.1234`).
+    public static func formatRunUSD(_ amount: Double) -> String {
+        String(format: "$%.4f", amount)
+    }
+
+    public static func runStatusColor(_ status: RelayRunStatus) -> Color {
+        switch status {
+        case .succeeded, .succeededNoChanges:
+            return agySignalGreen
+        case .running:
+            return codexCobalt
+        case .failed, .timeout, .refused, .killed, .interrupted:
+            return claudeVermilion
+        case .partial, .pending, .skipped, .cancelled:
+            return vibeOchre
+        }
+    }
+
     public static func formatTokensCompact(_ count: Int) -> String {
         if count >= 1_000_000 {
             return String(format: "%.2fM", Double(count) / 1_000_000.0)
@@ -614,6 +632,15 @@ public final class RelayStudioViewModel: ObservableObject {
     @Published public var laneBudgetAccounts: [LaneBudgetAccount] = []
     @Published public var globalBudgetCeilingUSD: Double = 0.0
 
+    // Live Read-Only Run & Streaming Output State (M5)
+    @Published public private(set) var liveRuns: [RelayRunRecord] = []
+    @Published public private(set) var activeRun: RelayRunRecord?
+    @Published public private(set) var liveRunLanesByID: [String: RelayRunLaneRecord] = [:]
+    @Published public private(set) var liveTerminalBuffersByLane: [String: VT100TerminalScreenBuffer] = [:]
+    @Published public private(set) var liveTerminalPlainTextByLane: [String: String] = [:]
+    @Published public private(set) var liveObservedAt: Date = Date()
+    private var liveWorkspaceObserver: RelayLiveWorkspaceObserver?
+
     // JavaScriptCore Guardrail Plugins & Scratchpad State
     @Published public var policyPack: RelayGuardrailsPolicyPack
     @Published public var pluginLatencyByID: [String: PluginLatencySummary] = [:]
@@ -643,6 +670,17 @@ public final class RelayStudioViewModel: ObservableObject {
 
     private static func makeEmptyDAGSpec() -> RelayDAGSpec {
         RelayDAGSpec(name: "", repositoryPath: "", tasks: [], globalBudgetCeilingUSD: 0.0)
+    }
+
+    private static func makeEmptyPolicyPack() -> RelayGuardrailsPolicyPack {
+        RelayGuardrailsPolicyPack(
+            formatVersion: "",
+            packID: "",
+            packName: "",
+            summary: "",
+            defaultExecutionBudgetMicros: 0.0,
+            entries: []
+        )
     }
 
     private static func makeEmptyCPMSchedule() -> CPMAnalysisReport {
@@ -755,8 +793,9 @@ public final class RelayStudioViewModel: ObservableObject {
         self.activePane = initialPane
         self.dagSpec = Self.makeEmptyDAGSpec()
         self.cpmSchedule = Self.makeEmptyCPMSchedule()
-        self.policyPack = RelayGuardrailsPolicyPack.defaultIndustrialPack()
-        self.scratchpadScriptSource = Self.defaultScratchpadTemplate
+        self.policyPack = Self.makeEmptyPolicyPack()
+        self.scratchpadSubjectInput = ""
+        self.scratchpadScriptSource = ""
 
         let shouldHydrateDemo = loadDemoWorkspace || (openedDatabase.getMeta(key: "is_demo_workspace") == "1")
         if shouldHydrateDemo {
@@ -781,12 +820,21 @@ public final class RelayStudioViewModel: ObservableObject {
     }
 
     private func hydrateRealWorkspaceState() {
+        liveWorkspaceObserver?.stop()
+        liveWorkspaceObserver = nil
+
         isDemoMode = false
         pluginLatencyByID = [:]
         laneBudgetAccounts = []
         globalBudgetCeilingUSD = 0.0
         gitCommits = []
         terminalSnapshotsByLane = [:]
+        liveRuns = []
+        activeRun = nil
+        liveRunLanesByID = [:]
+        liveTerminalBuffersByLane = [:]
+        liveTerminalPlainTextByLane = [:]
+        liveObservedAt = Date()
         mergeScenarios = []
         callSiteDiagnostics = []
         isometricTiles = []
@@ -797,6 +845,9 @@ public final class RelayStudioViewModel: ObservableObject {
         broadcastSentCount = 0
         isBroadcastBarExpanded = false
         ftsQueryText = ""
+        scratchpadSubjectInput = ""
+        scratchpadScriptSource = ""
+        lastScratchpadResult = nil
 
         campaignTitle = database.getMeta(key: "workspace_name")
             ?? projectBundleURL.deletingPathExtension().lastPathComponent
@@ -819,14 +870,153 @@ public final class RelayStudioViewModel: ObservableObject {
         selectedMergeFilePath = mergeReports.first?.relativePath ?? ""
         selectedMergeChunkID = mergeReports.first?.chunks.first?.id
         guardrailFindings = (try? database.allGuardrailFindings()) ?? []
-        policyPack = RelayGuardrailsPolicyPack.defaultIndustrialPack()
+        policyPack = Self.makeEmptyPolicyPack()
 
         reloadPersistedWorkspaceState()
+        loadInitialRealRunStateSynchronously()
+        startLiveWorkspaceObserverIfNeeded()
+        refreshStatusBanner()
+    }
+
+    private func loadInitialRealRunStateSynchronously() {
+        guard !isDemoMode, !ownsTemporaryBundleDirectory else { return }
+        guard let runs = try? database.allRuns(reconcileWithLock: true), !runs.isEmpty else { return }
+        let latest = runs[runs.count - 1]
+        var buffers: [String: VT100TerminalScreenBuffer] = [:]
+        var snaps: [String: TerminalViewportSnapshot] = [:]
+        var plains: [String: String] = [:]
+
+        let runRoot = projectBundleURL
+            .appendingPathComponent("runs", isDirectory: true)
+            .appendingPathComponent(latest.runID, isDirectory: true)
+
+        for laneRec in latest.lanes {
+            let vt = VT100TerminalScreenBuffer(laneID: laneRec.laneID, rows: 26, columns: 96)
+            let relayDir = runRoot
+                .appendingPathComponent("worktrees", isDirectory: true)
+                .appendingPathComponent(laneRec.laneID, isDirectory: true)
+                .appendingPathComponent(".relay", isDirectory: true)
+            var rawCollected = Data()
+            if let items = try? FileManager.default.contentsOfDirectory(at: relayDir, includingPropertiesForKeys: nil) {
+                for url in items.filter({ $0.pathExtension == "log" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                    if let d = try? Data(contentsOf: url), !d.isEmpty {
+                        rawCollected.append(d)
+                    }
+                }
+            }
+            if rawCollected.isEmpty {
+                let ptyURL = runRoot
+                    .appendingPathComponent("lanes", isDirectory: true)
+                    .appendingPathComponent("\(laneRec.laneID).pty")
+                if let d = try? Data(contentsOf: ptyURL), !d.isEmpty {
+                    rawCollected = d
+                }
+            }
+            if !rawCollected.isEmpty {
+                var normalized = Data()
+                normalized.reserveCapacity(rawCollected.count + 16)
+                var prevCR = false
+                for b in rawCollected {
+                    if b == 0x0A && !prevCR {
+                        normalized.append(0x0D)
+                    }
+                    normalized.append(b)
+                    prevCR = (b == 0x0D)
+                }
+                vt.feed(normalized)
+                buffers[laneRec.laneID] = vt
+                snaps[laneRec.laneID] = vt.snapshot()
+                plains[laneRec.laneID] = String(decoding: rawCollected, as: UTF8.self)
+            }
+        }
+
+        applyLiveWorkspaceSnapshot(
+            RelayLiveWorkspaceSnapshot(
+                allRuns: runs,
+                latestRun: latest,
+                terminalSnapshotsByLane: snaps,
+                terminalBuffersByLane: buffers,
+                terminalPlainTextByLane: plains,
+                observedAt: Date()
+            )
+        )
+    }
+
+    private func startLiveWorkspaceObserverIfNeeded() {
+        guard !isDemoMode, !ownsTemporaryBundleDirectory else { return }
+        let observer = RelayLiveWorkspaceObserver(
+            projectBundleURL: projectBundleURL,
+            database: database
+        ) { [weak self] snapshot in
+            Task { @MainActor [weak self] in
+                self?.applyLiveWorkspaceSnapshot(snapshot)
+            }
+        }
+        liveWorkspaceObserver = observer
+        observer.start()
+    }
+
+    private func applyLiveWorkspaceSnapshot(_ snapshot: RelayLiveWorkspaceSnapshot) {
+        guard !isDemoMode else { return }
+        liveObservedAt = snapshot.observedAt
+        liveRuns = snapshot.allRuns
+        activeRun = snapshot.latestRun
+
+        if let run = snapshot.latestRun {
+            if repositoryPath.isEmpty {
+                repositoryPath = run.repoPath
+            }
+            baseCommitOID = run.baseCommitOID
+            globalBudgetCeilingUSD = run.budgetUSD ?? 0.0
+
+            var byID: [String: RelayRunLaneRecord] = [:]
+            var mappedLanes: [ManagedWorktreeLane] = []
+            for laneRec in run.lanes {
+                byID[laneRec.laneID] = laneRec
+                let vendor = laneRec.agent.agentVendor
+                let mLane = ManagedWorktreeLane(
+                    id: laneRec.laneID,
+                    displayName: "\(vendor.localizedDisplayName(in: currentLanguage)) · \(laneRec.laneID)",
+                    assignedVendor: vendor,
+                    worktreePath: laneRec.worktreePath ?? "",
+                    branchName: laneRec.branch ?? "relay/\(run.runID)/\(laneRec.laneID)",
+                    baseCommitOID: run.baseCommitOID,
+                    headCommitOID: laneRec.commitOID ?? run.baseCommitOID,
+                    dirtyFiles: []
+                )
+                mappedLanes.append(mLane)
+            }
+            liveRunLanesByID = byID
+            lanes = mappedLanes
+            if selectedLaneID.isEmpty || !mappedLanes.contains(where: { $0.id == selectedLaneID }) {
+                selectedLaneID = mappedLanes.first?.id ?? ""
+            }
+        } else {
+            liveRunLanesByID = [:]
+            globalBudgetCeilingUSD = 0.0
+        }
+
+        liveTerminalBuffersByLane = snapshot.terminalBuffersByLane
+        liveTerminalPlainTextByLane = snapshot.terminalPlainTextByLane
+        terminalSnapshotsByLane = snapshot.terminalSnapshotsByLane
+
+        if !terminalSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            updateTerminalSearch(terminalSearchQuery)
+        }
         refreshStatusBanner()
     }
 
     private func hydrateDemoCampaignState(seedIfEmpty: Bool) {
+        liveWorkspaceObserver?.stop()
+        liveWorkspaceObserver = nil
+        liveRuns = []
+        activeRun = nil
+        liveRunLanesByID = [:]
+        liveTerminalBuffersByLane = [:]
+        liveTerminalPlainTextByLane = [:]
+
         isDemoMode = true
+        scratchpadScriptSource = Self.defaultScratchpadTemplate
         let synth = RelayDemoWorkspaceSynthesizer()
         let campaign: SynthesizedFlagshipCampaign
         let existingLanes = (try? database.allLanes()) ?? []
@@ -937,25 +1127,32 @@ public final class RelayStudioViewModel: ObservableObject {
         if isDemoMode {
             coordinator.shellState.statusBannerText = RelayLocalizer.select(
                 lang,
-                "[DEMO] Synthetic 4-lane preview · Desktop UI not connected to live runs yet (M5, does not launch agents; use 'RelayIDE run' in CLI)",
-                "[演示数据] 4 通道合成预览 · 桌面界面尚未接入真实运行（排在 M5，界面不启动 agent；请在命令行用 RelayIDE run）"
+                "[DEMO] Synthetic 4-lane preview · Desktop UI does not launch agents; use 'RelayIDE run' in CLI",
+                "[演示数据] 4 通道合成预览 · 界面不启动 agent；请在命令行用 RelayIDE run"
+            )
+        } else if let run = activeRun {
+            coordinator.shellState.statusBannerText = RelayLocalizer.select(
+                lang,
+                "Live run (\(run.status.localizedLabel(in: .en))) · Observing \(lanes.count) lane(s) read-only (use 'RelayIDE run' in CLI)",
+                "实时运行（\(run.status.localizedLabel(in: .zhHans))）· 只读观察 \(lanes.count) 条通道（请在命令行用 RelayIDE run）"
             )
         } else if lanes.isEmpty {
             coordinator.shellState.statusBannerText = RelayLocalizer.select(
                 lang,
-                "Empty workspace · Desktop UI not connected to live runs yet (M5, does not launch agents; use 'RelayIDE run' in CLI)",
-                "空工作区 · 桌面界面尚未接入真实运行（排在 M5，界面不启动 agent；请在命令行用 RelayIDE run）"
+                "Empty workspace · Live read-only observer ready (does not launch agents; use 'RelayIDE run' in CLI)",
+                "空工作区 · 实时只读观察器已就绪（界面不启动 agent；请在命令行用 RelayIDE run）"
             )
         } else {
             coordinator.shellState.statusBannerText = RelayLocalizer.select(
                 lang,
-                "\(lanes.count) lane(s) loaded · Desktop UI not connected to live runs yet (M5; use 'RelayIDE run' in CLI)",
-                "已加载 \(lanes.count) 条通道 · 桌面界面尚未接入真实运行（排在 M5；请在命令行用 RelayIDE run）"
+                "\(lanes.count) lane(s) loaded · Live read-only observer (use 'RelayIDE run' in CLI)",
+                "已加载 \(lanes.count) 条通道 · 实时只读观察器（请在命令行用 RelayIDE run）"
             )
         }
     }
 
     deinit {
+        liveWorkspaceObserver?.stop()
         if ownsTemporaryBundleDirectory {
             let parentDir = projectBundleURL.deletingLastPathComponent()
             try? FileManager.default.removeItem(at: parentDir)
@@ -996,6 +1193,10 @@ public final class RelayStudioViewModel: ObservableObject {
 
         coordinator.onBroadcastInputRequested = { [weak self] in
             guard let self else { return }
+            guard self.isBroadcastInputEnabled else {
+                self.isBroadcastBarExpanded = false
+                return
+            }
             self.selectPane(.ptyGrid)
             self.isBroadcastBarExpanded.toggle()
         }
@@ -1068,12 +1269,59 @@ public final class RelayStudioViewModel: ObservableObject {
 
     // MARK: - Computed Studio Summaries
 
+    public var isBroadcastInputEnabled: Bool {
+        isDemoMode
+    }
+
+    public var activeBudgetCeilingUSD: Double? {
+        if isDemoMode {
+            return globalBudgetCeilingUSD > 0 ? globalBudgetCeilingUSD : nil
+        }
+        return activeRun?.budgetUSD
+    }
+
+    public func liveRunLane(forID laneID: String) -> RelayRunLaneRecord? {
+        liveRunLanesByID[laneID]
+    }
+
+    public func formattedLiveLaneDuration(forLane laneID: String) -> String? {
+        guard let rec = liveRunLanesByID[laneID] else { return nil }
+        if let s = rec.startedAt, let f = rec.finishedAt {
+            return String(format: "%.2fs", max(0.0, f.timeIntervalSince(s)))
+        }
+        if !rec.status.isTerminal, let s = rec.startedAt {
+            let elapsed = Int(max(0.0, liveObservedAt.timeIntervalSince(s)).rounded(.down))
+            return "\(elapsed)s"
+        }
+        return nil
+    }
+
+    public func formattedLiveLaneSpend(forLane laneID: String) -> String? {
+        guard let rec = liveRunLanesByID[laneID] else { return nil }
+        if rec.costSource == "usd", let usd = rec.costUSD {
+            return RelayBauhausDesign.formatRunUSD(usd)
+        }
+        if rec.costSource == "unpriced" || (rec.costUSD == nil && (rec.tokens ?? 0) > 0) {
+            if let tok = rec.tokens, tok > 0 {
+                return L("\(tok) tokens · unpriced", "\(tok) tokens · 未计价")
+            }
+            return L("unpriced", "未计价")
+        }
+        return nil
+    }
+
     public var totalWorkspaceSpendUSD: Double {
-        laneBudgetAccounts.reduce(0.0) { $0 + $1.spentUSD }
+        if !isDemoMode {
+            return activeRun?.totalCostUSD ?? 0.0
+        }
+        return laneBudgetAccounts.reduce(0.0) { $0 + $1.spentUSD }
     }
 
     public var totalInputAndOutputTokens: Int {
-        laneBudgetAccounts.reduce(0) { $0 + $1.inputTokens + $1.outputTokens }
+        if !isDemoMode {
+            return activeRun?.lanes.reduce(0) { $0 + ($1.tokens ?? 0) } ?? 0
+        }
+        return laneBudgetAccounts.reduce(0) { $0 + $1.inputTokens + $1.outputTokens }
     }
 
     public var totalUnresolvedConflicts: Int {
@@ -1085,6 +1333,13 @@ public final class RelayStudioViewModel: ObservableObject {
     }
 
     public var activeWaveSummaryLabel: String {
+        if !isDemoMode, let run = activeRun {
+            let finished = run.lanes.filter(\.status.isTerminal).count
+            return L(
+                "\(finished)/\(run.lanes.count) Lanes · \(run.status.localizedLabel(in: .en))",
+                "\(finished)/\(run.lanes.count) 条通道 · \(run.status.localizedLabel(in: .zhHans))"
+            )
+        }
         guard !dagSpec.tasks.isEmpty else {
             return L("0 Tasks · Idle", "0 项任务 · 空闲")
         }
@@ -1198,7 +1453,7 @@ public final class RelayStudioViewModel: ObservableObject {
                 if !persistedLanes.isEmpty {
                     lanes = persistedLanes
                 }
-            } else {
+            } else if activeRun == nil {
                 lanes = persistedLanes
             }
         }
@@ -1268,7 +1523,17 @@ public final class RelayStudioViewModel: ObservableObject {
 
         var matchesMap: [String: [TerminalScrollbackMatch]] = [:]
         for lane in lanes {
-            if let session = orchestrator.ptyGrid.session(forLane: lane.id) {
+            if !isDemoMode, let liveBuf = liveTerminalBuffersByLane[lane.id] {
+                let hits = scrollbackSearchEngine.search(
+                    in: liveBuf,
+                    query: trimmed,
+                    mode: .caseInsensitiveSubstring,
+                    maxResults: 64
+                )
+                if !hits.isEmpty {
+                    matchesMap[lane.id] = hits
+                }
+            } else if let session = orchestrator.ptyGrid.session(forLane: lane.id) {
                 let hits = scrollbackSearchEngine.search(
                     in: session.screenBuffer,
                     query: trimmed,

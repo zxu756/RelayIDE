@@ -19,7 +19,7 @@ public struct PTYMultiplexerGridView: View {
         VStack(spacing: 8) {
             ptyTopControlStrip
 
-            if viewModel.isBroadcastBarExpanded {
+            if viewModel.isBroadcastInputEnabled && viewModel.isBroadcastBarExpanded {
                 broadcastComposerBar
             }
 
@@ -141,7 +141,9 @@ public struct PTYMultiplexerGridView: View {
             Spacer(minLength: 4)
 
             RelayBauhausPill(
-                viewModel.L("PTY 96×26 · TrueColor", "PTY 96×26 · 真彩色"),
+                viewModel.isDemoMode
+                    ? viewModel.L("PTY 96×26 · TrueColor", "PTY 96×26 · 真彩色")
+                    : viewModel.L("Live PTY · TrueColor", "实时终端 · 真彩色"),
                 foreground: RelayBauhausDesign.graphiteInk,
                 background: RelayBauhausDesign.warmIvory,
                 border: RelayBauhausDesign.hairlineBorder,
@@ -149,30 +151,55 @@ public struct PTYMultiplexerGridView: View {
                 monospaced: !isZh
             )
 
-            Button {
-                viewModel.isBroadcastBarExpanded.toggle()
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "dot.radiowaves.left.and.right")
-                        .font(.system(size: 10.5, weight: .bold))
-                    Text(viewModel.L("Broadcast Input ⌘⇧B", "广播输入 ⌘⇧B"))
-                        .font(.system(size: 11, weight: .bold))
-                        .monospacedDigit()
+            if viewModel.isBroadcastInputEnabled {
+                Button {
+                    viewModel.isBroadcastBarExpanded.toggle()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 10.5, weight: .bold))
+                        Text(viewModel.L("Broadcast Input ⌘⇧B", "广播输入 ⌘⇧B"))
+                            .font(.system(size: 11, weight: .bold))
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(viewModel.isBroadcastBarExpanded ? RelayBauhausDesign.warmIvory : RelayBauhausDesign.claudeVermilion)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                            .fill(viewModel.isBroadcastBarExpanded ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.vermilionWash)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                            .strokeBorder(RelayBauhausDesign.claudeVermilion, lineWidth: 1)
+                    )
+                    .fixedSize(horizontal: true, vertical: false)
                 }
-                .foregroundStyle(viewModel.isBroadcastBarExpanded ? RelayBauhausDesign.warmIvory : RelayBauhausDesign.claudeVermilion)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
-                        .fill(viewModel.isBroadcastBarExpanded ? RelayBauhausDesign.claudeVermilion : RelayBauhausDesign.vermilionWash)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
-                        .strokeBorder(RelayBauhausDesign.claudeVermilion, lineWidth: 1)
-                )
-                .fixedSize(horizontal: true, vertical: false)
+                .buttonStyle(.plain)
+            } else {
+                Button {} label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(viewModel.L("Broadcast Disabled", "广播已禁用"))
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                            .fill(RelayBauhausDesign.warmIvory.opacity(0.65))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                            .strokeBorder(RelayBauhausDesign.hairlineBorder, lineWidth: 1)
+                    )
+                    .fixedSize(horizontal: true, vertical: false)
+                }
+                .buttonStyle(.plain)
+                .disabled(true)
             }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -309,7 +336,7 @@ public struct PTYMultiplexerGridView: View {
         } else {
             switch viewModel.terminalLayoutPreset {
             case .quad2x2:
-                if lanes.count >= 4 {
+                if lanes.count == 4 || (viewModel.isDemoMode && lanes.count >= 4) {
                     GeometryReader { geo in
                         let colW = max(180, (geo.size.width - 8) * 0.5)
                         let rowH = max(120, (geo.size.height - 8) * 0.5)
@@ -325,6 +352,23 @@ public struct PTYMultiplexerGridView: View {
                                     .frame(width: colW, height: rowH)
                                 RecessedVT100TerminalPaneView(lane: lanes[3], viewModel: viewModel, maxVisibleRows: 11)
                                     .frame(width: colW, height: rowH)
+                            }
+                        }
+                    }
+                } else if lanes.count == 2 {
+                    HStack(spacing: 8) {
+                        RecessedVT100TerminalPaneView(lane: lanes[0], viewModel: viewModel, maxVisibleRows: 22)
+                        RecessedVT100TerminalPaneView(lane: lanes[1], viewModel: viewModel, maxVisibleRows: 22)
+                    }
+                } else if lanes.count > 4 {
+                    let rowCount = (lanes.count + 1) / 2
+                    VStack(spacing: 8) {
+                        ForEach(0..<rowCount, id: \.self) { rowIdx in
+                            HStack(spacing: 8) {
+                                RecessedVT100TerminalPaneView(lane: lanes[rowIdx * 2], viewModel: viewModel, maxVisibleRows: 8)
+                                if rowIdx * 2 + 1 < lanes.count {
+                                    RecessedVT100TerminalPaneView(lane: lanes[rowIdx * 2 + 1], viewModel: viewModel, maxVisibleRows: 8)
+                                }
                             }
                         }
                     }
@@ -370,8 +414,8 @@ public struct PTYMultiplexerGridView: View {
 
                 Text(
                     viewModel.L(
-                        "The desktop UI is not connected to live runs yet (scheduled for M5) and does not launch coding agents; use 'RelayIDE run' on the command line to run agents. Launch with --demo or click Load Demo Preview to inspect synthetic sample data.",
-                        "桌面界面尚未接入真实运行（排在 M5），界面本身不会启动 coding agent；请在命令行使用 RelayIDE run 运行 agent。传入 --demo 或点击下方按钮可载入合成演示预览数据。"
+                        "Live read-only workspace observer is active and does not launch coding agents. Run 'RelayIDE run' on the command line against this project bundle to stream live .relay logs, lane status, duration, and spend here, or click Load Demo Preview to inspect synthetic sample data.",
+                        "实时只读观察器已就绪，界面本身不会启动 coding agent。请在命令行对该项目包执行 RelayIDE run 以在此实时查看 .relay 日志、通道状态、耗时与花费，或点击下方按钮载入合成演示预览数据。"
                     )
                 )
                 .font(.system(size: 11.5))
@@ -492,7 +536,7 @@ public struct RecessedVT100TerminalPaneView: View {
 
             Spacer(minLength: 4)
 
-            if let acct = budgetAccount {
+            if viewModel.isDemoMode, let acct = budgetAccount {
                 if acct.circuitOpen {
                     Text(viewModel.L("429", "429 熔断"))
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -521,6 +565,42 @@ public struct RecessedVT100TerminalPaneView: View {
                             .fill(Color(relayHex: "#27272A"))
                     )
                     .fixedSize(horizontal: true, vertical: false)
+            } else if let liveRec = viewModel.liveRunLane(forID: lane.id) {
+                let statusStr = liveRec.status.localizedLabel(in: viewModel.currentLanguage)
+                let exitSuffix = liveRec.exitCode.map { viewModel.L(" · exit \($0)", " · 退出码 \($0)") } ?? ""
+                Text("\(statusStr)\(exitSuffix)")
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(RelayBauhausDesign.runStatusColor(liveRec.status))
+                    .padding(.horizontal, 5.5)
+                    .padding(.vertical, 1.5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(Color(relayHex: "#27272A"))
+                    )
+                    .fixedSize(horizontal: true, vertical: false)
+
+                if let durLabel = viewModel.formattedLiveLaneDuration(forLane: lane.id) {
+                    Text(durLabel)
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(Color(relayHex: "#A1A1AA"))
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+
+                if let spendLabel = viewModel.formattedLiveLaneSpend(forLane: lane.id) {
+                    Text(spendLabel)
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(Color(relayHex: "#D4D4D8"))
+                        .padding(.horizontal, 5.5)
+                        .padding(.vertical, 1.5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(Color(relayHex: "#27272A"))
+                        )
+                        .fixedSize(horizontal: true, vertical: false)
+                }
             }
         }
         .padding(.horizontal, 8)
@@ -597,11 +677,18 @@ public struct RecessedVT100TerminalPaneView: View {
 
             Spacer(minLength: 4)
 
-            Text("+\(lane.totalAdditions)/-\(lane.totalDeletions)")
-                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                .monospacedDigit()
-                .foregroundStyle(Color(relayHex: "#4ADE80"))
-                .fixedSize(horizontal: true, vertical: false)
+            if viewModel.isDemoMode {
+                Text("+\(lane.totalAdditions)/-\(lane.totalDeletions)")
+                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(Color(relayHex: "#4ADE80"))
+                    .fixedSize(horizontal: true, vertical: false)
+            } else {
+                Text(viewModel.L(".relay log", ".relay 实时日志"))
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color(relayHex: "#A1A1AA"))
+                    .fixedSize(horizontal: true, vertical: false)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4.5)
@@ -831,28 +918,35 @@ public struct PTYCriticalPathAndHandoffInspector: View {
                     .buttonStyle(.plain)
                 }
 
-                HStack(spacing: 6) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(viewModel.L("SPEEDUP", "并行加速比"))
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
-                        Text(String(format: "%.2f×", speedup.theoreticalSpeedupFactor))
-                            .font(.system(size: 16, weight: .bold, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundStyle(RelayBauhausDesign.agySignalGreen)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if viewModel.isDemoMode || !viewModel.dagSpec.tasks.isEmpty {
+                    HStack(spacing: 6) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(viewModel.L("SPEEDUP", "并行加速比"))
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                            Text(String(format: "%.2f×", speedup.theoreticalSpeedupFactor))
+                                .font(.system(size: 16, weight: .bold, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(RelayBauhausDesign.agySignalGreen)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(viewModel.L("MAKESPAN", "并行 / 串行工期"))
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
-                        Text(String(format: "%.0fs / %.0fs", speedup.parallelMakespanSeconds, speedup.serialDurationSeconds))
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundStyle(RelayBauhausDesign.espressoInk)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(viewModel.L("MAKESPAN", "并行 / 串行工期"))
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                            Text(String(format: "%.0fs / %.0fs", speedup.parallelMakespanSeconds, speedup.serialDurationSeconds))
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(RelayBauhausDesign.espressoInk)
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
                     }
-                    .fixedSize(horizontal: true, vertical: false)
+                } else {
+                    Text(viewModel.L("No DAG schedule loaded", "未加载 DAG 拓扑排期"))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -1072,6 +1166,7 @@ public struct RelayDAGPipelineCanvasView: View {
     private var dagHeaderMetricsStrip: some View {
         let speedup = viewModel.cpmSchedule.speedup
         let critCount = viewModel.cpmSchedule.criticalPathTaskIDs.count
+        let hasTasks = viewModel.isDemoMode || !viewModel.dagSpec.tasks.isEmpty
         let speedupText = viewModel.currentLanguage.isChinese
             ? String(format: "并行加速比 %.2f×", speedup.theoreticalSpeedupFactor)
             : String(format: "Parallel Speedup %.2f×", speedup.theoreticalSpeedupFactor)
@@ -1079,23 +1174,34 @@ public struct RelayDAGPipelineCanvasView: View {
             ? String(format: "并行总工期 %.0fs (串行 %.0fs)", speedup.parallelMakespanSeconds, speedup.serialDurationSeconds)
             : String(format: "Makespan %.0fs (Serial %.0fs)", speedup.parallelMakespanSeconds, speedup.serialDurationSeconds)
         return HStack(spacing: 10) {
-            RelayBauhausPill(
-                speedupText,
-                foreground: RelayBauhausDesign.agySignalGreen,
-                background: RelayBauhausDesign.greenWash,
-                border: RelayBauhausDesign.agySignalGreen.opacity(0.45),
-                symbolName: "bolt.fill",
-                monospaced: true
-            )
+            if hasTasks {
+                RelayBauhausPill(
+                    speedupText,
+                    foreground: RelayBauhausDesign.agySignalGreen,
+                    background: RelayBauhausDesign.greenWash,
+                    border: RelayBauhausDesign.agySignalGreen.opacity(0.45),
+                    symbolName: "bolt.fill",
+                    monospaced: true
+                )
 
-            RelayBauhausPill(
-                makespanText,
-                foreground: RelayBauhausDesign.espressoInk,
-                background: RelayBauhausDesign.warmIvory,
-                border: RelayBauhausDesign.hairlineBorder,
-                symbolName: "clock",
-                monospaced: true
-            )
+                RelayBauhausPill(
+                    makespanText,
+                    foreground: RelayBauhausDesign.espressoInk,
+                    background: RelayBauhausDesign.warmIvory,
+                    border: RelayBauhausDesign.hairlineBorder,
+                    symbolName: "clock",
+                    monospaced: true
+                )
+            } else {
+                RelayBauhausPill(
+                    viewModel.L("No DAG Schedule Loaded", "未加载 DAG 拓扑排期"),
+                    foreground: RelayBauhausDesign.mutedStoneInk,
+                    background: RelayBauhausDesign.warmIvory,
+                    border: RelayBauhausDesign.hairlineBorder,
+                    symbolName: "clock",
+                    monospaced: false
+                )
+            }
 
             RelayBauhausPill(
                 viewModel.L("Critical Path: \(critCount) Nodes", "关键路径：\(critCount) 个节点"),
@@ -1156,21 +1262,36 @@ public struct RelayDAGPipelineCanvasView: View {
 
     private var dagTopologicalSwimlaneCanvas: some View {
         GeometryReader { geo in
+            let hasTasks = viewModel.isDemoMode || !viewModel.dagSpec.tasks.isEmpty
             let layout = computeDAGCardPositions(in: geo.size)
 
             ZStack(alignment: .topLeading) {
                 // Drafting background + Bezier dependency edges on SwiftUI.Canvas
                 Canvas { context, size in
                     drawArchitecturalGrid(in: &context, size: size)
-                    drawWaveColumnHeaders(in: &context, size: size, maxWave: layout.maxWave)
-                    drawBezierDependencyEdges(in: &context, layout: layout)
+                    if hasTasks {
+                        drawWaveColumnHeaders(in: &context, size: size, maxWave: layout.maxWave)
+                        drawBezierDependencyEdges(in: &context, layout: layout)
+                    }
                 }
 
-                // Interactive Positioned Task Cards
-                ForEach(layout.positionedNodes) { item in
-                    dagTaskNodeCard(item)
-                        .frame(width: item.frame.width, height: item.frame.height)
-                        .position(x: item.frame.midX, y: item.frame.midY)
+                if hasTasks {
+                    // Interactive Positioned Task Cards
+                    ForEach(layout.positionedNodes) { item in
+                        dagTaskNodeCard(item)
+                            .frame(width: item.frame.width, height: item.frame.height)
+                            .position(x: item.frame.midX, y: item.frame.midY)
+                    }
+                } else {
+                    Text(
+                        viewModel.L(
+                            "No DAG wave schedule loaded in this workspace.",
+                            "当前工作区尚未加载 DAG 波次排期。"
+                        )
+                    )
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 }
             }
             .background(

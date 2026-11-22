@@ -42,7 +42,8 @@ struct StudioViewModelAndHonestyTests {
             #expect(!banner.contains("127.0.0.1"))
             #expect(!banner.contains("43118"))
             #expect(!banner.contains("M0"))
-            #expect(banner.contains("M5"))
+            #expect(!banner.contains("not connected to live runs yet"))
+            #expect(!banner.contains("尚未接入真实运行"))
             #expect(banner.contains("RelayIDE run"))
             if lang == .en {
                 #expect(!banner.contains(staleScheduledEN))
@@ -112,7 +113,7 @@ struct StudioViewModelAndHonestyTests {
         #expect(!demoBannerEN.contains("M0"))
         #expect(!demoBannerEN.contains(staleScheduledEN))
         #expect(!demoBannerEN.contains("(M1)"))
-        #expect(demoBannerEN.contains("M5"))
+        #expect(!demoBannerEN.contains("not connected to live runs yet"))
         #expect(demoBannerEN.contains("RelayIDE run"))
 
         vmDemo.setLanguage(.zhHans, postToast: false)
@@ -120,7 +121,7 @@ struct StudioViewModelAndHonestyTests {
         let demoBannerZH = vmDemo.coordinator.shellState.statusBannerText
         #expect(!demoBannerZH.contains("M0"))
         #expect(!demoBannerZH.contains(staleScheduledZH))
-        #expect(demoBannerZH.contains("M5"))
+        #expect(!demoBannerZH.contains("尚未接入真实运行"))
         #expect(demoBannerZH.contains("RelayIDE run"))
 
         // Verify opening a --seed-demo bundle also activates isDemoMode

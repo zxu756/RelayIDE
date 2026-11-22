@@ -15,24 +15,49 @@ public struct GuardrailPluginStudioView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 8) {
-            guardrailStudioHeaderStrip
+        if viewModel.isDemoMode {
+            VStack(spacing: 8) {
+                guardrailStudioHeaderStrip
 
-            HStack(alignment: .top, spacing: 10) {
-                pluginCatalogColumn
-                    .frame(width: 404)
-                    .frame(maxHeight: .infinity)
-
-                VStack(spacing: 8) {
-                    jsScratchpadCard
-                    guardrailFindingsAndTraceLedger
+                HStack(alignment: .top, spacing: 10) {
+                    pluginCatalogColumn
+                        .frame(width: 404)
                         .frame(maxHeight: .infinity)
+
+                    VStack(spacing: 8) {
+                        jsScratchpadCard
+                        guardrailFindingsAndTraceLedger
+                            .frame(maxHeight: .infinity)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .padding(10)
+            .background(RelayBauhausDesign.warmSandpaper)
+        } else {
+            VStack {
+                RelayBauhausCard(padding: 24) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(viewModel.L("Guardrail Plugins · Not Connected", "护栏插件 · 未接入"))
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(RelayBauhausDesign.espressoInk)
+
+                        Text(
+                            viewModel.L(
+                                "JavaScriptCore guardrail hooks are not connected to live 'RelayIDE run' executions. Launch with --demo to inspect synthetic guardrail policies.",
+                                "JavaScriptCore 护栏钩子未接入真实的 RelayIDE run 执行流程。如需查看合成护栏策略演示，请使用 --demo 模式启动。"
+                            )
+                        )
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                }
+            }
+            .padding(10)
+            .background(RelayBauhausDesign.warmSandpaper)
         }
-        .padding(10)
-        .background(RelayBauhausDesign.warmSandpaper)
     }
 
     // MARK: - Top Guardrail Policy Pack Header
