@@ -1,0 +1,57 @@
+================================================================
+RelayIDE M5 Acceptance Suite (Windowless Live UI & Number Audit)
+Timestamp: 2026-11-22T13:26:00Z
+Commit:    f52df7f (branch: m5/ui; working tree clean outside reports/)
+Mode:      full
+relay.sh sha256 (start):      bfa2ecaa82f3f8fb33173ccd15079cfd48f62d7e71d98dd56e6d220438204868
+relay_util.py sha256 (start): 4045f18261151d520bf68f5044bd4e30d0fa20d9b64894c4a22cf32b39050629
+================================================================
+
+--- Row 1: 2 parallel stub lanes stream PTY/.relay/*.log line-by-line (<1.0s) matching logs (R7) ---
+[PASS] Row 1: 2 parallel lanes streamed 4 lines/lane progressively (<1.0s threshold, max_line_latency=0.132s [lane-claude#1=0.099s, lane-claude#2=0.094s, lane-claude#3=0.035s, lane-claude#4=0.128s, lane-vibe#1=0.099s, lane-vibe#2=0.094s, lane-vibe#3=0.035s, lane-vibe#4=0.132s]), mid-run & final ImageRenderer PDF matched .relay/*.log, windows=0 (6.19s)
+
+--- Row 2: Budget-refused lane without .relay/*.log displays lanes/b.pty refusal reason ---
+[PASS] Row 2: lane b (no .relay/*.log) rendered status=refused, exitCode=2 & 'not started: the job budget' from lanes/b.pty in EN & ZH PDF, windows=0 (3.04s)
+
+--- Row 3: 4-vendor run updates status, exitCode, duration, spend & unpriced tokens in <2.0s ---
+[PASS] Row 3: 4 lanes updated <2.0s (c1=0.411s, v1=0.167s, a1=0.346s, x1=0.169s; full_pdf_lag=0.435s), c1=$0.1234, v1=$0.2500 (exit 3), total=$0.3734, a1=4500 & x1=1200 unpriced tokens (no $0.00), windows=0 (2.38s)
+
+--- Row 4: File ownership view (⌘4) refreshes tracked edit & untracked file in <2.0s ---
+[PASS] Row 4: ⌘4 refreshed <2.0s (tracked_vm=0.059s, tracked_pdf=0.085s, untracked_vm=0.081s, untracked_pdf=0.111s), committed files retained, .relay/.git excluded, windows=0 (3.71s)
+
+--- Row 5: Merge view (⌘3) displays M2 verified result & git merge-file -p conflicts (fixes R74) ---
+[PASS] Row 5: clean run rendered verified + ready:true + mergeCommitOIDs + verify.pty; conflict run matched git merge-file -p (UU App.swift) in EN & ZH; 0 R74 tokens in Sources/; windows=0 (6.80s)
+
+--- Row 6: Tightened non-demo number provenance & key-field exact equality audit ---
+[PASS] Row 6: 0 ungrounded numbers & 0 key-field mismatches across 70 PDF renders (EN & ZH, panes ⌘1..⌘5 + drawer + ⌘,), --demo badged & isolated, windows=0 (15.75s)
+
+--- Row 7: 2720x1680 ImageRenderer rasterization integrity & zero-window check ---
+[PASS] Row 7: 15 offscreen CGImages verified at 2720x1680 (min_distinct_rgb=28), NSApplication.windows=0, lingering RelayIDE procs=0 (2.68s)
+
+--- Row 8: Post-suite hygiene (0 decoy hits, 0 leftover processes, ~/Library unchanged, relay.sh sha256 & git status) ---
+[PASS] Row 8: 0 decoy CLI hits, 0 leftover processes, ~/Library/Preferences unchanged, relay.sh & relay_util.py sha256 unchanged, working tree unchanged (0.10s)
+
+--- Row 9 (Record-Only): Per-row timings, latency metrics, agent-relay checksums, and binary size ---
+Build elapsed:                1.82s
+  Row 1    [PASS]  6.19s
+  Row 2    [PASS]  3.04s
+  Row 3    [PASS]  2.38s
+  Row 4    [PASS]  3.71s
+  Row 5    [PASS]  6.80s
+  Row 6    [PASS]  15.75s
+  Row 7    [PASS]  2.68s
+  Row 8    [PASS]  0.10s
+Row 1 max stream latency:     0.132s
+Row 3 4-lane PDF lag:         0.435s
+Row 4 ownership FSEvents lag: tracked=0.085s, untracked=0.111s
+Suite total wall-clock:       43.16s
+relay.sh sha256 (end):        bfa2ecaa82f3f8fb33173ccd15079cfd48f62d7e71d98dd56e6d220438204868
+relay_util.py sha256 (end):   4045f18261151d520bf68f5044bd4e30d0fa20d9b64894c4a22cf32b39050629
+Tested binary:                <repo>/.build/debug/RelayIDE
+Tested binary size:           22719728 bytes (21.67 MiB)
+Tested binary sha256:         5b35fbae7d91ca74ef16282c9104b93311c6e488b817d03cfa21315c68556091
+[RECORD] Row 9: total=43.16s, build=1.82s, stream_max=0.132s, completion_lag=0.435s, ownership_lag=(tracked=0.085s, untracked=0.111s), binary=22719728 B (21.67 MiB), relay.sh=bfa2ecaa82f3f8fb33173ccd15079cfd48f62d7e71d98dd56e6d220438204868
+
+================================================================
+ALL M5 UI ACCEPTANCE CHECKS PASSED (Rows 1..8 hard checks + Row 9 recorded; total=43.16s)
+================================================================
