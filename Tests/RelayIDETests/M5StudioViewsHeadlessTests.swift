@@ -452,8 +452,6 @@ struct M5StudioViewsHeadlessTests {
             let persistedManagedLanes = (try? projDB.allLanes()) ?? []
             var totalManagedOwnedFiles = 0
             for mLane in persistedManagedLanes {
-                for tok in try extractNumberTokens(from: mLane.id) { truth.insert(tok) }
-                for tok in try extractNumberTokens(from: mLane.baseCommitOID) { truth.insert(tok) }
                 let snap = gitInspector.inspectLaneFileOwnership(
                     laneID: mLane.id,
                     worktreePath: mLane.worktreePath,
@@ -468,7 +466,6 @@ struct M5StudioViewsHeadlessTests {
                 for f in snap.files {
                     truth.insert("\(f.additions)")
                     truth.insert("\(f.deletions)")
-                    for tok in try extractNumberTokens(from: f.relativePath) { truth.insert(tok) }
                 }
             }
             if !persistedManagedLanes.isEmpty {
@@ -477,12 +474,6 @@ struct M5StudioViewsHeadlessTests {
 
             let runs = try projDB.allRuns(reconcileWithLock: true)
             if let run = runs.last {
-                for tok in try extractNumberTokens(from: run.runID) {
-                    truth.insert(tok)
-                }
-                for tok in try extractNumberTokens(from: run.baseCommitOID) {
-                    truth.insert(tok)
-                }
                 truth.insert("\(run.lanes.count)")
                 let termCount = run.lanes.filter(\.status.isTerminal).count
                 truth.insert("\(termCount)")
@@ -503,10 +494,6 @@ struct M5StudioViewsHeadlessTests {
                 }
 
                 if let integ = run.integration {
-                    for tok in try extractNumberTokens(from: integ.baseCommitOID) { truth.insert(tok) }
-                    if let headOID = integ.headCommitOID {
-                        for tok in try extractNumberTokens(from: headOID) { truth.insert(tok) }
-                    }
                     truth.insert("\(integ.merges.count)")
                     let totalConflicts = integ.merges.reduce(0) { $0 + $1.conflicts.count }
                     truth.insert("\(totalConflicts)")
@@ -516,16 +503,6 @@ struct M5StudioViewsHeadlessTests {
                     for step in integ.merges {
                         truth.insert("\(step.ordinal)")
                         truth.insert("\(step.conflicts.count)")
-                        for tok in try extractNumberTokens(from: step.laneID) { truth.insert(tok) }
-                        if let lOID = step.laneCommitOID {
-                            for tok in try extractNumberTokens(from: lOID) { truth.insert(tok) }
-                        }
-                        if let mOID = step.mergeCommitOID {
-                            for tok in try extractNumberTokens(from: mOID) { truth.insert(tok) }
-                        }
-                        for c in step.conflicts {
-                            for tok in try extractNumberTokens(from: c.path) { truth.insert(tok) }
-                        }
                     }
 
                     let reconstructed = gitInspector.reconstructIntegrationConflictBlocks(
@@ -533,10 +510,9 @@ struct M5StudioViewsHeadlessTests {
                         integration: integ
                     )
                     for blk in reconstructed {
-                        for tok in try extractNumberTokens(from: blk.mergeBaseOID) { truth.insert(tok) }
                         if let text = blk.conflictText {
                             combinedTerminalLogs += "\n" + text
-                            for tok in try extractNumberTokens(from: text) { truth.insert(tok) }
+                            truth.formUnion(try M5NumberProvenanceAndFieldAuditor.extractSafeLogNumbers(from: text, strippingIdentifiers: []))
                         }
                     }
 
@@ -549,9 +525,7 @@ struct M5StudioViewsHeadlessTests {
                         if let vs = verify.startedAt, let vf = verify.finishedAt {
                             truth.insert(String(format: "%.2f", max(0.0, vf.timeIntervalSince(vs))))
                         }
-                        for tok in try extractNumberTokens(from: verify.command) {
-                            truth.insert(tok)
-                        }
+                        truth.formUnion(try M5NumberProvenanceAndFieldAuditor.extractSafeLogNumbers(from: verify.command, strippingIdentifiers: []))
                         let vPath = verify.logPath ?? bundleURL
                             .appendingPathComponent("runs", isDirectory: true)
                             .appendingPathComponent(run.runID, isDirectory: true)
@@ -559,9 +533,7 @@ struct M5StudioViewsHeadlessTests {
                             .path
                         if let vText = try? String(contentsOfFile: vPath, encoding: .utf8), !vText.isEmpty {
                             combinedTerminalLogs += "\n" + vText
-                            for tok in try extractNumberTokens(from: vText) {
-                                truth.insert(tok)
-                            }
+                            truth.formUnion(try M5NumberProvenanceAndFieldAuditor.extractSafeLogNumbers(from: vText, strippingIdentifiers: []))
                         }
                     }
                 }
@@ -574,24 +546,6 @@ struct M5StudioViewsHeadlessTests {
 
                 for lane in run.lanes {
                     truth.insert("\(lane.ordinal)")
-                    for tok in try extractNumberTokens(from: lane.laneID) {
-                        truth.insert(tok)
-                    }
-                    for dep in lane.after {
-                        for tok in try extractNumberTokens(from: dep) {
-                            truth.insert(tok)
-                        }
-                    }
-                    if let branch = lane.branch {
-                        for tok in try extractNumberTokens(from: branch) {
-                            truth.insert(tok)
-                        }
-                    }
-                    if let commitOID = lane.commitOID {
-                        for tok in try extractNumberTokens(from: commitOID) {
-                            truth.insert(tok)
-                        }
-                    }
                     if let ec = lane.exitCode {
                         truth.insert("\(ec)")
                     }
@@ -619,7 +573,6 @@ struct M5StudioViewsHeadlessTests {
                             .appendingPathComponent("worktrees", isDirectory: true)
                             .appendingPathComponent(lane.laneID, isDirectory: true)
                     let startOID = RelayReadOnlyGitRunInspector.resolveLaneStartCommitOID(for: lane, in: run)
-                    for tok in try extractNumberTokens(from: startOID) { truth.insert(tok) }
                     let ownSnap = gitInspector.inspectLaneFileOwnership(
                         laneID: lane.laneID,
                         worktreePath: wtDir.path,
@@ -638,25 +591,25 @@ struct M5StudioViewsHeadlessTests {
                     for f in ownSnap.files {
                         truth.insert("\(f.additions)")
                         truth.insert("\(f.deletions)")
-                        for tok in try extractNumberTokens(from: f.relativePath) { truth.insert(tok) }
                     }
                     let relayDir = wtDir.appendingPathComponent(".relay", isDirectory: true)
-                    let logMD = relayDir.appendingPathComponent("LOG.md")
-                    if let mdText = try? String(contentsOf: logMD, encoding: .utf8) {
-                        for tok in try extractNumberTokens(from: mdText) {
-                            truth.insert(tok)
-                        }
+                    let logSpend = M5NumberProvenanceAndFieldAuditor.parseIndependentLaneLogSpend(worktreeURL: wtDir)
+                    if logSpend.costSource == "usd", let usd = logSpend.costUSD {
+                        truth.insert(String(format: "%.4f", usd))
+                    } else if logSpend.costSource == "unpriced", let tok = logSpend.tokens {
+                        truth.insert("\(tok)")
                     }
 
                     var hadStepLog = false
+                    let refVT = VT100TerminalScreenBuffer(laneID: lane.laneID, rows: 26, columns: 96)
                     if let items = try? FileManager.default.contentsOfDirectory(at: relayDir, includingPropertiesForKeys: nil) {
                         for f in items.filter({ $0.pathExtension == "log" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
                             if let txt = try? String(contentsOf: f, encoding: .utf8), !txt.isEmpty {
                                 hadStepLog = true
                                 combinedTerminalLogs += "\n" + txt
-                                for tok in try extractNumberTokens(from: txt) {
-                                    truth.insert(tok)
-                                }
+                                truth.formUnion(try M5NumberProvenanceAndFieldAuditor.extractSafeLogNumbers(from: txt, strippingIdentifiers: []))
+                                let crlf = txt.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\n", with: "\r\n")
+                                refVT.feed(Data(crlf.utf8))
                             }
                         }
                     }
@@ -668,10 +621,15 @@ struct M5StudioViewsHeadlessTests {
                             .appendingPathComponent("\(lane.laneID).pty")
                         if let ptyText = try? String(contentsOf: ptyURL, encoding: .utf8), !ptyText.isEmpty {
                             combinedTerminalLogs += "\n" + ptyText
-                            for tok in try extractNumberTokens(from: ptyText) {
-                                truth.insert(tok)
-                            }
+                            truth.formUnion(try M5NumberProvenanceAndFieldAuditor.extractSafeLogNumbers(from: ptyText, strippingIdentifiers: []))
+                            refVT.feed(Data(ptyText.utf8))
                         }
+                    }
+                    let vtWrapped = refVT.snapshot().visibleGrid.map { row in
+                        row.map { $0.grapheme }.joined().trimmingCharacters(in: .whitespaces)
+                    }.joined(separator: "\n")
+                    if !vtWrapped.isEmpty {
+                        truth.formUnion(try M5NumberProvenanceAndFieldAuditor.extractSafeLogNumbers(from: vtWrapped, strippingIdentifiers: []))
                     }
                 }
                 truth.insert("\(totalRunOwnedFiles)")
@@ -694,17 +652,19 @@ struct M5StudioViewsHeadlessTests {
         for entry in Self.explicitNamedStaticChromeTokens {
             scrubbed = scrubbed.replacingOccurrences(of: entry.literal, with: " ")
         }
-        let extracted = try extractNumberTokens(from: scrubbed)
-        let compactTerminalLog = terminalLogText.replacingOccurrences(of: "\n", with: " ")
+        // Scrub rendered hex OIDs, runIDs (YYYYMMDD-HHMMSS-xxxx), and alphanumeric identifiers as whole tokens only
+        let identRegex = try NSRegularExpression(pattern: #"\b(?:\d{8}-\d{6}-[0-9a-fA-F]{4}|(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{7,64}|[A-Za-z][A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*)\b"#)
+        scrubbed = identRegex.stringByReplacingMatches(
+            in: scrubbed,
+            range: NSRange(location: 0, length: (scrubbed as NSString).length),
+            withTemplate: " "
+        )
+        let extracted = try M5NumberProvenanceAndFieldAuditor.extractCompleteNumberTokens(from: scrubbed)
         return extracted.filter { token in
             if groundTruth.contains(token) {
                 return false
             }
             if hasActiveTerminalRows && Self.explicitTerminalGutterRowNumbers.contains(token) {
-                return false
-            }
-            // Account for narrow terminal column line-wrapping inside a number that came verbatim from the terminal log.
-            if token.count >= 2 && compactTerminalLog.contains(token) {
                 return false
             }
             return true

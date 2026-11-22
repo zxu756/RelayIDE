@@ -44,7 +44,7 @@ usage() {
     cat <<'EOF' >&2
 Usage:
   Scripts/test.sh scope <ModuleOrFilter...>
-  Scripts/test.sh milestone <0|1|2|3|4> [--record]
+  Scripts/test.sh milestone <0|1|2|3|4|5> [--record]
   Scripts/test.sh release [--record]
 
 Acceptance output goes to a temporary directory. Only with --record are reports/*.txt rewritten.
@@ -60,7 +60,7 @@ Modules supported by `scope`:
   RelayOrchestrator    (PluginSDKAndOrchestratorCPMTests)
   RelayCLIAndMCP       (CLIMCPAndWorkbenchShellTests)
   RelayWorkbenchShell  (CLIMCPAndWorkbenchShellTests)
-  RelayStudioViews     (StudioViewModelAndHonestyTests)
+  RelayStudioViews     (StudioViewModelAndHonestyTests + M5LiveWorkspaceObserverTests + M5StudioViewsHeadlessTests + M5UIAcceptanceTests)
 EOF
 }
 
@@ -77,7 +77,7 @@ map_module_to_filter() {
             echo "WorktreeGitDiffAndHandoffTests"
             ;;
         RelayWorkspaceStore)
-            echo "WorkspaceStoreFTSAndUndoTests|CLIMCPAndWorkbenchShellTests|StudioViewModelAndHonestyTests|M5LiveWorkspaceObserverTests|M5StudioViewsHeadlessTests"
+            echo "WorkspaceStoreFTSAndUndoTests|CLIMCPAndWorkbenchShellTests|StudioViewModelAndHonestyTests|M5LiveWorkspaceObserverTests|M5StudioViewsHeadlessTests|M5UIAcceptanceTests"
             ;;
         RelaySemanticMerge)
             # The guarded merge is exercised both directly and through the CLI / MCP entry points.
@@ -90,7 +90,7 @@ map_module_to_filter() {
             echo "CLIMCPAndWorkbenchShellTests"
             ;;
         RelayStudioViews)
-            echo "StudioViewModelAndHonestyTests|M5LiveWorkspaceObserverTests|M5StudioViewsHeadlessTests"
+            echo "StudioViewModelAndHonestyTests|M5LiveWorkspaceObserverTests|M5StudioViewsHeadlessTests|M5UIAcceptanceTests"
             ;;
         *)
             echo "${token}"
@@ -284,6 +284,31 @@ run_milestone() {
                 echo "==> [milestone 4] --record: reports/*.txt were rewritten"
             fi
             ;;
+        5|m5|M5)
+            local tree_before
+            tree_before="$(git status --porcelain)"
+
+            echo "==> [milestone 5] Running M5 scoped unit test suites..."
+            run_scope RelayStudioViews RelayWorktreeGit RelayWorkspaceStore RelayCLIAndMCP RelayWorkbenchShell
+
+            echo "==> [milestone 5] Building RelayIDE debug executable & test bundle..."
+            swift build --build-tests ${SWIFT_JOBS_ARGS[@]+"${SWIFT_JOBS_ARGS[@]}"}
+
+            run_acceptance_script m5-ui.sh
+
+            if [[ "${#RECORD_ARGS[@]}" -eq 0 ]]; then
+                local tree_after
+                tree_after="$(git status --porcelain)"
+                if [[ "${tree_before}" != "${tree_after}" ]]; then
+                    echo "error: 'Scripts/test.sh milestone 5' changed the working tree:" >&2
+                    diff <(printf '%s\n' "${tree_before}") <(printf '%s\n' "${tree_after}") >&2 || true
+                    exit 1
+                fi
+                echo "==> [milestone 5] git status --short after the run: ${tree_after:-(no output)}"
+            else
+                echo "==> [milestone 5] --record: reports/*.txt were rewritten"
+            fi
+            ;;
         *)
             echo "error: milestone '${m}' acceptance suite is not implemented yet." >&2
             exit 2
@@ -313,6 +338,12 @@ run_release() {
     fi
 
     run_acceptance_script m4-budget.sh
+    run_acceptance_script m5-ui.sh
+
+    echo "==> [release] Running m5-ui.sh temporary-copy mutations 1..6..."
+    for m5_mut in 1 2 3 4 5 6; do
+        "${ROOT_DIR}/Scripts/acceptance/m5-ui.sh" --mutation "${m5_mut}"
+    done
 
     if [[ "${RELAY_REAL_AGENTS:-0}" == "1" ]]; then
         if [[ -x "${ROOT_DIR}/Scripts/acceptance/real-agents.sh" ]]; then
