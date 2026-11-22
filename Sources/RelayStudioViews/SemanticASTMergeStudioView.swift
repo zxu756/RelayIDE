@@ -2,9 +2,10 @@ import Foundation
 import RelayModels
 import RelaySemanticMerge
 import RelayWorkbenchShell
+import RelayWorktreeGit
 import SwiftUI
 
-// MARK: - 3-Pane Declaration-Level Semantic AST Merge Studio
+// MARK: - Read-Only M2 Integration & Git Conflict Studio (Non-Demo) / 3-Pane AST Merge Studio (Demo)
 
 public struct SemanticASTMergeStudioView: View {
     @ObservedObject public var viewModel: RelayStudioViewModel
@@ -14,9 +15,17 @@ public struct SemanticASTMergeStudioView: View {
     }
 
     public var body: some View {
+        if viewModel.isDemoMode {
+            demoSemanticASTMergeBody
+        } else {
+            liveIntegrationMergeBody
+        }
+    }
+
+    private var demoSemanticASTMergeBody: some View {
         let activeReport = viewModel.activeMergeReport
 
-        VStack(spacing: 8) {
+        return VStack(spacing: 8) {
             fileSwitcherAndSummaryBanner(report: activeReport)
 
             if let report = activeReport {
@@ -38,6 +47,330 @@ public struct SemanticASTMergeStudioView: View {
         }
         .padding(10)
         .background(RelayBauhausDesign.warmSandpaper)
+    }
+
+    // MARK: - Non-Demo Read-Only Integration Merge, `verify.pty` & `git merge-file -p` Conflict View (⌘3)
+
+    private var liveIntegrationMergeBody: some View {
+        VStack(spacing: 8) {
+            if let run = viewModel.activeRun, let integ = run.integration {
+                liveIntegrationHeaderBar(run: run, integration: integ)
+
+                HStack(alignment: .top, spacing: 10) {
+                    liveMergeStepsColumn(integration: integ)
+                        .frame(width: 448)
+                        .frame(maxHeight: .infinity, alignment: .top)
+
+                    liveRightConflictAndVerifyColumn(integration: integ)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
+            } else {
+                RelayBauhausCard(padding: 20) {
+                    VStack(spacing: 6) {
+                        Text(viewModel.L("No Integration Merge Record", "当前工作区尚无集成合并记录"))
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(RelayBauhausDesign.espressoInk)
+                        Text(
+                            viewModel.L(
+                                "Run RelayIDE run from the terminal to inspect step-by-step lane merges, verify.pty output, and read-only Git conflict blocks.",
+                                "在终端执行 RelayIDE run 后，此处只读显示逐步合并提交、verify.pty 输出与 Git 冲突还原内容。"
+                            )
+                        )
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+        .padding(10)
+        .background(RelayBauhausDesign.warmSandpaper)
+    }
+
+    private func liveIntegrationHeaderBar(run: RelayRunRecord, integration: RelayRunIntegrationRecord) -> some View {
+        let statusDisplay = viewModel.currentLanguage.isChinese
+            ? "\(integration.status.localizedLabel(in: .zhHans)) · \(integration.status.rawValue)"
+            : integration.status.rawValue
+        let readyDisplay = integration.ready
+            ? viewModel.L("ready: true", "已就绪 · ready: true")
+            : viewModel.L("ready: false", "未就绪 · ready: false")
+        let statusColor: Color = {
+            switch integration.status {
+            case .verified, .merged, .nothingToMerge:
+                return RelayBauhausDesign.agySignalGreen
+            case .conflict, .verifyFailed, .verifyTimeout, .error, .cancelled, .interrupted:
+                return RelayBauhausDesign.claudeVermilion
+            case .pending, .skipped, .merging, .verifying:
+                return RelayBauhausDesign.vibeOchre
+            }
+        }()
+
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Text(viewModel.L("Integration Merge & Verification", "集成合并与验证结果"))
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(RelayBauhausDesign.espressoInk)
+
+                RelayBauhausPill(
+                    statusDisplay,
+                    foreground: statusColor,
+                    background: integration.ready ? RelayBauhausDesign.greenWash : RelayBauhausDesign.vermilionWash,
+                    border: statusColor.opacity(0.5),
+                    symbolName: integration.ready ? "checkmark.seal.fill" : "exclamationmark.triangle.fill",
+                    monospaced: true
+                )
+
+                RelayBauhausPill(
+                    readyDisplay,
+                    foreground: integration.ready ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.claudeVermilion,
+                    background: integration.ready ? RelayBauhausDesign.greenWash : RelayBauhausDesign.vermilionWash,
+                    border: (integration.ready ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.claudeVermilion).opacity(0.45),
+                    monospaced: true
+                )
+
+                Spacer(minLength: 6)
+
+                Text(run.runID)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+            }
+
+            HStack(spacing: 12) {
+                Text(viewModel.L("base: \(integration.baseCommitOID)", "基线: \(integration.baseCommitOID)"))
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                if let headOID = integration.headCommitOID, !headOID.isEmpty {
+                    Text(viewModel.L("head: \(headOID)", "集成提交: \(headOID)"))
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                .fill(RelayBauhausDesign.sandstoneStrip)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                .strokeBorder(RelayBauhausDesign.hairlineBorder, lineWidth: 1)
+        )
+    }
+
+    private func liveMergeStepsColumn(integration: RelayRunIntegrationRecord) -> some View {
+        let sortedSteps = integration.merges.sorted { $0.ordinal < $1.ordinal }
+        return RelayBauhausCard(padding: 10) {
+            VStack(alignment: .leading, spacing: 7) {
+                RelaySectionEyebrow(
+                    viewModel.L("Step-by-Step Merges", "逐步合并记录"),
+                    trailingText: viewModel.L("\(sortedSteps.count) steps", "\(sortedSteps.count) 步")
+                )
+
+                RelayAdaptiveScrollContainer {
+                    if sortedSteps.isEmpty {
+                        Text(
+                            integration.reason
+                                ?? viewModel.L("No merge steps were executed for this run.", "本次运行未执行通道合并步骤。")
+                        )
+                        .font(.system(size: 11))
+                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                        .padding(.vertical, 4)
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(sortedSteps) { step in
+                                liveMergeStepRow(step)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func liveMergeStepRow(_ step: RelayRunMergeRecord) -> some View {
+        let stepStatusText = viewModel.currentLanguage.isChinese
+            ? "\(step.status.localizedLabel(in: .zhHans)) · \(step.status.rawValue)"
+            : step.status.rawValue
+        let stepAccent: Color = {
+            switch step.status {
+            case .merged:
+                return RelayBauhausDesign.agySignalGreen
+            case .conflict:
+                return RelayBauhausDesign.claudeVermilion
+            case .noChanges, .notAttempted:
+                return RelayBauhausDesign.vibeOchre
+            }
+        }()
+
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text("#\(step.ordinal)")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                Text(step.laneID)
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RelayBauhausDesign.espressoInk)
+                Spacer(minLength: 4)
+                Text(stepStatusText)
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(stepAccent)
+            }
+
+            if let mergeOID = step.mergeCommitOID, !mergeOID.isEmpty {
+                Text("mergeCommitOID: \(mergeOID)")
+                    .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                    .fixedSize(horizontal: true, vertical: false)
+            } else if let laneOID = step.laneCommitOID, !laneOID.isEmpty {
+                Text("laneCommitOID: \(laneOID)")
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+
+            if !step.conflicts.isEmpty {
+                ForEach(Array(step.conflicts.enumerated()), id: \.offset) { _, conf in
+                    Text("\(conf.code) \(conf.path)")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(RelayBauhausDesign.claudeVermilion)
+                }
+            }
+        }
+        .padding(7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                .fill(step.status == .conflict ? RelayBauhausDesign.vermilionWash.opacity(0.6) : RelayBauhausDesign.sandstoneStrip.opacity(0.5))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                .strokeBorder(step.status == .conflict ? RelayBauhausDesign.claudeVermilion.opacity(0.5) : RelayBauhausDesign.hairlineBorder, lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private func liveRightConflictAndVerifyColumn(integration: RelayRunIntegrationRecord) -> some View {
+        let hasConflicts = !viewModel.liveConflictBlocks.isEmpty || integration.status == .conflict
+        VStack(alignment: .leading, spacing: 8) {
+            if hasConflicts {
+                RelayBauhausCard(padding: 10) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        RelaySectionEyebrow(
+                            viewModel.L("Git Conflict Blocks (git merge-file -p)", "Git 冲突块只读还原 (git merge-file -p)"),
+                            trailingText: viewModel.L("\(viewModel.liveConflictBlocks.count) files", "\(viewModel.liveConflictBlocks.count) 个文件")
+                        )
+
+                        RelayAdaptiveScrollContainer {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(viewModel.liveConflictBlocks) { blk in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack(spacing: 6) {
+                                            Text("\(blk.code) \(blk.path)")
+                                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                                .foregroundStyle(RelayBauhausDesign.claudeVermilion)
+                                            Spacer(minLength: 4)
+                                            Text(blk.laneID)
+                                                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                                                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                                        }
+
+                                        if let conflictText = blk.conflictText, !conflictText.isEmpty {
+                                            Text(conflictText)
+                                                .font(.system(size: 9.5, design: .monospaced))
+                                                .foregroundStyle(RelayBauhausDesign.carbonPrimaryText)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                                .padding(8)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .background(
+                                                    RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                                                        .fill(RelayBauhausDesign.carbonMatteWell)
+                                                )
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                                                        .strokeBorder(RelayBauhausDesign.carbonInsetBorder, lineWidth: 1)
+                                                )
+                                        } else {
+                                            Text(viewModel.L("Conflict block not reconstructed", "未生成冲突块文本"))
+                                                .font(.system(size: 10.5))
+                                                .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if integration.verify != nil || !hasConflicts {
+                RelayBauhausCard(padding: 10) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        RelaySectionEyebrow(
+                            viewModel.L("Verification Output (verify.pty)", "验证输出 (verify.pty)")
+                        )
+
+                        if let verify = integration.verify {
+                            HStack(spacing: 8) {
+                                let vLabel = viewModel.currentLanguage.isChinese
+                                    ? "\(verify.status.localizedLabel(in: .zhHans)) · \(verify.status.rawValue)"
+                                    : verify.status.rawValue
+                                Text(vLabel)
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(verify.status == .passed ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.claudeVermilion)
+                                if let ec = verify.exitCode {
+                                    Text(viewModel.L("exit \(ec)", "退出码 \(ec)"))
+                                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                        .monospacedDigit()
+                                        .foregroundStyle(ec == 0 ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.claudeVermilion)
+                                }
+                                Spacer(minLength: 4)
+                                Text("$ \(verify.command)")
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                                    .lineLimit(1)
+                            }
+
+                            RelayAdaptiveScrollContainer {
+                                Text(
+                                    viewModel.liveVerifyOutputText.isEmpty
+                                        ? viewModel.L("(empty verify.pty output)", "（verify.pty 无输出）")
+                                        : viewModel.liveVerifyOutputText
+                                )
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundStyle(RelayBauhausDesign.carbonPrimaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(
+                                    RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                                        .fill(RelayBauhausDesign.carbonMatteWell)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                                        .strokeBorder(RelayBauhausDesign.carbonInsetBorder, lineWidth: 1)
+                                )
+                            }
+                        } else {
+                            Text(
+                                viewModel.L(
+                                    "No verify command configured or verification was skipped.",
+                                    "未配置 verify 命令或验证阶段已跳过。"
+                                )
+                            )
+                            .font(.system(size: 11))
+                            .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
     }
 
     // MARK: - Top File Switcher & Merge Summary Metrics Banner
@@ -631,8 +964,8 @@ public struct SemanticASTMergeStudioView: View {
                     Image(systemName: "checkmark.seal.fill")
                         .font(.system(size: 10, weight: .bold))
                     Text(viewModel.L(
-                        "Prefer Verified Lane (18/18 Tests + 0 Fence Violations)",
-                        "优先采纳验证通过通道 (18/18 测试通过 + 0 越界)"
+                        "Prefer Verified Lane",
+                        "优先采纳验证通过通道"
                     ))
                     .font(.system(size: 10, weight: .bold))
                     .fixedSize(horizontal: false, vertical: true)

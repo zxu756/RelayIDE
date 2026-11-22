@@ -1145,6 +1145,14 @@ public struct RelayDAGPipelineCanvasView: View {
     }
 
     public var body: some View {
+        if viewModel.isDemoMode {
+            demoDAGPipelineBody
+        } else {
+            liveRunDAGPipelineBody
+        }
+    }
+
+    private var demoDAGPipelineBody: some View {
         VStack(spacing: 10) {
             dagHeaderMetricsStrip
 
@@ -1159,6 +1167,412 @@ public struct RelayDAGPipelineCanvasView: View {
         }
         .padding(10)
         .background(RelayBauhausDesign.warmSandpaper)
+    }
+
+    // MARK: - Non-Demo Live Run Dependency & Measured Timing DAG View (⌘2)
+
+    private struct PositionedLiveRunNode: Identifiable {
+        let id: String
+        let lane: RelayRunLaneRecord
+        let depth: Int
+        let frame: CGRect
+    }
+
+    private var liveRunDAGPipelineBody: some View {
+        VStack(spacing: 10) {
+            liveRunDAGHeaderStrip
+
+            if let run = viewModel.activeRun, !run.lanes.isEmpty {
+                HStack(alignment: .top, spacing: 10) {
+                    liveRunDAGCanvas(run: run)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    liveRunSelectedLaneInspector(run: run)
+                        .frame(width: 296)
+                        .frame(maxHeight: .infinity)
+                }
+            } else {
+                RelayBauhausCard(padding: 20) {
+                    VStack(spacing: 6) {
+                        Text(viewModel.L("No Run Recorded in Workspace", "当前工作区尚无运行记录"))
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(RelayBauhausDesign.espressoInk)
+                        Text(
+                            viewModel.L(
+                                "Start a run with RelayIDE run from the terminal to visualize real lane dependencies (after) and measured start-to-finish timings.",
+                                "在终端执行 RelayIDE run 后，此处按各通道 after 依赖关系与实测起止时间绘制运行拓扑。"
+                            )
+                        )
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+        .padding(10)
+        .background(RelayBauhausDesign.warmSandpaper)
+    }
+
+    private var liveRunDAGHeaderStrip: some View {
+        HStack(spacing: 10) {
+            if let run = viewModel.activeRun, !run.lanes.isEmpty {
+                RelayBauhausPill(
+                    run.runID,
+                    foreground: RelayBauhausDesign.espressoInk,
+                    background: RelayBauhausDesign.warmIvory,
+                    border: RelayBauhausDesign.hairlineBorder,
+                    symbolName: "point.3.connected.trianglepath.dotted",
+                    monospaced: true
+                )
+
+                RelayBauhausPill(
+                    run.status.localizedLabel(in: viewModel.currentLanguage),
+                    foreground: RelayBauhausDesign.runStatusColor(run.status),
+                    background: RelayBauhausDesign.warmIvory,
+                    border: RelayBauhausDesign.runStatusColor(run.status).opacity(0.45),
+                    monospaced: true
+                )
+
+                RelayBauhausPill(
+                    viewModel.L("\(run.lanes.count) lanes", "\(run.lanes.count) 条通道"),
+                    foreground: RelayBauhausDesign.codexCobalt,
+                    background: RelayBauhausDesign.cobaltWash,
+                    border: RelayBauhausDesign.codexCobalt.opacity(0.45),
+                    monospaced: true
+                )
+
+                if let end = run.finishedAt {
+                    let runElapsed = String(format: "%.2fs", max(0.0, end.timeIntervalSince(run.startedAt)))
+                    RelayBauhausPill(
+                        runElapsed,
+                        foreground: RelayBauhausDesign.espressoInk,
+                        background: RelayBauhausDesign.warmIvory,
+                        border: RelayBauhausDesign.hairlineBorder,
+                        symbolName: "clock",
+                        monospaced: true
+                    )
+                }
+            } else {
+                RelayBauhausPill(
+                    viewModel.L("No Run Recorded", "暂无运行记录"),
+                    foreground: RelayBauhausDesign.mutedStoneInk,
+                    background: RelayBauhausDesign.warmIvory,
+                    border: RelayBauhausDesign.hairlineBorder,
+                    symbolName: "clock",
+                    monospaced: false
+                )
+            }
+
+            Spacer(minLength: 6)
+
+            Button {
+                viewModel.selectPane(.ptyGrid)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(viewModel.L("Inspect PTY Grid", "查看并行终端网格"))
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundStyle(RelayBauhausDesign.espressoInk)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                        .fill(RelayBauhausDesign.warmIvory)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                        .strokeBorder(RelayBauhausDesign.hairlineBorder, lineWidth: 1)
+                )
+                .fixedSize(horizontal: true, vertical: false)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                .fill(RelayBauhausDesign.sandstoneStrip)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                .strokeBorder(RelayBauhausDesign.hairlineBorder, lineWidth: 1)
+        )
+    }
+
+    private func computeLiveRunPositions(run: RelayRunRecord, in canvasSize: CGSize) -> (nodes: [PositionedLiveRunNode], framesByID: [String: CGRect]) {
+        let byID = Dictionary(uniqueKeysWithValues: run.lanes.map { ($0.laneID, $0) })
+        var memoDepth: [String: Int] = [:]
+        func depthOf(_ laneID: String, stack: inout Set<String>) -> Int {
+            if let cached = memoDepth[laneID] { return cached }
+            guard stack.insert(laneID).inserted, let rec = byID[laneID] else { return 0 }
+            let d = rec.after.isEmpty ? 0 : (1 + (rec.after.map { depthOf($0, stack: &stack) }.max() ?? 0))
+            memoDepth[laneID] = d
+            return d
+        }
+        for lane in run.lanes {
+            var st = Set<String>()
+            _ = depthOf(lane.laneID, stack: &st)
+        }
+
+        let maxDepth = max(0, memoDepth.values.max() ?? 0)
+        let colCount = maxDepth + 1
+        let hPad: CGFloat = 22
+        let vPad: CGFloat = 20
+        let usableW = max(460, canvasSize.width - hPad * 2)
+        let usableH = max(340, canvasSize.height - vPad * 2)
+        let colGap: CGFloat = 34
+        let cardW = min(260, max(184, (usableW - CGFloat(max(0, colCount - 1)) * colGap) / CGFloat(colCount)))
+        let cardH: CGFloat = 128
+
+        var lanesByCol: [Int: [RelayRunLaneRecord]] = [:]
+        for lane in run.lanes.sorted(by: { $0.ordinal < $1.ordinal }) {
+            let col = memoDepth[lane.laneID] ?? 0
+            lanesByCol[col, default: []].append(lane)
+        }
+
+        var nodes: [PositionedLiveRunNode] = []
+        var frameMap: [String: CGRect] = [:]
+        for col in 0...maxDepth {
+            let colLanes = lanesByCol[col] ?? []
+            guard !colLanes.isEmpty else { continue }
+            let stepX = colCount > 1 ? (usableW - cardW) / CGFloat(colCount - 1) : 0
+            let x = colCount > 1 ? (hPad + CGFloat(col) * stepX) : (hPad + (usableW - cardW) * 0.5)
+            let totalH = CGFloat(colLanes.count) * cardH
+            let rowGap = max(12, (usableH - totalH) / CGFloat(colLanes.count + 1))
+
+            for (rowIdx, lane) in colLanes.enumerated() {
+                let y = vPad + rowGap + CGFloat(rowIdx) * (cardH + rowGap)
+                let rect = CGRect(x: x, y: y, width: cardW, height: cardH)
+                frameMap[lane.laneID] = rect
+                nodes.append(PositionedLiveRunNode(id: lane.laneID, lane: lane, depth: col, frame: rect))
+            }
+        }
+        return (nodes, frameMap)
+    }
+
+    private func liveRunDAGCanvas(run: RelayRunRecord) -> some View {
+        let runEndDate = run.finishedAt ?? viewModel.liveObservedAt
+        let totalSpan = max(0.05, runEndDate.timeIntervalSince(run.startedAt))
+
+        return GeometryReader { geo in
+            let layout = computeLiveRunPositions(run: run, in: geo.size)
+
+            ZStack(alignment: .topLeading) {
+                Canvas { context, size in
+                    drawArchitecturalGrid(in: &context, size: size)
+                    for item in layout.nodes {
+                        for depID in item.lane.after {
+                            guard let fromRect = layout.framesByID[depID] else { continue }
+                            let toRect = item.frame
+                            let p0 = CGPoint(x: fromRect.maxX, y: fromRect.midY)
+                            let p3 = CGPoint(x: toRect.minX, y: toRect.midY)
+                            let ctrl = max(24, (p3.x - p0.x) * 0.48)
+                            var curve = Path()
+                            curve.move(to: p0)
+                            curve.addCurve(
+                                to: p3,
+                                control1: CGPoint(x: p0.x + ctrl, y: p0.y),
+                                control2: CGPoint(x: p3.x - ctrl, y: p3.y)
+                            )
+                            context.stroke(curve, with: .color(RelayBauhausDesign.codexCobalt), lineWidth: 1.8)
+
+                            var arrow = Path()
+                            arrow.move(to: p3)
+                            arrow.addLine(to: CGPoint(x: p3.x - 7, y: p3.y - 4))
+                            arrow.addLine(to: CGPoint(x: p3.x - 7, y: p3.y + 4))
+                            arrow.closeSubpath()
+                            context.fill(arrow, with: .color(RelayBauhausDesign.codexCobalt))
+                        }
+                    }
+                }
+
+                ForEach(layout.nodes) { item in
+                    liveRunNodeCard(item: item, run: run, totalSpan: totalSpan)
+                        .frame(width: item.frame.width, height: item.frame.height)
+                        .position(x: item.frame.midX, y: item.frame.midY)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                    .fill(RelayBauhausDesign.warmIvory)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                    .strokeBorder(RelayBauhausDesign.hairlineBorder, lineWidth: 1)
+            )
+        }
+    }
+
+    private func liveRunNodeCard(item: PositionedLiveRunNode, run: RelayRunRecord, totalSpan: TimeInterval) -> some View {
+        let lane = item.lane
+        let vendor = lane.agent.agentVendor
+        let accent = RelayBauhausDesign.vendorColor(vendor)
+        let isSelected = (viewModel.selectedLaneID == lane.laneID)
+
+        let startOffset = lane.startedAt.map { max(0.0, $0.timeIntervalSince(run.startedAt)) }
+        let finishOffset = lane.finishedAt.map { max(0.0, $0.timeIntervalSince(run.startedAt)) }
+        let timingLine: String = {
+            if let s = startOffset, let f = finishOffset, let dur = viewModel.formattedLiveLaneDuration(forLane: lane.laneID) {
+                return String(format: "+%.2fs → +%.2fs · %@", s, f, dur)
+            } else if let s = startOffset, let dur = viewModel.formattedLiveLaneDuration(forLane: lane.laneID) {
+                return String(format: "+%.2fs → ... · %@", s, dur)
+            }
+            return "—"
+        }()
+
+        let depLine = lane.after.isEmpty
+            ? viewModel.L("root lane", "起点通道")
+            : viewModel.L("after: \(lane.after.joined(separator: ", "))", "依赖: \(lane.after.joined(separator: ", "))")
+
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                RelayVendorBadge(vendor: vendor, compact: true, language: viewModel.currentLanguage)
+                Text("#\(lane.ordinal)")
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                Spacer(minLength: 2)
+                Text(lane.status.localizedLabel(in: viewModel.currentLanguage))
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RelayBauhausDesign.runStatusColor(lane.status))
+            }
+
+            Text(lane.laneID)
+                .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                .foregroundStyle(RelayBauhausDesign.espressoInk)
+
+            Text(depLine)
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                .lineLimit(1)
+
+            Text(timingLine)
+                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(RelayBauhausDesign.espressoInk)
+                .lineLimit(1)
+
+            GeometryReader { barGeo in
+                let barW = max(1, barGeo.size.width)
+                let normStart = CGFloat(min(1.0, (startOffset ?? 0.0) / totalSpan))
+                let normEnd = CGFloat(min(1.0, (finishOffset ?? (startOffset ?? 0.0)) / totalSpan))
+                let segW = max(4, (normEnd - normStart) * barW)
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(RelayBauhausDesign.sandstoneStrip)
+                        .frame(height: 5)
+                    if startOffset != nil {
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(accent)
+                            .frame(width: min(barW - normStart * barW, segW), height: 5)
+                            .offset(x: normStart * barW)
+                    }
+                }
+            }
+            .frame(height: 6)
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                .fill(RelayBauhausDesign.warmIvory)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                .strokeBorder(isSelected ? accent : RelayBauhausDesign.hairlineBorder, lineWidth: isSelected ? 2.0 : 1.0)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            viewModel.selectedLaneID = lane.laneID
+        }
+    }
+
+    private func liveRunSelectedLaneInspector(run: RelayRunRecord) -> some View {
+        let selected = run.lanes.first(where: { $0.laneID == viewModel.selectedLaneID }) ?? run.lanes.first
+        return RelayBauhausCard(padding: 11) {
+            if let lane = selected {
+                let vendor = lane.agent.agentVendor
+                RelayAdaptiveScrollContainer {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack(spacing: 6) {
+                            RelayVendorBadge(vendor: vendor, language: viewModel.currentLanguage)
+                            Spacer()
+                            RelayBauhausPill(
+                                lane.status.localizedLabel(in: viewModel.currentLanguage),
+                                foreground: RelayBauhausDesign.runStatusColor(lane.status),
+                                background: RelayBauhausDesign.sandstoneStrip,
+                                border: RelayBauhausDesign.hairlineBorder,
+                                monospaced: true
+                            )
+                        }
+
+                        Text(lane.laneID)
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                            .foregroundStyle(RelayBauhausDesign.espressoInk)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            RelaySectionEyebrow(viewModel.L("Dependencies (after)", "前置依赖 (after)"))
+                            Text(
+                                lane.after.isEmpty
+                                    ? viewModel.L("root lane (no predecessors)", "起点通道（无前置依赖）")
+                                    : lane.after.joined(separator: ", ")
+                            )
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            RelaySectionEyebrow(viewModel.L("Measured Execution Timing", "实测起止与耗时"))
+                            if let s = lane.startedAt {
+                                let relS = String(format: "+%.2fs", max(0.0, s.timeIntervalSince(run.startedAt)))
+                                let relF = lane.finishedAt.map { String(format: "+%.2fs", max(0.0, $0.timeIntervalSince(run.startedAt))) } ?? "..."
+                                let dur = viewModel.formattedLiveLaneDuration(forLane: lane.laneID) ?? "—"
+                                Text("\(relS) → \(relF) (\(dur))")
+                                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                    .monospacedDigit()
+                                    .foregroundStyle(RelayBauhausDesign.espressoInk)
+                            } else {
+                                Text("—")
+                                    .font(.system(size: 10.5, design: .monospaced))
+                                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                            }
+                        }
+
+                        if let ec = lane.exitCode {
+                            VStack(alignment: .leading, spacing: 3) {
+                                RelaySectionEyebrow(viewModel.L("Exit Status", "退出状态"))
+                                Text(viewModel.L("exit \(ec)", "退出码 \(ec)"))
+                                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                    .monospacedDigit()
+                                    .foregroundStyle(ec == 0 ? RelayBauhausDesign.agySignalGreen : RelayBauhausDesign.claudeVermilion)
+                            }
+                        }
+
+                        if let spend = viewModel.formattedLiveLaneSpend(forLane: lane.laneID) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                RelaySectionEyebrow(viewModel.L("Recorded Spend / Tokens", "记录花费与 Token"))
+                                Text(spend)
+                                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                    .monospacedDigit()
+                                    .foregroundStyle(RelayBauhausDesign.espressoInk)
+                            }
+                        }
+
+                        if let commitOID = lane.commitOID, !commitOID.isEmpty {
+                            VStack(alignment: .leading, spacing: 3) {
+                                RelaySectionEyebrow(viewModel.L("Lane Commit OID", "通道提交 OID"))
+                                Text(commitOID)
+                                    .font(.system(size: 8.5, design: .monospaced))
+                                    .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Top Metrics Banner

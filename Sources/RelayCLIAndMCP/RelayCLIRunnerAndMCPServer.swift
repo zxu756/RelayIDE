@@ -193,6 +193,41 @@ public struct RelayCLIRunner: Sendable {
         return nil
     }
 
+    public static func parseExportScreenshotsProjectBundle(from args: [String]) -> URL? {
+        var idx = 0
+        while idx < args.count {
+            let tok = args[idx]
+            if tok == "--project" || tok == "-p" {
+                if idx + 1 < args.count && !args[idx + 1].hasPrefix("-") {
+                    return URL(fileURLWithPath: args[idx + 1], isDirectory: true)
+                }
+                idx += 1
+                continue
+            }
+            if tok.hasPrefix("--project=") {
+                let raw = String(tok.dropFirst("--project=".count))
+                if !raw.isEmpty {
+                    return URL(fileURLWithPath: raw, isDirectory: true)
+                }
+            }
+            if tok == "--export-screenshots" || tok == "--lang" {
+                if idx + 1 < args.count && !args[idx + 1].hasPrefix("-") {
+                    idx += 2
+                    continue
+                }
+            }
+            if !tok.hasPrefix("-"), isRelayProjectBundleArgument(tok) {
+                return URL(fileURLWithPath: tok, isDirectory: true)
+            }
+            idx += 1
+        }
+        return nil
+    }
+
+    public static func parseExportScreenshotsDemoFlag(from args: [String]) -> Bool {
+        args.contains("--demo")
+    }
+
     public static func isRelayProjectBundleArgument(_ token: String) -> Bool {
         var trimmed = token
         while trimmed.count > 1 && trimmed.hasSuffix("/") {

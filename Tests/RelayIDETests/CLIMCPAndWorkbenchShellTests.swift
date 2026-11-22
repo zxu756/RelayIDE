@@ -806,7 +806,7 @@ struct CLIMCPAndWorkbenchShellTests {
         #expect(resDenied?["isError"] as? Bool == true)
 
         let defaultSnapshot = RelayUserPreferencesSnapshot()
-        #expect(defaultSnapshot.autoRunSemanticMergeOnHandoff == false)
+        #expect(defaultSnapshot.autoRevertOwnershipViolations == false)
     }
 
     // MARK: - 19. M0 Rework (C1): Acceptance Scripts Must Never Launch the Desktop GUI
@@ -1150,6 +1150,19 @@ struct CLIMCPAndWorkbenchShellTests {
         } else {
             Issue.record("Expected .exportScreenshots for --export-screenshots")
         }
+        #expect(RelayCLIRunner.parseExportScreenshotsProjectBundle(from: ["--export-screenshots", "docs"]) == nil)
+        #expect(
+            RelayCLIRunner.parseExportScreenshotsProjectBundle(
+                from: ["--export-screenshots", "docs", "--project", "/tmp/RealRun.relayproj"]
+            )?.lastPathComponent == "RealRun.relayproj"
+        )
+        #expect(
+            RelayCLIRunner.parseExportScreenshotsProjectBundle(
+                from: ["--export-screenshots=docs", "/tmp/DirectRun.relayproj"]
+            )?.lastPathComponent == "DirectRun.relayproj"
+        )
+        #expect(RelayCLIRunner.parseExportScreenshotsDemoFlag(from: ["--export-screenshots", "docs", "--demo"]) == true)
+        #expect(RelayCLIRunner.parseExportScreenshotsDemoFlag(from: ["--export-screenshots", "docs", "--project", "/tmp/RealRun.relayproj"]) == false)
 
         // 3. Known headless CLI subcommands including `run`
         #expect(

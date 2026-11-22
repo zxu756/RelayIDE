@@ -9,6 +9,7 @@ import RelayPluginSDK
 import RelaySemanticMerge
 import RelayWorkbenchShell
 import RelayWorkspaceStore
+import RelayWorktreeGit
 import SwiftUI
 
 // MARK: - Bauhaus Warm Sandpaper Design System & Shared Architectural Primitives
@@ -638,8 +639,20 @@ public final class RelayStudioViewModel: ObservableObject {
     @Published public private(set) var liveRunLanesByID: [String: RelayRunLaneRecord] = [:]
     @Published public private(set) var liveTerminalBuffersByLane: [String: VT100TerminalScreenBuffer] = [:]
     @Published public private(set) var liveTerminalPlainTextByLane: [String: String] = [:]
+    @Published public private(set) var liveFileOwnershipByLane: [String: RelayLaneFileOwnershipSnapshot] = [:]
+    @Published public private(set) var liveConflictBlocks: [RelayReconstructedMergeConflictBlock] = []
+    @Published public private(set) var liveVerifyOutputText: String = ""
     @Published public private(set) var liveObservedAt: Date = Date()
+    public let gitInspectorConfiguration: RelayReadOnlyGitInspectorConfiguration
     private var liveWorkspaceObserver: RelayLiveWorkspaceObserver?
+    private var worktreeOwnershipWatcher: RelayWorktreeOwnershipLiveWatcher?
+
+    private struct ReconstructedIntegrationSignature: Equatable {
+        let runID: String
+        let repoPath: String
+        let integration: RelayRunIntegrationRecord?
+    }
+    private var lastReconstructedIntegrationSignature: ReconstructedIntegrationSignature?
 
     // JavaScriptCore Guardrail Plugins & Scratchpad State
     @Published public var policyPack: RelayGuardrailsPolicyPack
@@ -727,8 +740,10 @@ public final class RelayStudioViewModel: ObservableObject {
         projectBundleURL: URL? = nil,
         initialPane: RelayStudioPane = .ptyGrid,
         localizer: RelayLocalizer? = nil,
-        loadDemoWorkspace: Bool = false
+        loadDemoWorkspace: Bool = false,
+        gitInspectorConfiguration: RelayReadOnlyGitInspectorConfiguration = RelayReadOnlyGitInspectorConfiguration()
     ) {
+        self.gitInspectorConfiguration = gitInspectorConfiguration
         let resolvedLocalizer = localizer ?? RelayLocalizer.shared
         let resolvedBundleURL: URL
         let isTempBundle: Bool
@@ -822,6 +837,9 @@ public final class RelayStudioViewModel: ObservableObject {
     private func hydrateRealWorkspaceState() {
         liveWorkspaceObserver?.stop()
         liveWorkspaceObserver = nil
+        worktreeOwnershipWatcher?.stop()
+        worktreeOwnershipWatcher = nil
+        lastReconstructedIntegrationSignature = nil
 
         isDemoMode = false
         pluginLatencyByID = [:]
@@ -834,6 +852,9 @@ public final class RelayStudioViewModel: ObservableObject {
         liveRunLanesByID = [:]
         liveTerminalBuffersByLane = [:]
         liveTerminalPlainTextByLane = [:]
+        liveFileOwnershipByLane = [:]
+        liveConflictBlocks = []
+        liveVerifyOutputText = ""
         liveObservedAt = Date()
         mergeScenarios = []
         callSiteDiagnostics = []
@@ -874,6 +895,9 @@ public final class RelayStudioViewModel: ObservableObject {
 
         reloadPersistedWorkspaceState()
         loadInitialRealRunStateSynchronously()
+        if activeRun == nil && !lanes.isEmpty && !ownsTemporaryBundleDirectory {
+            syncManagedLaneWorktreeWatcher()
+        }
         startLiveWorkspaceObserverIfNeeded()
         refreshStatusBanner()
     }
@@ -885,16 +909,24 @@ public final class RelayStudioViewModel: ObservableObject {
         var buffers: [String: VT100TerminalScreenBuffer] = [:]
         var snaps: [String: TerminalViewportSnapshot] = [:]
         var plains: [String: String] = [:]
+        var initialOwnership: [String: RelayLaneFileOwnershipSnapshot] = [:]
+        let gitInspector = RelayReadOnlyGitRunInspector(configuration: gitInspectorConfiguration)
 
         let runRoot = projectBundleURL
             .appendingPathComponent("runs", isDirectory: true)
             .appendingPathComponent(latest.runID, isDirectory: true)
 
         for laneRec in latest.lanes {
+            let wtPath = resolvedWorktreePath(for: laneRec, in: latest)
+            let startOID = RelayReadOnlyGitRunInspector.resolveLaneStartCommitOID(for: laneRec, in: latest)
+            initialOwnership[laneRec.laneID] = gitInspector.inspectLaneFileOwnership(
+                laneID: laneRec.laneID,
+                worktreePath: wtPath,
+                startCommitOID: startOID
+            )
+
             let vt = VT100TerminalScreenBuffer(laneID: laneRec.laneID, rows: 26, columns: 96)
-            let relayDir = runRoot
-                .appendingPathComponent("worktrees", isDirectory: true)
-                .appendingPathComponent(laneRec.laneID, isDirectory: true)
+            let relayDir = URL(fileURLWithPath: wtPath, isDirectory: true)
                 .appendingPathComponent(".relay", isDirectory: true)
             var rawCollected = Data()
             if let items = try? FileManager.default.contentsOfDirectory(at: relayDir, includingPropertiesForKeys: nil) {
@@ -930,6 +962,9 @@ public final class RelayStudioViewModel: ObservableObject {
             }
         }
 
+        liveFileOwnershipByLane = initialOwnership
+        let initialVerify = readVerifyPTYFallback(for: latest)
+
         applyLiveWorkspaceSnapshot(
             RelayLiveWorkspaceSnapshot(
                 allRuns: runs,
@@ -937,9 +972,113 @@ public final class RelayStudioViewModel: ObservableObject {
                 terminalSnapshotsByLane: snaps,
                 terminalBuffersByLane: buffers,
                 terminalPlainTextByLane: plains,
+                verifyOutputText: initialVerify,
                 observedAt: Date()
             )
         )
+    }
+
+    private func resolvedWorktreePath(for laneRec: RelayRunLaneRecord, in run: RelayRunRecord) -> String {
+        if let explicit = laneRec.worktreePath, !explicit.isEmpty {
+            return explicit
+        }
+        return projectBundleURL
+            .appendingPathComponent("runs", isDirectory: true)
+            .appendingPathComponent(run.runID, isDirectory: true)
+            .appendingPathComponent("worktrees", isDirectory: true)
+            .appendingPathComponent(laneRec.laneID, isDirectory: true)
+            .path
+    }
+
+    private func readVerifyPTYFallback(for run: RelayRunRecord?) -> String {
+        guard let run else { return "" }
+        let candidatePath = run.integration?.verify?.logPath ?? projectBundleURL
+            .appendingPathComponent("runs", isDirectory: true)
+            .appendingPathComponent(run.runID, isDirectory: true)
+            .appendingPathComponent("verify.pty")
+            .path
+        guard FileManager.default.fileExists(atPath: candidatePath),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: candidatePath)),
+              !data.isEmpty else {
+            return ""
+        }
+        let capped = data.count > 65_536 ? data.suffix(65_536) : data[...]
+        return String(decoding: capped, as: UTF8.self).replacingOccurrences(of: "\r\n", with: "\n")
+    }
+
+    private func syncManagedLaneWorktreeWatcher() {
+        let targets = lanes.map { mLane in
+            RelayWatchedLaneWorktreeTarget(
+                laneID: mLane.id,
+                worktreePath: mLane.worktreePath,
+                startCommitOID: mLane.baseCommitOID
+            )
+        }
+        let inspector = RelayReadOnlyGitRunInspector(configuration: gitInspectorConfiguration)
+        var initialMap: [String: RelayLaneFileOwnershipSnapshot] = [:]
+        for t in targets {
+            initialMap[t.laneID] = inspector.inspectLaneFileOwnership(
+                laneID: t.laneID,
+                worktreePath: t.worktreePath,
+                startCommitOID: t.startCommitOID
+            )
+        }
+        applyLiveFileOwnershipSnapshot(initialMap)
+        startOrUpdateWorktreeOwnershipWatcher(targets: targets, repositoryPath: repositoryPath.isEmpty ? nil : repositoryPath)
+    }
+
+    private func startOrUpdateWorktreeOwnershipWatcher(
+        targets: [RelayWatchedLaneWorktreeTarget],
+        repositoryPath repoPath: String?
+    ) {
+        guard !isDemoMode, !ownsTemporaryBundleDirectory else { return }
+        if let existing = worktreeOwnershipWatcher {
+            existing.updateTargets(targets, repositoryPath: repoPath)
+        } else {
+            let watcher = RelayWorktreeOwnershipLiveWatcher(
+                targets: targets,
+                repositoryPath: repoPath,
+                configuration: gitInspectorConfiguration
+            ) { [weak self] ownershipMap in
+                Task { @MainActor [weak self] in
+                    self?.applyLiveFileOwnershipSnapshot(ownershipMap)
+                }
+            }
+            worktreeOwnershipWatcher = watcher
+            watcher.start()
+        }
+    }
+
+    private func applyLiveFileOwnershipSnapshot(_ ownershipMap: [String: RelayLaneFileOwnershipSnapshot]) {
+        guard !isDemoMode else { return }
+        liveFileOwnershipByLane = ownershipMap
+        for idx in lanes.indices {
+            let lid = lanes[idx].id
+            if let snap = ownershipMap[lid] {
+                lanes[idx].dirtyFiles = Self.mapOwnershipToWorktreeDeltas(snap)
+            }
+        }
+    }
+
+    private static func mapOwnershipToWorktreeDeltas(_ snap: RelayLaneFileOwnershipSnapshot) -> [WorktreeFileDelta] {
+        snap.files.map { item in
+            let st: WorktreeFileStatus
+            if item.porcelainCode == "??" {
+                st = .untracked
+            } else if item.porcelainCode?.contains("A") == true {
+                st = .added
+            } else if item.porcelainCode?.contains("D") == true {
+                st = .deleted
+            } else {
+                st = .modified
+            }
+            return WorktreeFileDelta(
+                relativePath: item.relativePath,
+                status: st,
+                additions: item.additions,
+                deletions: item.deletions
+            )
+        }
     }
 
     private func startLiveWorkspaceObserverIfNeeded() {
@@ -971,29 +1110,71 @@ public final class RelayStudioViewModel: ObservableObject {
 
             var byID: [String: RelayRunLaneRecord] = [:]
             var mappedLanes: [ManagedWorktreeLane] = []
+            var watchedTargets: [RelayWatchedLaneWorktreeTarget] = []
+
             for laneRec in run.lanes {
                 byID[laneRec.laneID] = laneRec
                 let vendor = laneRec.agent.agentVendor
+                let wtPath = resolvedWorktreePath(for: laneRec, in: run)
+                let startOID = RelayReadOnlyGitRunInspector.resolveLaneStartCommitOID(for: laneRec, in: run)
+                let existingSnap = liveFileOwnershipByLane[laneRec.laneID]
+                let mappedDeltas = existingSnap.map(Self.mapOwnershipToWorktreeDeltas) ?? []
+
                 let mLane = ManagedWorktreeLane(
                     id: laneRec.laneID,
                     displayName: "\(vendor.localizedDisplayName(in: currentLanguage)) · \(laneRec.laneID)",
                     assignedVendor: vendor,
-                    worktreePath: laneRec.worktreePath ?? "",
+                    worktreePath: wtPath,
                     branchName: laneRec.branch ?? "relay/\(run.runID)/\(laneRec.laneID)",
-                    baseCommitOID: run.baseCommitOID,
-                    headCommitOID: laneRec.commitOID ?? run.baseCommitOID,
-                    dirtyFiles: []
+                    baseCommitOID: startOID,
+                    headCommitOID: laneRec.commitOID ?? startOID,
+                    dirtyFiles: mappedDeltas
                 )
                 mappedLanes.append(mLane)
+                watchedTargets.append(
+                    RelayWatchedLaneWorktreeTarget(
+                        laneID: laneRec.laneID,
+                        worktreePath: wtPath,
+                        startCommitOID: startOID
+                    )
+                )
             }
             liveRunLanesByID = byID
             lanes = mappedLanes
             if selectedLaneID.isEmpty || !mappedLanes.contains(where: { $0.id == selectedLaneID }) {
                 selectedLaneID = mappedLanes.first?.id ?? ""
             }
+
+            startOrUpdateWorktreeOwnershipWatcher(targets: watchedTargets, repositoryPath: run.repoPath)
+
+            let freshVerify = !snapshot.verifyOutputText.isEmpty
+                ? snapshot.verifyOutputText
+                : readVerifyPTYFallback(for: run)
+            liveVerifyOutputText = freshVerify
+
+            let sig = ReconstructedIntegrationSignature(
+                runID: run.runID,
+                repoPath: run.repoPath,
+                integration: run.integration
+            )
+            if lastReconstructedIntegrationSignature != sig {
+                lastReconstructedIntegrationSignature = sig
+                if let integ = run.integration, integ.merges.contains(where: { $0.status == .conflict }) {
+                    let inspector = RelayReadOnlyGitRunInspector(configuration: gitInspectorConfiguration)
+                    liveConflictBlocks = inspector.reconstructIntegrationConflictBlocks(
+                        repositoryPath: run.repoPath,
+                        integration: integ
+                    )
+                } else {
+                    liveConflictBlocks = []
+                }
+            }
         } else {
             liveRunLanesByID = [:]
             globalBudgetCeilingUSD = 0.0
+            liveVerifyOutputText = ""
+            liveConflictBlocks = []
+            lastReconstructedIntegrationSignature = nil
         }
 
         liveTerminalBuffersByLane = snapshot.terminalBuffersByLane
@@ -1009,11 +1190,17 @@ public final class RelayStudioViewModel: ObservableObject {
     private func hydrateDemoCampaignState(seedIfEmpty: Bool) {
         liveWorkspaceObserver?.stop()
         liveWorkspaceObserver = nil
+        worktreeOwnershipWatcher?.stop()
+        worktreeOwnershipWatcher = nil
+        lastReconstructedIntegrationSignature = nil
         liveRuns = []
         activeRun = nil
         liveRunLanesByID = [:]
         liveTerminalBuffersByLane = [:]
         liveTerminalPlainTextByLane = [:]
+        liveFileOwnershipByLane = [:]
+        liveConflictBlocks = []
+        liveVerifyOutputText = ""
 
         isDemoMode = true
         scratchpadScriptSource = Self.defaultScratchpadTemplate
@@ -1324,8 +1511,15 @@ public final class RelayStudioViewModel: ObservableObject {
         return laneBudgetAccounts.reduce(0) { $0 + $1.inputTokens + $1.outputTokens }
     }
 
+    public var totalLiveOwnedFilesCount: Int {
+        liveFileOwnershipByLane.values.reduce(0) { $0 + $1.files.count }
+    }
+
     public var totalUnresolvedConflicts: Int {
-        mergeReports.reduce(0) { $0 + $1.unresolvedConflictCount }
+        if !isDemoMode {
+            return activeRun?.integration?.merges.reduce(0) { $0 + $1.conflicts.count } ?? 0
+        }
+        return mergeReports.reduce(0) { $0 + $1.unresolvedConflictCount }
     }
 
     public var totalAutoMergedDeclarations: Int {
@@ -1599,33 +1793,13 @@ public final class RelayStudioViewModel: ObservableObject {
     // MARK: - Interactive 3-Way Semantic AST Conflict Resolution + Undo/Redo
 
     public func resolveConflictChunk(chunkID: UUID, strategy: ConflictResolutionStrategy) {
-        guard let currentReport = activeMergeReport else { return }
-
-        let evidence: [String: LaneVerificationEvidence] = [
-            "lane-claude-quic": LaneVerificationEvidence(
-                laneID: "lane-claude-quic",
-                vendor: .claudeCode,
-                exitCode: 0,
-                passedTestCount: 18,
-                failedTestCount: 0,
-                ownershipViolationCount: 0
-            ),
-            "lane-codex-auth": LaneVerificationEvidence(
-                laneID: "lane-codex-auth",
-                vendor: .codex,
-                exitCode: 0,
-                passedTestCount: 24,
-                failedTestCount: 0,
-                ownershipViolationCount: 1
-            )
-        ]
+        guard isDemoMode, let currentReport = activeMergeReport else { return }
 
         let originalChunk = currentReport.chunks.first(where: { $0.id == chunkID })
         let result = conflictEngine.resolveChunk(
             in: currentReport,
             chunkID: chunkID,
-            strategy: strategy,
-            laneEvidence: evidence
+            strategy: strategy
         )
 
         switch result {
@@ -1683,7 +1857,7 @@ public final class RelayStudioViewModel: ObservableObject {
     }
 
     public func resolveAllConflictsInSelectedFile(strategy: ConflictResolutionStrategy) {
-        guard let currentReport = activeMergeReport else { return }
+        guard isDemoMode, let currentReport = activeMergeReport else { return }
         let conflictIDs = currentReport.chunks.filter { $0.resolution.isConflict }.map(\.id)
         for cid in conflictIDs {
             resolveConflictChunk(chunkID: cid, strategy: strategy)
@@ -1710,6 +1884,7 @@ public final class RelayStudioViewModel: ObservableObject {
     }
 
     public func recomputeCallSiteDiagnostics() {
+        guard isDemoMode else { return }
         guard let authTriplet = mergeScenarios.first(where: { $0.relativePath.hasSuffix("AuthSessionManager.swift") }) else {
             return
         }

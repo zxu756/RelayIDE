@@ -122,7 +122,6 @@ public struct RelayUserPreferencesSnapshot: Sendable, Codable, Hashable {
     public var maxScrollbackLines: Int
     public var defaultGlobalBudgetCeilingUSD: Double
     public var defaultLaneBudgetCeilingUSD: Double
-    public var autoRunSemanticMergeOnHandoff: Bool
     public var autoRevertOwnershipViolations: Bool
     public var preferCompactChromeDensity: Bool
     public var respectReducedMotion: Bool
@@ -135,7 +134,6 @@ public struct RelayUserPreferencesSnapshot: Sendable, Codable, Hashable {
         maxScrollbackLines: Int = 5_000,
         defaultGlobalBudgetCeilingUSD: Double = 25.0,
         defaultLaneBudgetCeilingUSD: Double = 6.0,
-        autoRunSemanticMergeOnHandoff: Bool = false,
         autoRevertOwnershipViolations: Bool = false,
         preferCompactChromeDensity: Bool = false,
         respectReducedMotion: Bool = false
@@ -147,7 +145,6 @@ public struct RelayUserPreferencesSnapshot: Sendable, Codable, Hashable {
         self.maxScrollbackLines = max(500, min(50_000, maxScrollbackLines))
         self.defaultGlobalBudgetCeilingUSD = max(1.0, defaultGlobalBudgetCeilingUSD)
         self.defaultLaneBudgetCeilingUSD = max(0.25, defaultLaneBudgetCeilingUSD)
-        self.autoRunSemanticMergeOnHandoff = autoRunSemanticMergeOnHandoff
         self.autoRevertOwnershipViolations = autoRevertOwnershipViolations
         self.preferCompactChromeDensity = preferCompactChromeDensity
         self.respectReducedMotion = respectReducedMotion

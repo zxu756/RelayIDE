@@ -9,6 +9,7 @@ import RelayOrchestrator
 import RelayPTYCore
 import RelayStudioViews
 import RelayWorkspaceStore
+import RelayWorktreeGit
 import SQLite3
 import SwiftUI
 import Testing
@@ -202,6 +203,7 @@ struct M5StudioViewsHeadlessTests {
         sleep_sec = 0.0
         exit_code = 0
         write_rel = None
+        write_body = None
 
         for raw in prompt_text.splitlines():
             line = raw.strip()
@@ -217,6 +219,11 @@ struct M5StudioViewsHeadlessTests {
                 sleep_sec = float(line.split("=", 1)[1].strip())
             elif line.startswith("EXIT="):
                 exit_code = int(line.split("=", 1)[1].strip())
+            elif line.startswith("WRITE_CONTENT="):
+                rest = line.split("=", 1)[1]
+                rel, _, body = rest.partition("|")
+                write_rel = rel.strip()
+                write_body = body.replace("\\n", "\n")
             elif line.startswith("WRITE="):
                 write_rel = line.split("=", 1)[1].strip()
 
@@ -241,8 +248,13 @@ struct M5StudioViewsHeadlessTests {
             time.sleep(sleep_sec)
 
         if write_rel and exit_code == 0:
-            with open(os.path.join(workdir, write_rel), "w", encoding="utf-8") as wf:
-                wf.write(f"ok {lane}\n")
+            dst_path = os.path.join(workdir, write_rel)
+            os.makedirs(os.path.dirname(dst_path) or workdir, exist_ok=True)
+            with open(dst_path, "w", encoding="utf-8") as wf:
+                if write_body is not None:
+                    wf.write(write_body)
+                else:
+                    wf.write(f"ok {lane}\n")
 
         status_word = "success" if exit_code == 0 else "failed"
         summary = ("\n".join(emitted) + "\n" if emitted else "") + f"Completed {lane}\nSTATUS: {status_word}"
@@ -426,7 +438,7 @@ struct M5StudioViewsHeadlessTests {
                 if let schemaVer = queryInt("SELECT MAX(version) FROM schema_migrations;") {
                     truth.insert("\(schemaVer)")
                 }
-                for tbl in ["checkpoints", "managed_lanes", "dag_specs", "semantic_merge_reports", "guardrail_findings", "relay_runs", "relay_run_lanes"] {
+                for tbl in ["checkpoints", "managed_lanes", "dag_specs", "semantic_merge_reports", "guardrail_findings", "relay_runs", "relay_run_lanes", "relay_run_integration", "relay_run_merges"] {
                     if let cnt = queryInt("SELECT COUNT(*) FROM \(tbl);") {
                         truth.insert("\(cnt)")
                     }
@@ -434,9 +446,41 @@ struct M5StudioViewsHeadlessTests {
             }
 
             let projDB = try RelayProjectDatabase.openExisting(bundleDirectoryURL: bundleURL)
+            let gitInspector = RelayReadOnlyGitRunInspector()
+
+            // Also include persisted `managed_lanes` git ownership numbers if `relay_runs` is empty
+            let persistedManagedLanes = (try? projDB.allLanes()) ?? []
+            var totalManagedOwnedFiles = 0
+            for mLane in persistedManagedLanes {
+                for tok in try extractNumberTokens(from: mLane.id) { truth.insert(tok) }
+                for tok in try extractNumberTokens(from: mLane.baseCommitOID) { truth.insert(tok) }
+                let snap = gitInspector.inspectLaneFileOwnership(
+                    laneID: mLane.id,
+                    worktreePath: mLane.worktreePath,
+                    startCommitOID: mLane.baseCommitOID
+                )
+                totalManagedOwnedFiles += snap.files.count
+                truth.insert("\(snap.files.count)")
+                truth.insert("\(snap.totalAdditions)")
+                truth.insert("\(snap.totalDeletions)")
+                truth.insert("\(snap.committedFileCount)")
+                truth.insert("\(snap.uncommittedFileCount)")
+                for f in snap.files {
+                    truth.insert("\(f.additions)")
+                    truth.insert("\(f.deletions)")
+                    for tok in try extractNumberTokens(from: f.relativePath) { truth.insert(tok) }
+                }
+            }
+            if !persistedManagedLanes.isEmpty {
+                truth.insert("\(totalManagedOwnedFiles)")
+            }
+
             let runs = try projDB.allRuns(reconcileWithLock: true)
             if let run = runs.last {
                 for tok in try extractNumberTokens(from: run.runID) {
+                    truth.insert(tok)
+                }
+                for tok in try extractNumberTokens(from: run.baseCommitOID) {
                     truth.insert(tok)
                 }
                 truth.insert("\(run.lanes.count)")
@@ -444,6 +488,9 @@ struct M5StudioViewsHeadlessTests {
                 truth.insert("\(termCount)")
                 let succCount = run.lanes.filter { $0.status == .succeeded || $0.status == .succeededNoChanges }.count
                 truth.insert("\(succCount)")
+                if let runEnd = run.finishedAt {
+                    truth.insert(String(format: "%.2f", max(0.0, runEnd.timeIntervalSince(run.startedAt))))
+                }
 
                 if run.pricedLaneCount > 0 {
                     truth.insert(String(format: "%.4f", run.totalCostUSD))
@@ -455,12 +502,93 @@ struct M5StudioViewsHeadlessTests {
                     truth.insert(String(format: "%.4f", cap))
                 }
 
+                if let integ = run.integration {
+                    for tok in try extractNumberTokens(from: integ.baseCommitOID) { truth.insert(tok) }
+                    if let headOID = integ.headCommitOID {
+                        for tok in try extractNumberTokens(from: headOID) { truth.insert(tok) }
+                    }
+                    truth.insert("\(integ.merges.count)")
+                    let totalConflicts = integ.merges.reduce(0) { $0 + $1.conflicts.count }
+                    truth.insert("\(totalConflicts)")
+                    let mergedCount = integ.merges.filter { $0.status == .merged }.count
+                    truth.insert("\(mergedCount)")
+
+                    for step in integ.merges {
+                        truth.insert("\(step.ordinal)")
+                        truth.insert("\(step.conflicts.count)")
+                        for tok in try extractNumberTokens(from: step.laneID) { truth.insert(tok) }
+                        if let lOID = step.laneCommitOID {
+                            for tok in try extractNumberTokens(from: lOID) { truth.insert(tok) }
+                        }
+                        if let mOID = step.mergeCommitOID {
+                            for tok in try extractNumberTokens(from: mOID) { truth.insert(tok) }
+                        }
+                        for c in step.conflicts {
+                            for tok in try extractNumberTokens(from: c.path) { truth.insert(tok) }
+                        }
+                    }
+
+                    let reconstructed = gitInspector.reconstructIntegrationConflictBlocks(
+                        repositoryPath: run.repoPath,
+                        integration: integ
+                    )
+                    for blk in reconstructed {
+                        for tok in try extractNumberTokens(from: blk.mergeBaseOID) { truth.insert(tok) }
+                        if let text = blk.conflictText {
+                            combinedTerminalLogs += "\n" + text
+                            for tok in try extractNumberTokens(from: text) { truth.insert(tok) }
+                        }
+                    }
+
+                    if let verify = integ.verify {
+                        truth.insert("\(verify.timeoutSec)")
+                        truth.insert("\(verify.logBytes)")
+                        if let vec = verify.exitCode {
+                            truth.insert("\(vec)")
+                        }
+                        if let vs = verify.startedAt, let vf = verify.finishedAt {
+                            truth.insert(String(format: "%.2f", max(0.0, vf.timeIntervalSince(vs))))
+                        }
+                        for tok in try extractNumberTokens(from: verify.command) {
+                            truth.insert(tok)
+                        }
+                        let vPath = verify.logPath ?? bundleURL
+                            .appendingPathComponent("runs", isDirectory: true)
+                            .appendingPathComponent(run.runID, isDirectory: true)
+                            .appendingPathComponent("verify.pty")
+                            .path
+                        if let vText = try? String(contentsOfFile: vPath, encoding: .utf8), !vText.isEmpty {
+                            combinedTerminalLogs += "\n" + vText
+                            for tok in try extractNumberTokens(from: vText) {
+                                truth.insert(tok)
+                            }
+                        }
+                    }
+                }
+
+                var totalRunOwnedFiles = 0
+                var totalRunCommittedFiles = 0
+                var totalRunUncommittedFiles = 0
+                var totalRunAdditions = 0
+                var totalRunDeletions = 0
+
                 for lane in run.lanes {
+                    truth.insert("\(lane.ordinal)")
                     for tok in try extractNumberTokens(from: lane.laneID) {
                         truth.insert(tok)
                     }
+                    for dep in lane.after {
+                        for tok in try extractNumberTokens(from: dep) {
+                            truth.insert(tok)
+                        }
+                    }
                     if let branch = lane.branch {
                         for tok in try extractNumberTokens(from: branch) {
+                            truth.insert(tok)
+                        }
+                    }
+                    if let commitOID = lane.commitOID {
+                        for tok in try extractNumberTokens(from: commitOID) {
                             truth.insert(tok)
                         }
                     }
@@ -473,17 +601,45 @@ struct M5StudioViewsHeadlessTests {
                     if lane.costSource == "usd", let usd = lane.costUSD {
                         truth.insert(String(format: "%.4f", usd))
                     }
+                    if let s = lane.startedAt {
+                        truth.insert(String(format: "%.2f", max(0.0, s.timeIntervalSince(run.startedAt))))
+                    }
+                    if let f = lane.finishedAt {
+                        truth.insert(String(format: "%.2f", max(0.0, f.timeIntervalSince(run.startedAt))))
+                    }
                     if let s = lane.startedAt, let f = lane.finishedAt {
                         let dur = max(0.0, f.timeIntervalSince(s))
                         truth.insert(String(format: "%.2f", dur))
                     }
 
-                    // Read `<worktree>/.relay/LOG.md` and `<worktree>/.relay/*.log`
-                    let wtDir = bundleURL
-                        .appendingPathComponent("runs", isDirectory: true)
-                        .appendingPathComponent(run.runID, isDirectory: true)
-                        .appendingPathComponent("worktrees", isDirectory: true)
-                        .appendingPathComponent(lane.laneID, isDirectory: true)
+                    let wtDir = lane.worktreePath.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                        ?? bundleURL
+                            .appendingPathComponent("runs", isDirectory: true)
+                            .appendingPathComponent(run.runID, isDirectory: true)
+                            .appendingPathComponent("worktrees", isDirectory: true)
+                            .appendingPathComponent(lane.laneID, isDirectory: true)
+                    let startOID = RelayReadOnlyGitRunInspector.resolveLaneStartCommitOID(for: lane, in: run)
+                    for tok in try extractNumberTokens(from: startOID) { truth.insert(tok) }
+                    let ownSnap = gitInspector.inspectLaneFileOwnership(
+                        laneID: lane.laneID,
+                        worktreePath: wtDir.path,
+                        startCommitOID: startOID
+                    )
+                    totalRunOwnedFiles += ownSnap.files.count
+                    totalRunCommittedFiles += ownSnap.committedFileCount
+                    totalRunUncommittedFiles += ownSnap.uncommittedFileCount
+                    totalRunAdditions += ownSnap.totalAdditions
+                    totalRunDeletions += ownSnap.totalDeletions
+                    truth.insert("\(ownSnap.files.count)")
+                    truth.insert("\(ownSnap.totalAdditions)")
+                    truth.insert("\(ownSnap.totalDeletions)")
+                    truth.insert("\(ownSnap.committedFileCount)")
+                    truth.insert("\(ownSnap.uncommittedFileCount)")
+                    for f in ownSnap.files {
+                        truth.insert("\(f.additions)")
+                        truth.insert("\(f.deletions)")
+                        for tok in try extractNumberTokens(from: f.relativePath) { truth.insert(tok) }
+                    }
                     let relayDir = wtDir.appendingPathComponent(".relay", isDirectory: true)
                     let logMD = relayDir.appendingPathComponent("LOG.md")
                     if let mdText = try? String(contentsOf: logMD, encoding: .utf8) {
@@ -518,6 +674,11 @@ struct M5StudioViewsHeadlessTests {
                         }
                     }
                 }
+                truth.insert("\(totalRunOwnedFiles)")
+                truth.insert("\(totalRunCommittedFiles)")
+                truth.insert("\(totalRunUncommittedFiles)")
+                truth.insert("\(totalRunAdditions)")
+                truth.insert("\(totalRunDeletions)")
             }
         }
         return (truth, combinedTerminalLogs)
@@ -874,6 +1035,637 @@ struct M5StudioViewsHeadlessTests {
         }
 
         #expect(!FileManager.default.fileExists(atPath: fx.decoyMarkerURL.path))
+        enforceHeadlessZeroWindows()
+    }
+
+    @Test("File ownership pane (⌘4) refreshes tracked edit and untracked file within <2s in ViewModel and PDF, excludes .relay/.git, and retains committed files")
+    @MainActor
+    func liveFileOwnershipPaneRefreshesTrackedAndUntrackedWithinTwoSecondsAndRetainsCommittedFiles() async throws {
+        enforceHeadlessZeroWindows()
+        let fx = try makeFixture(prefix: "m5-02-ownership-live")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let gitEnv: [String: String] = [
+            "HOME": fx.homeURL.path,
+            "CFFIXED_USER_HOME": fx.homeURL.path,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": "/usr/bin:/bin"
+        ]
+        try "public struct TrackedEngine {\n    public static let level = 1\n}\n".write(
+            to: fx.repoURL.appendingPathComponent("TrackedEngine.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "TrackedEngine.swift"], cwd: fx.repoURL, env: gitEnv)
+        try runGit(["commit", "-m", "add TrackedEngine"], cwd: fx.repoURL, env: gitEnv)
+
+        let promptsDir = fx.rootURL.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "LANE=lane-one\nCOST=0.0400\nTOKENS=800\nWRITE=InitialCommitted.swift\n".write(
+            to: promptsDir.appendingPathComponent("one.md"), atomically: true, encoding: .utf8
+        )
+        try "LANE=lane-two\nCOST=0.0500\nTOKENS=900\nWRITE=LaneTwoFile.swift\n".write(
+            to: promptsDir.appendingPathComponent("two.md"), atomically: true, encoding: .utf8
+        )
+
+        let planURL = fx.rootURL.appendingPathComponent("plan.json")
+        try JSONSerialization.data(
+            withJSONObject: [
+                "repo": fx.repoURL.path,
+                "base": "main",
+                "lanes": [
+                    ["id": "lane-one", "agent": "claude", "prompt": promptsDir.appendingPathComponent("one.md").path],
+                    ["id": "lane-two", "agent": "vibe", "prompt": promptsDir.appendingPathComponent("two.md").path]
+                ]
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        ).write(to: planURL)
+
+        let cli = RelayCLIRunner()
+        let runRes = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--lang", "en"],
+            environment: fx.environment
+        )
+        #expect(runRes.exitCode == 0, "Setup 2-lane run failed: \(runRes.stderr)")
+
+        let loc = RelayLocalizer(language: .en, persistToUserDefaults: false)
+        let vm = RelayStudioViewModel(
+            projectBundleURL: fx.projectURL,
+            initialPane: .territoryMap,
+            localizer: loc,
+            loadDemoWorkspace: false
+        )
+        vm.selectPane(.territoryMap)
+
+        let run = try #require(vm.activeRun)
+        let laneOneRec = try #require(run.lanes.first(where: { $0.laneID == "lane-one" }))
+        let wtOnePath = try #require(laneOneRec.worktreePath)
+        let wtOneURL = URL(fileURLWithPath: wtOnePath, isDirectory: true)
+        let startOID = RelayReadOnlyGitRunInspector.resolveLaneStartCommitOID(for: laneOneRec, in: run)
+
+        // Wait briefly for initial live worktree watcher startup & initial baseline scan to settle before timing edits
+        let initDeadline = Date().addingTimeInterval(2.0)
+        while Date() < initDeadline {
+            if vm.liveFileOwnershipByLane["lane-one"]?.files.contains(where: { $0.relativePath == "InitialCommitted.swift" }) == true {
+                break
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        // Write internal .relay noise and ensure neither .relay nor 2.5D demo towers appear
+        try "internal relay log\n".write(
+            to: wtOneURL.appendingPathComponent(".relay/noise-check.log"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        // (1) Modify tracked file TrackedEngine.swift -> < 2.0s in ViewModel AND rendered PDF
+        let trackedStartEpoch = Date().timeIntervalSince1970
+        try "public struct TrackedEngine {\n    public static let level = 2\n    public static let active = true\n}\n".write(
+            to: wtOneURL.appendingPathComponent("TrackedEngine.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+        var trackedVMEpoch: Double?
+        var trackedPDFEpoch: Double?
+        let trackedDeadline = Date().addingTimeInterval(3.0)
+        while Date() < trackedDeadline {
+            if let snap = vm.liveFileOwnershipByLane["lane-one"],
+               snap.files.contains(where: { $0.relativePath == "TrackedEngine.swift" && $0.worktreeState == .uncommittedInWorktree }) {
+                if trackedVMEpoch == nil {
+                    trackedVMEpoch = Date().timeIntervalSince1970
+                }
+                let pdf = try renderWorkbenchPDFText(vm: vm)
+                if pdf.contains("TrackedEngine.swift") {
+                    trackedPDFEpoch = Date().timeIntervalSince1970
+                    break
+                }
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let obsTrackedVM = try #require(trackedVMEpoch, "TrackedEngine.swift did not appear in vm.liveFileOwnershipByLane")
+        let obsTrackedPDF = try #require(trackedPDFEpoch, "TrackedEngine.swift did not appear in ⌘4 PDF render")
+        let trackedVMLatency = obsTrackedVM - trackedStartEpoch
+        let trackedPDFLatency = obsTrackedPDF - trackedStartEpoch
+        #expect(trackedVMLatency >= 0.0 && trackedVMLatency <= 2.0, "Tracked file VM latency \(trackedVMLatency)s > 2.0s")
+        #expect(trackedPDFLatency >= 0.0 && trackedPDFLatency <= 2.0, "Tracked file PDF latency \(trackedPDFLatency)s > 2.0s")
+
+        // (2) Create untracked file FreshUntracked.swift -> < 2.0s in ViewModel AND rendered PDF
+        let untrackedStartEpoch = Date().timeIntervalSince1970
+        try "public enum FreshUntracked {\n    public static let ok = true\n}\n".write(
+            to: wtOneURL.appendingPathComponent("FreshUntracked.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+        var untrackedVMEpoch: Double?
+        var untrackedPDFEpoch: Double?
+        let untrackedDeadline = Date().addingTimeInterval(3.0)
+        while Date() < untrackedDeadline {
+            if let snap = vm.liveFileOwnershipByLane["lane-one"],
+               snap.files.contains(where: { $0.relativePath == "FreshUntracked.swift" && $0.worktreeState == .uncommittedInWorktree }) {
+                if untrackedVMEpoch == nil {
+                    untrackedVMEpoch = Date().timeIntervalSince1970
+                }
+                let pdf = try renderWorkbenchPDFText(vm: vm)
+                if pdf.contains("FreshUntracked.swift") {
+                    untrackedPDFEpoch = Date().timeIntervalSince1970
+                    break
+                }
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let obsUntrackedVM = try #require(untrackedVMEpoch, "FreshUntracked.swift did not appear in vm.liveFileOwnershipByLane")
+        let obsUntrackedPDF = try #require(untrackedPDFEpoch, "FreshUntracked.swift did not appear in ⌘4 PDF render")
+        let untrackedVMLatency = obsUntrackedVM - untrackedStartEpoch
+        let untrackedPDFLatency = obsUntrackedPDF - untrackedStartEpoch
+        #expect(untrackedVMLatency >= 0.0 && untrackedVMLatency <= 2.0, "Untracked file VM latency \(untrackedVMLatency)s > 2.0s")
+        #expect(untrackedPDFLatency >= 0.0 && untrackedPDFLatency <= 2.0, "Untracked file PDF latency \(untrackedPDFLatency)s > 2.0s")
+        print(
+            String(
+                format: "[M5-02-METRIC] tracked_vm_s=%.4f tracked_pdf_s=%.4f untracked_vm_s=%.4f untracked_pdf_s=%.4f",
+                trackedVMLatency,
+                trackedPDFLatency,
+                untrackedVMLatency,
+                untrackedPDFLatency
+            )
+        )
+
+        // Verify .relay/ and .git/ never leak into ownership data or PDF
+        for (_, snap) in vm.liveFileOwnershipByLane {
+            #expect(!snap.files.contains(where: { $0.relativePath.contains(".relay") || $0.relativePath.contains(".git") }))
+        }
+        let preCommitPDF = try renderWorkbenchPDFText(vm: vm)
+        #expect(!preCommitPDF.contains("noise-check.log"))
+        #expect(!preCommitPDF.contains("AuthSessionManager.swift"))
+        #expect(preCommitPDF.contains("uncommitted"))
+
+        // (3) Commit on lane-one branch -> files MUST remain in ownership list & PDF as committed (compared against startCommitOID)
+        let engine = GitWorktreePlumbingEngine()
+        _ = try engine.commitLaneChangesIfNeeded(
+            worktreePath: wtOnePath,
+            startCommitOID: startOID,
+            runID: run.runID,
+            laneID: "lane-one",
+            agent: .claude,
+            status: .succeeded,
+            environment: gitEnv
+        )
+        var committedObserved = false
+        let commitDeadline = Date().addingTimeInterval(2.0)
+        while Date() < commitDeadline {
+            if let snap = vm.liveFileOwnershipByLane["lane-one"],
+               snap.files.count == 3,
+               snap.files.allSatisfy({ $0.worktreeState == .committedToLane }) {
+                committedObserved = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        #expect(committedObserved, "Files disappeared or failed to update to committedToLane after lane commit")
+
+        let (truth, termLogs) = try collectGroundTruthNumbers(bundleURL: fx.projectURL)
+        for lang in [RelayLanguage.en, RelayLanguage.zhHans] {
+            vm.setLanguage(lang, postToast: false)
+            vm.selectPane(.territoryMap)
+            let pdf = try renderWorkbenchPDFText(vm: vm)
+            _ = try renderWorkbenchBitmapAndVerifyNonBlank(vm: vm)
+            #expect(pdf.contains("TrackedEngine.swift"))
+            #expect(pdf.contains("FreshUntracked.swift"))
+            #expect(pdf.contains("InitialCommitted.swift"))
+            #expect(pdf.contains("LaneTwoFile.swift"))
+            #expect(!pdf.contains("noise-check.log"))
+            if lang == .en {
+                #expect(pdf.contains("committed"))
+            } else {
+                #expect(pdf.contains("已提交"))
+            }
+            let unmatched = try unmatchedNumbersInPDF(
+                pdfText: pdf,
+                groundTruth: truth,
+                terminalLogText: termLogs,
+                hasActiveTerminalRows: false
+            )
+            #expect(unmatched.isEmpty, "⌘4 ownership pane (\(lang.rawValue)) rendered ungrounded numbers: \(unmatched)\nPDF:\n\(pdf)")
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: fx.decoyMarkerURL.path))
+        enforceHeadlessZeroWindows()
+    }
+
+    private static func collectAllSwiftFilesUnderSources() -> [URL] {
+        let sourcesURL = repositoryRootURL.appendingPathComponent("Sources", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(at: sourcesURL, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        var urls: [URL] = []
+        while let next = enumerator.nextObject() as? URL {
+            if next.pathExtension == "swift" {
+                urls.append(next)
+            }
+        }
+        return urls
+    }
+
+    @Test("Merge pane (⌘3) renders M2 verified integration + verify.pty and conflicted integration + git merge-file -p blocks in EN & ZH, and fixes R74")
+    @MainActor
+    func mergePaneRendersCleanVerifiedAndConflictedRunsWithGitMergeFileBlocksAndFixesR74() async throws {
+        enforceHeadlessZeroWindows()
+
+        // R74 repo-wide Sources/ static audit: dead preference toggle and hardcoded 18/24 conflict evidence must not exist in Sources/
+        let forbiddenNeedles: [String] = [
+            "autoRunSemanticMerge" + "OnHandoff",
+            "Disabled before " + "M3",
+            "M3 " + "前默认关闭",
+            "passedTestCount: " + "18",
+            "passedTestCount: " + "24",
+            "18/" + "18 Tests",
+            "18/" + "18 测试"
+        ]
+        for fileURL in Self.collectAllSwiftFilesUnderSources() {
+            let text = try String(contentsOf: fileURL, encoding: .utf8)
+            for needle in forbiddenNeedles {
+                #expect(!text.contains(needle), "R74 violation: \(fileURL.lastPathComponent) still contains '\(needle)'")
+            }
+        }
+
+        // Case ①: Clean 2-lane merge + verify passed
+        let cleanFX = try makeFixture(prefix: "m5-02-merge-clean")
+        defer { try? FileManager.default.removeItem(at: cleanFX.rootURL) }
+
+        let cleanPrompts = cleanFX.rootURL.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: cleanPrompts, withIntermediateDirectories: true)
+        try "LANE=lane-alpha\nCOST=0.0500\nTOKENS=700\nWRITE_CONTENT=Alpha.swift|public enum Alpha { public static let ok = true }\\n\n".write(
+            to: cleanPrompts.appendingPathComponent("alpha.md"), atomically: true, encoding: .utf8
+        )
+        try "LANE=lane-beta\nCOST=0.0600\nTOKENS=850\nWRITE_CONTENT=Beta.swift|public enum Beta { public static let ok = true }\\n\n".write(
+            to: cleanPrompts.appendingPathComponent("beta.md"), atomically: true, encoding: .utf8
+        )
+        let cleanPlanURL = cleanFX.rootURL.appendingPathComponent("plan_clean.json")
+        try JSONSerialization.data(
+            withJSONObject: [
+                "repo": cleanFX.repoURL.path,
+                "base": "main",
+                "verify": "printf 'VERIFY_PTY_SUCCESS_BANNER_OK\\n' && test -f Alpha.swift && test -f Beta.swift",
+                "lanes": [
+                    ["id": "lane-alpha", "agent": "claude", "prompt": cleanPrompts.appendingPathComponent("alpha.md").path],
+                    ["id": "lane-beta", "agent": "vibe", "prompt": cleanPrompts.appendingPathComponent("beta.md").path]
+                ]
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        ).write(to: cleanPlanURL)
+
+        let cli = RelayCLIRunner()
+        let cleanRunRes = await cli.executeCommand(
+            arguments: ["run", cleanPlanURL.path, "--project", cleanFX.projectURL.path, "--lang", "en"],
+            environment: cleanFX.environment
+        )
+        #expect(cleanRunRes.exitCode == 0, "Clean merge + verify run failed: \(cleanRunRes.stderr)")
+
+        let cleanVM = RelayStudioViewModel(
+            projectBundleURL: cleanFX.projectURL,
+            initialPane: .semanticMerge,
+            localizer: RelayLocalizer(language: .en, persistToUserDefaults: false),
+            loadDemoWorkspace: false
+        )
+        let cleanInteg = try #require(cleanVM.activeRun?.integration)
+        #expect(cleanInteg.status == .verified)
+        #expect(cleanInteg.ready == true)
+        #expect(cleanInteg.merges.count == 2)
+
+        let (cleanTruth, cleanTermLogs) = try collectGroundTruthNumbers(bundleURL: cleanFX.projectURL)
+        for lang in [RelayLanguage.en, RelayLanguage.zhHans] {
+            cleanVM.setLanguage(lang, postToast: false)
+            cleanVM.selectPane(.semanticMerge)
+            let pdf = try renderWorkbenchPDFText(vm: cleanVM)
+            _ = try renderWorkbenchBitmapAndVerifyNonBlank(vm: cleanVM)
+
+            #expect(pdf.contains("verified"))
+            #expect(pdf.contains("ready: true"))
+            if lang == .zhHans {
+                #expect(pdf.contains("已验证"))
+                #expect(pdf.contains("已就绪"))
+            }
+            for step in cleanInteg.merges {
+                let mergeOID = try #require(step.mergeCommitOID)
+                #expect(pdf.contains(mergeOID), "⌘3 PDF (\(lang.rawValue)) missing mergeCommitOID \(mergeOID)")
+            }
+            #expect(pdf.contains("VERIFY_PTY_SUCCESS_BANNER_OK"))
+            #expect(!pdf.contains("Resolve All via Verified Lane"))
+            #expect(!pdf.contains("Accept Left"))
+            #expect(!pdf.contains("采纳左侧"))
+
+            for pane in [RelayStudioPane.dagPipeline, .semanticMerge, .territoryMap] {
+                cleanVM.selectPane(pane)
+                let panePDF = try renderWorkbenchPDFText(vm: cleanVM)
+                _ = try renderWorkbenchBitmapAndVerifyNonBlank(vm: cleanVM)
+                let unmatched = try unmatchedNumbersInPDF(
+                    pdfText: panePDF,
+                    groundTruth: cleanTruth,
+                    terminalLogText: cleanTermLogs,
+                    hasActiveTerminalRows: false
+                )
+                #expect(unmatched.isEmpty, "Clean run pane \(pane.rawValue) (\(lang.rawValue)) rendered ungrounded numbers: \(unmatched)\nPDF:\n\(panePDF)")
+            }
+
+            // Also verify ⌘, Preferences modal has zero dead R74 toggle and zero ungrounded numbers
+            cleanVM.isPreferencesModalPresented = true
+            let prefsPDF = try renderWorkbenchPDFText(vm: cleanVM)
+            #expect(!prefsPDF.contains("Auto-Run 3-Way"))
+            #expect(!prefsPDF.contains("自动执行三路 AST"))
+            cleanVM.isPreferencesModalPresented = false
+        }
+
+        // Case ②: Two lanes modify the same line -> Git conflict reconstructed via `git merge-file -p`
+        let confFX = try makeFixture(prefix: "m5-02-merge-conflict")
+        defer { try? FileManager.default.removeItem(at: confFX.rootURL) }
+
+        let gitEnv: [String: String] = [
+            "HOME": confFX.homeURL.path,
+            "CFFIXED_USER_HOME": confFX.homeURL.path,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": "/usr/bin:/bin"
+        ]
+        let baseSource = "public enum SharedConfig {\n    public static let mode = \"baseline\"\n}\n"
+        let leftSource = "public enum SharedConfig {\n    public static let mode = \"left-lane-choice\"\n}\n"
+        let rightSource = "public enum SharedConfig {\n    public static let mode = \"right-lane-choice\"\n}\n"
+        try baseSource.write(
+            to: confFX.repoURL.appendingPathComponent("SharedConfig.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "SharedConfig.swift"], cwd: confFX.repoURL, env: gitEnv)
+        try runGit(["commit", "-m", "add SharedConfig"], cwd: confFX.repoURL, env: gitEnv)
+
+        let confPrompts = confFX.rootURL.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: confPrompts, withIntermediateDirectories: true)
+        try "LANE=lane-left\nCOST=0.0500\nTOKENS=600\nWRITE_CONTENT=SharedConfig.swift|public enum SharedConfig {\\n    public static let mode = \"left-lane-choice\"\\n}\\n\n".write(
+            to: confPrompts.appendingPathComponent("left.md"), atomically: true, encoding: .utf8
+        )
+        try "LANE=lane-right\nCOST=0.0600\nTOKENS=650\nWRITE_CONTENT=SharedConfig.swift|public enum SharedConfig {\\n    public static let mode = \"right-lane-choice\"\\n}\\n\n".write(
+            to: confPrompts.appendingPathComponent("right.md"), atomically: true, encoding: .utf8
+        )
+        let confPlanURL = confFX.rootURL.appendingPathComponent("plan_conflict.json")
+        try JSONSerialization.data(
+            withJSONObject: [
+                "repo": confFX.repoURL.path,
+                "base": "main",
+                "lanes": [
+                    ["id": "lane-left", "agent": "claude", "prompt": confPrompts.appendingPathComponent("left.md").path],
+                    ["id": "lane-right", "agent": "vibe", "prompt": confPrompts.appendingPathComponent("right.md").path]
+                ]
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        ).write(to: confPlanURL)
+
+        let confRunRes = await cli.executeCommand(
+            arguments: ["run", confPlanURL.path, "--project", confFX.projectURL.path, "--lang", "en"],
+            environment: confFX.environment
+        )
+        #expect(confRunRes.exitCode != 0, "Conflict run must exit non-zero")
+
+        // Independently run `git merge-file -p` in test temp directory to obtain ground-truth conflict block
+        let refMergeDir = confFX.rootURL.appendingPathComponent("ref-merge-file", isDirectory: true)
+        try FileManager.default.createDirectory(at: refMergeDir, withIntermediateDirectories: true)
+        let oursPath = refMergeDir.appendingPathComponent("ours").path
+        let basePath = refMergeDir.appendingPathComponent("base").path
+        let theirsPath = refMergeDir.appendingPathComponent("theirs").path
+        try leftSource.write(toFile: oursPath, atomically: true, encoding: .utf8)
+        try baseSource.write(toFile: basePath, atomically: true, encoding: .utf8)
+        try rightSource.write(toFile: theirsPath, atomically: true, encoding: .utf8)
+        let refGit = try GitWorktreePlumbingEngine().runGitCommand(
+            ["merge-file", "-p", "-L", "integration", "-L", "base", "-L", "lane-right", oursPath, basePath, theirsPath],
+            cwd: refMergeDir.path,
+            environment: gitEnv
+        )
+        #expect(refGit.exitCode > 0 && refGit.exitCode < 128)
+        let expectedConflictText = refGit.stdout
+
+        let confVM = RelayStudioViewModel(
+            projectBundleURL: confFX.projectURL,
+            initialPane: .semanticMerge,
+            localizer: RelayLocalizer(language: .en, persistToUserDefaults: false),
+            loadDemoWorkspace: false
+        )
+        let confInteg = try #require(confVM.activeRun?.integration)
+        #expect(confInteg.status == .conflict)
+        #expect(confInteg.ready == false)
+        #expect(confVM.liveConflictBlocks.count == 1)
+        #expect(confVM.liveConflictBlocks.first?.path == "SharedConfig.swift")
+        #expect(confVM.liveConflictBlocks.first?.conflictText == expectedConflictText)
+
+        let (confTruth, confTermLogs) = try collectGroundTruthNumbers(bundleURL: confFX.projectURL)
+        for lang in [RelayLanguage.en, RelayLanguage.zhHans] {
+            confVM.setLanguage(lang, postToast: false)
+            confVM.selectPane(.semanticMerge)
+            let pdf = try renderWorkbenchPDFText(vm: confVM)
+            _ = try renderWorkbenchBitmapAndVerifyNonBlank(vm: confVM)
+
+            #expect(pdf.contains("conflict"))
+            #expect(pdf.contains("ready: false"))
+            if lang == .zhHans {
+                #expect(pdf.contains("冲突"))
+                #expect(pdf.contains("未就绪"))
+            }
+            #expect(pdf.contains("SharedConfig.swift"))
+            #expect(pdf.contains("UU"))
+            for expectedLine in expectedConflictText.split(whereSeparator: \.isNewline).map(String.init) {
+                let trimmed = expectedLine.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty {
+                    #expect(pdf.contains(trimmed), "⌘3 conflict PDF (\(lang.rawValue)) missing git merge-file -p line: '\(trimmed)'\nPDF:\n\(pdf)")
+                }
+            }
+            #expect(!pdf.contains("Resolve All via Verified Lane"))
+            #expect(!pdf.contains("Accept Left"))
+
+            for pane in [RelayStudioPane.dagPipeline, .semanticMerge, .territoryMap] {
+                confVM.selectPane(pane)
+                let panePDF = try renderWorkbenchPDFText(vm: confVM)
+                _ = try renderWorkbenchBitmapAndVerifyNonBlank(vm: confVM)
+                let unmatched = try unmatchedNumbersInPDF(
+                    pdfText: panePDF,
+                    groundTruth: confTruth,
+                    terminalLogText: confTermLogs,
+                    hasActiveTerminalRows: false
+                )
+                #expect(unmatched.isEmpty, "Conflict run pane \(pane.rawValue) (\(lang.rawValue)) rendered ungrounded numbers: \(unmatched)\nPDF:\n\(panePDF)")
+            }
+        }
+
+        // Demo mode still retains interactive AST resolution controls
+        let demoVM = RelayStudioViewModel(
+            initialPane: .semanticMerge,
+            localizer: RelayLocalizer(language: .en, persistToUserDefaults: false),
+            loadDemoWorkspace: true
+        )
+        let demoPDF = try renderWorkbenchPDFText(vm: demoVM)
+        #expect(demoPDF.contains("Accept Left"))
+
+        #expect(!FileManager.default.fileExists(atPath: cleanFX.decoyMarkerURL.path))
+        #expect(!FileManager.default.fileExists(atPath: confFX.decoyMarkerURL.path))
+        enforceHeadlessZeroWindows()
+    }
+
+    @Test("DAG pane (⌘2) renders empty state when no run exists and draws real RelayRunRecord.lanes after-dependencies and measured timings without ungrounded numbers")
+    @MainActor
+    func dagPaneRendersLiveRunDependenciesAndMeasuredTimingsOrEmptyStateWithoutUngroundedNumbers() async throws {
+        enforceHeadlessZeroWindows()
+        let fx = try makeFixture(prefix: "m5-02-dag-live")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        // 1. Empty workspace: must show empty state explanation, NO synthetic 4-node graph, NO 1.00×
+        for lang in [RelayLanguage.en, RelayLanguage.zhHans] {
+            let emptyVM = RelayStudioViewModel(
+                projectBundleURL: fx.projectURL,
+                initialPane: .dagPipeline,
+                localizer: RelayLocalizer(language: lang, persistToUserDefaults: false),
+                loadDemoWorkspace: false
+            )
+            emptyVM.selectPane(.dagPipeline)
+            let emptyPDF = try renderWorkbenchPDFText(vm: emptyVM)
+            _ = try renderWorkbenchBitmapAndVerifyNonBlank(vm: emptyVM)
+            #expect(!emptyPDF.contains("1.00×"))
+            #expect(!emptyPDF.contains("h3-quic-transport"))
+            #expect(!emptyPDF.contains("Parallel Speedup"))
+            #expect(!emptyPDF.contains("并行加速比"))
+        }
+
+        // 2. Real 3-lane run with `after` dependency (`lane-root` -> `lane-child`, plus parallel `lane-peer`)
+        let promptsDir = fx.rootURL.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "LANE=lane-root\nSLEEP=0.15\nCOST=0.0300\nTOKENS=500\nWRITE=root.txt\n".write(
+            to: promptsDir.appendingPathComponent("root.md"), atomically: true, encoding: .utf8
+        )
+        try "LANE=lane-child\nSLEEP=0.15\nCOST=0.0400\nTOKENS=600\nWRITE=child.txt\n".write(
+            to: promptsDir.appendingPathComponent("child.md"), atomically: true, encoding: .utf8
+        )
+        try "LANE=lane-peer\nSLEEP=0.20\nTOKENS=1100\nWRITE=peer.txt\n".write(
+            to: promptsDir.appendingPathComponent("peer.md"), atomically: true, encoding: .utf8
+        )
+
+        let planURL = fx.rootURL.appendingPathComponent("plan_dag.json")
+        try JSONSerialization.data(
+            withJSONObject: [
+                "repo": fx.repoURL.path,
+                "base": "main",
+                "lanes": [
+                    ["id": "lane-root", "agent": "claude", "prompt": promptsDir.appendingPathComponent("root.md").path],
+                    ["id": "lane-child", "agent": "vibe", "prompt": promptsDir.appendingPathComponent("child.md").path, "after": ["lane-root"]],
+                    ["id": "lane-peer", "agent": "codex", "prompt": promptsDir.appendingPathComponent("peer.md").path]
+                ]
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        ).write(to: planURL)
+
+        let cli = RelayCLIRunner()
+        let runRes = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--lang", "en"],
+            environment: fx.environment
+        )
+        #expect(runRes.exitCode == 0, "3-lane DAG run failed: \(runRes.stderr)")
+
+        let dagVM = RelayStudioViewModel(
+            projectBundleURL: fx.projectURL,
+            initialPane: .dagPipeline,
+            localizer: RelayLocalizer(language: .en, persistToUserDefaults: false),
+            loadDemoWorkspace: false
+        )
+        let run = try #require(dagVM.activeRun)
+        #expect(run.lanes.count == 3)
+
+        let (truth, termLogs) = try collectGroundTruthNumbers(bundleURL: fx.projectURL)
+        for lang in [RelayLanguage.en, RelayLanguage.zhHans] {
+            dagVM.setLanguage(lang, postToast: false)
+            dagVM.selectPane(.dagPipeline)
+            let pdf = try renderWorkbenchPDFText(vm: dagVM)
+            _ = try renderWorkbenchBitmapAndVerifyNonBlank(vm: dagVM)
+
+            #expect(pdf.contains("lane-root"))
+            #expect(pdf.contains("lane-child"))
+            #expect(pdf.contains("lane-peer"))
+            #expect(!pdf.contains("1.00×"))
+            #expect(!pdf.contains("Parallel Speedup"))
+            #expect(!pdf.contains("并行加速比"))
+            if lang == .en {
+                #expect(pdf.contains("after: lane-root"))
+            } else {
+                #expect(pdf.contains("依赖: lane-root"))
+            }
+            for lane in run.lanes {
+                if let dur = dagVM.formattedLiveLaneDuration(forLane: lane.laneID) {
+                    #expect(pdf.contains(dur), "⌘2 DAG PDF (\(lang.rawValue)) missing measured duration \(dur) for \(lane.laneID)")
+                }
+            }
+
+            let unmatched = try unmatchedNumbersInPDF(
+                pdfText: pdf,
+                groundTruth: truth,
+                terminalLogText: termLogs,
+                hasActiveTerminalRows: false
+            )
+            #expect(unmatched.isEmpty, "⌘2 DAG pane (\(lang.rawValue)) rendered ungrounded numbers: \(unmatched)\nPDF:\n\(pdf)")
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: fx.decoyMarkerURL.path))
+        enforceHeadlessZeroWindows()
+    }
+
+    @Test("RelayRetinaScreenshotExporter prepares ViewModel from real .relayproj without demo overrides or opening windows")
+    @MainActor
+    func screenshotExporterSupportsRealProjectBundleLoadingWithoutOpeningWindows() async throws {
+        enforceHeadlessZeroWindows()
+        let fx = try makeFixture(prefix: "m5-02-exporter-prep")
+        defer { try? FileManager.default.removeItem(at: fx.rootURL) }
+
+        let promptsDir = fx.rootURL.appendingPathComponent("prompts", isDirectory: true)
+        try FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+        try "LANE=lane-exp\nCOST=0.0700\nTOKENS=950\nWRITE=Exp.swift\n".write(
+            to: promptsDir.appendingPathComponent("exp.md"), atomically: true, encoding: .utf8
+        )
+        let planURL = fx.rootURL.appendingPathComponent("plan_exp.json")
+        try JSONSerialization.data(
+            withJSONObject: [
+                "repo": fx.repoURL.path,
+                "base": "main",
+                "lanes": [
+                    ["id": "lane-exp", "agent": "claude", "prompt": promptsDir.appendingPathComponent("exp.md").path]
+                ]
+            ],
+            options: [.prettyPrinted, .sortedKeys]
+        ).write(to: planURL)
+
+        let cli = RelayCLIRunner()
+        let runRes = await cli.executeCommand(
+            arguments: ["run", planURL.path, "--project", fx.projectURL.path, "--lang", "en"],
+            environment: fx.environment
+        )
+        #expect(runRes.exitCode == 0)
+
+        for lang in [RelayLanguage.en, RelayLanguage.zhHans] {
+            let preparedVM = try RelayRetinaScreenshotExporter.prepareWorkbenchViewModel(
+                projectBundleURL: fx.projectURL,
+                initialPane: .semanticMerge,
+                language: lang
+            )
+            #expect(preparedVM.isDemoMode == false)
+            #expect(preparedVM.activePane == .semanticMerge)
+            #expect(preparedVM.lanes.map(\.id) == ["lane-exp"])
+            #expect(preparedVM.activeRun?.lanes.count == 1)
+            #expect(preparedVM.isBroadcastBarExpanded == false)
+            #expect(preparedVM.coordinator.toastCenter.visibleToasts.isEmpty)
+        }
+
+        // Missing bundle path must throw without creating a fake directory on disk
+        let missingURL = fx.rootURL.appendingPathComponent("DoesNotExist.relayproj", isDirectory: true)
+        #expect(throws: (any Error).self) {
+            _ = try RelayRetinaScreenshotExporter.prepareWorkbenchViewModel(projectBundleURL: missingURL)
+        }
+        #expect(!FileManager.default.fileExists(atPath: missingURL.path))
+
         enforceHeadlessZeroWindows()
     }
 }

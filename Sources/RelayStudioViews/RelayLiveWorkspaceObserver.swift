@@ -11,6 +11,7 @@ public struct RelayLiveWorkspaceSnapshot: @unchecked Sendable {
     public let terminalSnapshotsByLane: [String: TerminalViewportSnapshot]
     public let terminalBuffersByLane: [String: VT100TerminalScreenBuffer]
     public let terminalPlainTextByLane: [String: String]
+    public let verifyOutputText: String
     public let observedAt: Date
 
     public init(
@@ -19,6 +20,7 @@ public struct RelayLiveWorkspaceSnapshot: @unchecked Sendable {
         terminalSnapshotsByLane: [String: TerminalViewportSnapshot] = [:],
         terminalBuffersByLane: [String: VT100TerminalScreenBuffer] = [:],
         terminalPlainTextByLane: [String: String] = [:],
+        verifyOutputText: String = "",
         observedAt: Date = Date()
     ) {
         self.allRuns = allRuns
@@ -26,6 +28,7 @@ public struct RelayLiveWorkspaceSnapshot: @unchecked Sendable {
         self.terminalSnapshotsByLane = terminalSnapshotsByLane
         self.terminalBuffersByLane = terminalBuffersByLane
         self.terminalPlainTextByLane = terminalPlainTextByLane
+        self.verifyOutputText = verifyOutputText
         self.observedAt = observedAt
     }
 }
@@ -65,6 +68,7 @@ public final class RelayLiveWorkspaceObserver: @unchecked Sendable {
     private enum StreamFileKind: Equatable {
         case relayStepLog(runID: String, laneID: String)
         case lanePTY(runID: String, laneID: String)
+        case verifyPTY(runID: String)
     }
 
     private enum LaneSourceMode: Equatable {
@@ -101,6 +105,7 @@ public final class RelayLiveWorkspaceObserver: @unchecked Sendable {
     private var laneSourceModes: [String: LaneSourceMode] = [:]
     private var laneBuffers: [String: VT100TerminalScreenBuffer] = [:]
     private var lanePlainTexts: [String: String] = [:]
+    private var verifyPlainText: String = ""
     private var lastObservedLockPresent: Bool = false
 
     public init(
@@ -373,6 +378,7 @@ public final class RelayLiveWorkspaceObserver: @unchecked Sendable {
         laneSourceModes.removeAll()
         laneBuffers.removeAll()
         lanePlainTexts.removeAll()
+        verifyPlainText = ""
     }
 
     // MARK: - Output File Classification, Discovery & Incremental Streaming
@@ -382,8 +388,15 @@ public final class RelayLiveWorkspaceObserver: @unchecked Sendable {
         guard standardizedPath.hasPrefix(runsPrefix) else { return nil }
         let rel = String(standardizedPath.dropFirst(runsPrefix.count))
         let parts = rel.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        guard parts.count >= 3 else { return nil }
+        guard parts.count >= 2 else { return nil }
         let runID = parts[0]
+
+        // <runID>/verify.pty
+        if parts.count == 2, parts[1] == "verify.pty" {
+            return .verifyPTY(runID: runID)
+        }
+
+        guard parts.count >= 3 else { return nil }
 
         // <runID>/lanes/<laneID>.pty
         if parts.count == 3, parts[1] == "lanes", parts[2].hasSuffix(".pty") {
@@ -476,6 +489,15 @@ public final class RelayLiveWorkspaceObserver: @unchecked Sendable {
             }
         }
 
+        // 3. Scan `<runRoot>/verify.pty` for M2 verification output.
+        let verifyURL = runRoot.appendingPathComponent("verify.pty")
+        if fm.fileExists(atPath: verifyURL.path) {
+            let stdVerifyPath = verifyURL.standardizedFileURL.path
+            if handleDiscoveredStreamFileOnQueue(path: stdVerifyPath, kind: .verifyPTY(runID: targetRunID)) {
+                mutated = true
+            }
+        }
+
         // Release file descriptors once the run is completely terminal.
         if let run = cachedRuns.last, run.runID == targetRunID, isEntireRunTerminal(run) {
             for (_, src) in fileWatchSources {
@@ -491,7 +513,7 @@ public final class RelayLiveWorkspaceObserver: @unchecked Sendable {
     private func handleDiscoveredStreamFileOnQueue(path: String, kind: StreamFileKind) -> Bool {
         let fileRunID: String
         switch kind {
-        case .relayStepLog(let r, _), .lanePTY(let r, _):
+        case .relayStepLog(let r, _), .lanePTY(let r, _), .verifyPTY(let r):
             fileRunID = r
         }
 
@@ -561,6 +583,17 @@ public final class RelayLiveWorkspaceObserver: @unchecked Sendable {
             guard let chunk = readNewBytesOnQueue(path: path), !chunk.isEmpty else { return false }
             laneSourceModes[laneID] = .lanePTY
             appendChunkToLaneBufferOnQueue(laneID: laneID, path: path, chunk: chunk)
+            return true
+
+        case .verifyPTY(let runID):
+            guard activeTerminalRunID == runID else { return false }
+            guard let chunk = readNewBytesOnQueue(path: path), !chunk.isEmpty else { return false }
+            let capBytes = 65_536
+            let decoded = String(decoding: chunk, as: UTF8.self).replacingOccurrences(of: "\r\n", with: "\n")
+            verifyPlainText += decoded
+            if verifyPlainText.utf8.count > capBytes {
+                verifyPlainText = String(verifyPlainText.suffix(capBytes))
+            }
             return true
         }
     }
@@ -739,6 +772,7 @@ public final class RelayLiveWorkspaceObserver: @unchecked Sendable {
             terminalSnapshotsByLane: snapDict,
             terminalBuffersByLane: laneBuffers,
             terminalPlainTextByLane: lanePlainTexts,
+            verifyOutputText: verifyPlainText,
             observedAt: Date()
         )
         onUpdate(snapshot)

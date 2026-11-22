@@ -65,8 +65,15 @@ enum RelayIDEBootstrap {
         case .exportScreenshots(let exportDir):
             let filteredArgs = RelayCLIRunner.filterSystemLaunchArguments(rawArguments)
             let cliLang = RelayLocalizer.parseCLILanguageOverride(arguments: filteredArgs)
+            let projectURL = RelayCLIRunner.parseExportScreenshotsProjectBundle(from: filteredArgs)
+            let explicitDemo: Bool? = RelayCLIRunner.parseExportScreenshotsDemoFlag(from: filteredArgs) ? true : nil
             do {
-                let records = try runHeadlessRetinaExport(to: exportDir, language: cliLang)
+                let records = try runHeadlessRetinaExport(
+                    to: exportDir,
+                    projectBundleURL: projectURL,
+                    loadDemoWorkspace: explicitDemo,
+                    language: cliLang
+                )
                 for rec in records {
                     print("Exported \(rec.fileName) (\(rec.pixelWidth)x\(rec.pixelHeight) px) -> \(rec.outputURL.path)")
                 }
@@ -167,12 +174,16 @@ enum RelayIDEBootstrap {
     @MainActor
     private static func runHeadlessRetinaExport(
         to directoryURL: URL,
+        projectBundleURL: URL? = nil,
+        loadDemoWorkspace: Bool? = nil,
         language: RelayLanguage?
     ) throws -> [RelayRetinaScreenshotExporter.ExportedScreenshotRecord] {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
         return try RelayRetinaScreenshotExporter.exportFlagshipScreenshots(
             to: directoryURL,
+            projectBundleURL: projectBundleURL,
+            loadDemoWorkspace: loadDemoWorkspace,
             language: language
         )
     }

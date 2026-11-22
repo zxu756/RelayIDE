@@ -3,9 +3,10 @@ import RelayModels
 import RelayOrchestrator
 import RelaySemanticMerge
 import RelayWorkbenchShell
+import RelayWorktreeGit
 import SwiftUI
 
-// MARK: - 2.5D Isometric Coupling & Live Agent Territory Map Studio
+// MARK: - 2.5D Isometric Coupling (Demo) & Live Agent Worktree File Ownership Studio (M5)
 
 public struct IsometricTerritoryMapCanvasView: View {
     @ObservedObject public var viewModel: RelayStudioViewModel
@@ -15,6 +16,14 @@ public struct IsometricTerritoryMapCanvasView: View {
     }
 
     public var body: some View {
+        if viewModel.isDemoMode {
+            demoIsometricBody
+        } else {
+            liveWorktreeFileOwnershipBody
+        }
+    }
+
+    private var demoIsometricBody: some View {
         VStack(spacing: 8) {
             territoryToolbarStrip
 
@@ -29,6 +38,222 @@ public struct IsometricTerritoryMapCanvasView: View {
         }
         .padding(10)
         .background(RelayBauhausDesign.warmSandpaper)
+    }
+
+    // MARK: - Non-Demo Live Read-Only Worktree File Ownership View (⌘4)
+
+    private var liveWorktreeFileOwnershipBody: some View {
+        let allSnaps = viewModel.lanes.compactMap { viewModel.liveFileOwnershipByLane[$0.id] }
+        let totalFiles = allSnaps.reduce(0) { $0 + $1.files.count }
+        let totalAdd = allSnaps.reduce(0) { $0 + $1.totalAdditions }
+        let totalDel = allSnaps.reduce(0) { $0 + $1.totalDeletions }
+        let totalCommitted = allSnaps.reduce(0) { $0 + $1.committedFileCount }
+        let totalUncommitted = allSnaps.reduce(0) { $0 + $1.uncommittedFileCount }
+
+        return VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 1.5) {
+                    Text(viewModel.L("Live Worktree File Ownership", "通道工作树文件归属实时视图"))
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(RelayBauhausDesign.espressoInk)
+                    Text(
+                        viewModel.L(
+                            "git diff --name-only <start> + untracked · excluding .relay/ & .git/",
+                            "按通道起点提交比较并含未跟踪文件 · 排除 .relay/ 与 .git/"
+                        )
+                    )
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                }
+
+                Spacer(minLength: 6)
+
+                RelayBauhausPill(
+                    viewModel.L("\(viewModel.lanes.count) lanes", "\(viewModel.lanes.count) 条通道"),
+                    foreground: RelayBauhausDesign.espressoInk,
+                    background: RelayBauhausDesign.warmIvory,
+                    border: RelayBauhausDesign.hairlineBorder,
+                    symbolName: "arrow.triangle.branch",
+                    monospaced: true
+                )
+
+                RelayBauhausPill(
+                    viewModel.L("\(totalFiles) files", "\(totalFiles) 个文件"),
+                    foreground: RelayBauhausDesign.codexCobalt,
+                    background: RelayBauhausDesign.cobaltWash,
+                    border: RelayBauhausDesign.codexCobalt.opacity(0.45),
+                    symbolName: "doc.on.doc",
+                    monospaced: true
+                )
+
+                if totalFiles > 0 {
+                    RelayBauhausPill(
+                        "+\(totalAdd) / -\(totalDel)",
+                        foreground: RelayBauhausDesign.agySignalGreen,
+                        background: RelayBauhausDesign.greenWash,
+                        border: RelayBauhausDesign.agySignalGreen.opacity(0.45),
+                        monospaced: true
+                    )
+
+                    RelayBauhausPill(
+                        viewModel.L(
+                            "\(totalCommitted) committed · \(totalUncommitted) uncommitted",
+                            "\(totalCommitted) 已提交 · \(totalUncommitted) 未提交"
+                        ),
+                        foreground: totalUncommitted > 0 ? RelayBauhausDesign.vibeOchre : RelayBauhausDesign.agySignalGreen,
+                        background: totalUncommitted > 0 ? RelayBauhausDesign.ochreWash : RelayBauhausDesign.greenWash,
+                        border: (totalUncommitted > 0 ? RelayBauhausDesign.vibeOchre : RelayBauhausDesign.agySignalGreen).opacity(0.45),
+                        monospaced: true
+                    )
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                    .fill(RelayBauhausDesign.sandstoneStrip)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: RelayBauhausDesign.cornerRadius, style: .continuous)
+                    .strokeBorder(RelayBauhausDesign.hairlineBorder, lineWidth: 1)
+            )
+
+            if viewModel.lanes.isEmpty {
+                RelayBauhausCard(padding: 20) {
+                    VStack(spacing: 6) {
+                        Text(viewModel.L("No Active Lane Worktrees", "当前工作区尚无通道工作树"))
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(RelayBauhausDesign.espressoInk)
+                        Text(
+                            viewModel.L(
+                                "Start a run with RelayIDE run from the terminal to stream real-time per-lane file ownership via FSEvents.",
+                                "在终端执行 RelayIDE run 启动运行后，文件系统事件将实时刷新每条通道的变更文件与增删行数。"
+                            )
+                        )
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
+                RelayAdaptiveScrollContainer {
+                    let pairedRows = stride(from: 0, to: viewModel.lanes.count, by: 2).map { startIdx in
+                        Array(viewModel.lanes[startIdx..<min(startIdx + 2, viewModel.lanes.count)])
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(pairedRows.enumerated()), id: \.offset) { _, rowLanes in
+                            HStack(alignment: .top, spacing: 8) {
+                                ForEach(rowLanes) { lane in
+                                    liveLaneOwnershipCard(lane)
+                                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                                }
+                                if rowLanes.count == 1 && viewModel.lanes.count > 1 {
+                                    Color.clear.frame(maxWidth: .infinity)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .padding(10)
+        .background(RelayBauhausDesign.warmSandpaper)
+    }
+
+    private func liveLaneOwnershipCard(_ lane: ManagedWorktreeLane) -> some View {
+        let snap = viewModel.liveFileOwnershipByLane[lane.id]
+            ?? RelayLaneFileOwnershipSnapshot(
+                laneID: lane.id,
+                worktreePath: lane.worktreePath,
+                startCommitOID: lane.baseCommitOID,
+                files: []
+            )
+        let liveRec = viewModel.liveRunLane(forID: lane.id)
+
+        return RelayBauhausCard(padding: 10) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 6) {
+                    RelayVendorBadge(vendor: lane.assignedVendor, compact: true, language: viewModel.currentLanguage)
+                    Text(lane.id)
+                        .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                        .foregroundStyle(RelayBauhausDesign.espressoInk)
+                    if let liveRec {
+                        Text(liveRec.status.localizedLabel(in: viewModel.currentLanguage))
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(RelayBauhausDesign.runStatusColor(liveRec.status))
+                    }
+                    Spacer(minLength: 4)
+                    Text("+\(snap.totalAdditions) / -\(snap.totalDeletions)")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(RelayBauhausDesign.agySignalGreen)
+                    Text(viewModel.L("\(snap.files.count) files", "\(snap.files.count) 个文件"))
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                }
+
+                if !snap.startCommitOID.isEmpty {
+                    Text(viewModel.L("start: \(snap.startCommitOID)", "起点: \(snap.startCommitOID)"))
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider().overlay(RelayBauhausDesign.hairlineBorder)
+
+                if snap.files.isEmpty {
+                    Text(viewModel.L("No changed or untracked files", "暂无变更或未跟踪文件"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(RelayBauhausDesign.mutedStoneInk)
+                        .padding(.vertical, 2)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(snap.files) { file in
+                            HStack(spacing: 6) {
+                                Text(file.relativePath)
+                                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(RelayBauhausDesign.espressoInk)
+                                    .fixedSize(horizontal: false, vertical: true)
+
+                                Spacer(minLength: 4)
+
+                                Text(file.worktreeState.localizedLabel(in: viewModel.currentLanguage))
+                                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(
+                                        file.worktreeState == .committedToLane
+                                            ? RelayBauhausDesign.agySignalGreen
+                                            : RelayBauhausDesign.vibeOchre
+                                    )
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1.5)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                            .fill(
+                                                file.worktreeState == .committedToLane
+                                                    ? RelayBauhausDesign.greenWash
+                                                    : RelayBauhausDesign.ochreWash
+                                            )
+                                    )
+
+                                Text("+\(file.additions) -\(file.deletions)")
+                                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                    .monospacedDigit()
+                                    .foregroundStyle(RelayBauhausDesign.graphiteInk)
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3.5)
+                            .background(
+                                RoundedRectangle(cornerRadius: RelayBauhausDesign.compactRadius, style: .continuous)
+                                    .fill(RelayBauhausDesign.sandstoneStrip.opacity(0.45))
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Top Vendor Territory Filter & Arc Control Bar

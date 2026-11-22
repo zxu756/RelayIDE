@@ -619,12 +619,16 @@ public struct RelayStudioRootWorkbenchView: View {
         case .ptyGrid:
             return "\(viewModel.lanes.count)"
         case .dagPipeline:
-            return "\(viewModel.dagSpec.tasks.count)"
+            return viewModel.isDemoMode
+                ? "\(viewModel.dagSpec.tasks.count)"
+                : "\(viewModel.activeRun?.lanes.count ?? 0)"
         case .semanticMerge:
             let c = viewModel.totalUnresolvedConflicts
             return c > 0 ? "\(c)!" : viewModel.L("OK", "就绪")
         case .territoryMap:
-            return "\(viewModel.isometricTiles.count)"
+            return viewModel.isDemoMode
+                ? "\(viewModel.isometricTiles.count)"
+                : "\(viewModel.totalLiveOwnedFilesCount)"
         case .guardrailPlugins:
             return viewModel.isDemoMode ? "\(viewModel.policyPack.entries.count)" : nil
         }
@@ -1132,22 +1136,6 @@ public struct RelayPreferencesModalView: View {
                         RelayLanguageTogglePill(viewModel: viewModel)
                     }
 
-                    if viewModel.isDemoMode {
-                        Divider().overlay(RelayBauhausDesign.hairlineBorder)
-
-                        Toggle(
-                            viewModel.L(
-                                "Auto-Run 3-Way Semantic AST Merge on .relay Handoff (Disabled before M3)",
-                                "收到 .relay 交接产物时自动执行三路 AST 语义合并（M3 前默认关闭）"
-                            ),
-                            isOn: Binding(
-                                get: { viewModel.coordinator.preferences.snapshot.autoRunSemanticMergeOnHandoff },
-                                set: { viewModel.coordinator.preferences.snapshot.autoRunSemanticMergeOnHandoff = $0 }
-                            )
-                        )
-                        .font(.system(size: 12))
-                    }
-
                     if let cap = viewModel.activeBudgetCeilingUSD {
                         HStack {
                             Text(viewModel.L("Global Workspace USD Budget Ceiling", "工作区全局美元预算上限"))
@@ -1317,11 +1305,42 @@ public enum RelayRetinaScreenshotExporter {
         public let pixelHeight: Int
     }
 
+    public static func prepareWorkbenchViewModel(
+        projectBundleURL: URL? = nil,
+        loadDemoWorkspace: Bool? = nil,
+        initialPane: RelayStudioPane = .ptyGrid,
+        language: RelayLanguage? = nil
+    ) throws -> RelayStudioViewModel {
+        if let explicitBundleURL = projectBundleURL {
+            guard RelayProjectDatabase.bundleExists(at: explicitBundleURL) else {
+                throw RelayIDEError.workspaceBundleNotFound(explicitBundleURL.path)
+            }
+        }
+        let resolvedLanguage = language ?? .en
+        let shouldLoadDemo = loadDemoWorkspace ?? (projectBundleURL == nil)
+        let isolatedLocalizer = RelayLocalizer(
+            language: resolvedLanguage,
+            persistToUserDefaults: false
+        )
+        let vm = RelayStudioViewModel(
+            projectBundleURL: projectBundleURL,
+            initialPane: initialPane,
+            localizer: isolatedLocalizer,
+            loadDemoWorkspace: shouldLoadDemo
+        )
+        for toast in vm.coordinator.toastCenter.visibleToasts {
+            vm.coordinator.toastCenter.dismiss(id: toast.id)
+        }
+        return vm
+    }
+
     /// Exports all 4 flagship `2720 × 1680` Retina PNG screenshots into `outputDirectory`.
     /// When `language == .zhHans`, exports `-zh.png` files (`screenshot-*-zh.png`) while keeping English `.png` files untouched.
     @discardableResult
     public static func exportFlagshipScreenshots(
         to outputDirectory: URL,
+        projectBundleURL: URL? = nil,
+        loadDemoWorkspace: Bool? = nil,
         language: RelayLanguage? = nil
     ) throws -> [ExportedScreenshotRecord] {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
@@ -1335,7 +1354,7 @@ public enum RelayRetinaScreenshotExporter {
                 { vm in
                     vm.selectPane(.ptyGrid)
                     vm.terminalLayoutPreset = .quad2x2
-                    vm.isBroadcastBarExpanded = true
+                    vm.isBroadcastBarExpanded = vm.isDemoMode
                     vm.isBottomDrawerPresented = false
                     vm.isCommandPalettePresented = false
                 }
@@ -1344,7 +1363,9 @@ public enum RelayRetinaScreenshotExporter {
                 "screenshot-semantic-merge",
                 { vm in
                     vm.selectPane(.semanticMerge)
-                    vm.selectedMergeFilePath = "Sources/Auth/AuthSessionManager.swift"
+                    if vm.isDemoMode {
+                        vm.selectedMergeFilePath = "Sources/Auth/AuthSessionManager.swift"
+                    }
                     vm.isBottomDrawerPresented = false
                     vm.isCommandPalettePresented = false
                 }
@@ -1353,7 +1374,9 @@ public enum RelayRetinaScreenshotExporter {
                 "screenshot-territory-map",
                 { vm in
                     vm.selectPane(.territoryMap)
-                    vm.selectedIsometricModulePath = "Sources/Auth/AuthSessionManager.swift"
+                    if vm.isDemoMode {
+                        vm.selectedIsometricModulePath = "Sources/Auth/AuthSessionManager.swift"
+                    }
                     vm.territoryVendorFilter = nil
                     vm.showCrossLaneCouplingOnly = false
                     vm.isBottomDrawerPresented = false
@@ -1363,7 +1386,7 @@ public enum RelayRetinaScreenshotExporter {
             (
                 "screenshot-guardrails",
                 { vm in
-                    vm.selectPane(.guardrailPlugins)
+                    vm.selectPane(vm.isDemoMode ? .guardrailPlugins : .dagPipeline)
                     vm.isBottomDrawerPresented = false
                     vm.isCommandPalettePresented = false
                 }
@@ -1373,14 +1396,11 @@ public enum RelayRetinaScreenshotExporter {
         var exported: [ExportedScreenshotRecord] = []
         for spec in specs {
             let fileName = spec.stem + fileExtensionSuffix
-            let isolatedLocalizer = RelayLocalizer(
-                language: resolvedLanguage,
-                persistToUserDefaults: false
-            )
-            let vm = RelayStudioViewModel(
+            let vm = try prepareWorkbenchViewModel(
+                projectBundleURL: projectBundleURL,
+                loadDemoWorkspace: loadDemoWorkspace,
                 initialPane: .ptyGrid,
-                localizer: isolatedLocalizer,
-                loadDemoWorkspace: true
+                language: resolvedLanguage
             )
             spec.configure(vm)
             // Ensure zero transient toasts occlude the exported Retina frame
