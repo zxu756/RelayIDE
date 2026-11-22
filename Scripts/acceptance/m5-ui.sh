@@ -10,7 +10,7 @@
 # isolated HOME, copied relay.sh/relay_util.py, stub agent, and decoy CLIs first in PATH.
 #
 # Usage:
-#   Scripts/acceptance/m5-ui.sh [--quick] [--record [--allow-dirty]] [--mutation 1|2|3|4|5|6]
+#   Scripts/acceptance/m5-ui.sh [--quick] [--record [--allow-dirty]] [--mutation 1|2|3|4|5|6|7|8|9]
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -24,7 +24,7 @@ ONLY_ROW="${RELAY_M5_ONLY_ROW:-}"
 
 usage() {
     cat <<'EOF' >&2
-Usage: Scripts/acceptance/m5-ui.sh [--quick] [--record [--allow-dirty]] [--mutation 1|2|3|4|5|6]
+Usage: Scripts/acceptance/m5-ui.sh [--quick] [--record [--allow-dirty]] [--mutation 1|2|3|4|5|6|7|8|9]
 
 Options:
   --quick              Fast smoke subset: runs Rows 1, 4, 6 (--lang en), 7, 8, 9; explicitly lists
@@ -32,7 +32,7 @@ Options:
   --record             Write the full suite output to reports/m5-ui.txt (requires a clean working
                        tree outside reports/ unless --allow-dirty is also passed).
   --allow-dirty        Allow --record when the working tree has uncommitted changes outside reports/.
-  --mutation <1..6>    Patch an isolated temporary copy of the package, build it, run the target row
+  --mutation <1..9>    Patch an isolated temporary copy of the package, build it, run the target row
                        of m5-ui.sh against it, delete the copy, and verify the target row turns RED:
                          1 (M5-Mut-1): observer reads only lanes/<lane>.pty, skips .relay/*.log -> Row 1 fails
                          2 (M5-Mut-2): disable workspace.sqlite-wal observer callback -> Row 3 fails
@@ -40,6 +40,9 @@ Options:
                          4 (M5-Mut-4): skip git merge-file -p on conflict -> Row 5 fails
                          5 (M5-Mut-5): add +7 to non-demo DAG lane count -> Row 6 fails
                          6 (M5-Mut-6): inject ungrounded constant (1.00x / 15000) in non-demo top bar -> Row 6 fails
+                         7 (M5-Mut-7): change ⌘1 terminal header exit code to abs(x - 1) -> Row 6 fails
+                         8 (M5-Mut-8): add +0.01s to a lane's duration on non-demo ⌘2 DAG node -> Row 6 fails
+                         9 (M5-Mut-9): flip a lane card's status label on non-demo ⌘4 ownership view -> Row 6 fails
 EOF
 }
 
@@ -59,7 +62,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --mutation)
             if [[ $# -lt 2 ]]; then
-                echo "error: --mutation requires an argument (1..6)" >&2
+                echo "error: --mutation requires an argument (1..9)" >&2
                 usage
                 exit 2
             fi
@@ -104,8 +107,11 @@ case "${MUTATION}" in
     4|M5-Mut-4|mut4) MUTATION="4" ;;
     5|M5-Mut-5|mut5) MUTATION="5" ;;
     6|M5-Mut-6|mut6) MUTATION="6" ;;
+    7|M5-Mut-7|mut7) MUTATION="7" ;;
+    8|M5-Mut-8|mut8) MUTATION="8" ;;
+    9|M5-Mut-9|mut9) MUTATION="9" ;;
     *)
-        echo "error: unsupported --mutation '${MUTATION}' (expected 1..6)" >&2
+        echo "error: unsupported --mutation '${MUTATION}' (expected 1..9)" >&2
         exit 2
         ;;
 esac
@@ -168,16 +174,23 @@ for line in sys.stdin:
 }
 
 # ------------------------------------------------------------------
-# Isolated Temporary-Copy Mutation Mode (--mutation 1..6)
+# Isolated Temporary-Copy Mutation Mode (--mutation 1..9)
 # ------------------------------------------------------------------
+MUT_TMP_DIR=""
+cleanup_mut_tmp() {
+    if [[ -n "${MUT_TMP_DIR:-}" && -e "${MUT_TMP_DIR}" ]]; then
+        rm -rf "${MUT_TMP_DIR}" 2>/dev/null || true
+    fi
+}
+
 run_mutation_mode() {
     local mut_id="$1"
     local git_before
     git_before="$(git status --porcelain)"
 
-    local mut_tmp
-    mut_tmp="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/relayide-m5-mut${mut_id}.XXXXXX")" && pwd -P)"
-    trap 'rm -rf "${mut_tmp}" 2>/dev/null || true' EXIT INT TERM HUP
+    MUT_TMP_DIR="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/relayide-m5-mut${mut_id}.XXXXXX")" && pwd -P)"
+    local mut_tmp="${MUT_TMP_DIR}"
+    trap 'cleanup_mut_tmp' EXIT INT TERM HUP
 
     local pkg_copy="${mut_tmp}/pkg"
     mkdir -p "${pkg_copy}/Tests/RelayIDETests"
@@ -226,6 +239,24 @@ run_mutation_mode() {
             target_row_num="6"
             target_rel="Sources/RelayStudioViews/RelayMainWindowAndScreenshotExporter.swift"
             ;;
+        7)
+            mut_label="M5-Mut-7 (change ⌘1 terminal pane header exit code to abs(x - 1))"
+            expected_fail_row="Row 6"
+            target_row_num="6"
+            target_rel="Sources/RelayStudioViews/PTYMultiplexerAndDAGViews.swift"
+            ;;
+        8)
+            mut_label="M5-Mut-8 (add +0.01s to lane ordinal 0 duration on non-demo ⌘2 DAG node)"
+            expected_fail_row="Row 6"
+            target_row_num="6"
+            target_rel="Sources/RelayStudioViews/PTYMultiplexerAndDAGViews.swift"
+            ;;
+        9)
+            mut_label="M5-Mut-9 (flip lane ordinal 0 status label on non-demo ⌘4 ownership card)"
+            expected_fail_row="Row 6"
+            target_row_num="6"
+            target_rel="Sources/RelayStudioViews/IsometricTerritoryMapCanvasView.swift"
+            ;;
     esac
 
     echo "================================================================"
@@ -258,6 +289,20 @@ elif mut_id == "5":
 elif mut_id == "6":
     old = "viewModel.activeWaveSummaryLabel,"
     new = '"\\(viewModel.activeWaveSummaryLabel) · 1.00× · 15000", // M5-Mut-6'
+elif mut_id == "7":
+    old = 'let exitSuffix = liveRec.exitCode.map { viewModel.L(" · exit \\($0)", " · 退出码 \\($0)") } ?? ""'
+    new = 'let exitSuffix = liveRec.exitCode.map { viewModel.L(" · exit \\(abs($0 - 1))", " · 退出码 \\(abs($0 - 1))") } ?? "" // M5-Mut-7'
+elif mut_id == "8":
+    old = """        let timingLine: String = {
+            if let s = startOffset, let f = finishOffset, let dur = viewModel.formattedLiveLaneDuration(forLane: lane.laneID) {
+                return String(format: "+%.2fs → +%.2fs · %@", s, f, dur)"""
+    new = """        let timingLine: String = {
+            if let s = startOffset, let f = finishOffset, let dur = viewModel.formattedLiveLaneDuration(forLane: lane.laneID) {
+                let shownDur = (lane.ordinal == 0 && lane.startedAt != nil && lane.finishedAt != nil) ? String(format: "%.2fs", max(0.0, lane.finishedAt!.timeIntervalSince(lane.startedAt!)) + 0.01) : dur // M5-Mut-8
+                return String(format: "+%.2fs → +%.2fs · %@", s, f, shownDur)"""
+elif mut_id == "9":
+    old = "                        Text(liveRec.status.localizedLabel(in: viewModel.currentLanguage))"
+    new = "                        Text(((liveRec.ordinal == 0) ? (liveRec.status == .succeeded ? RelayRunStatus.failed : .succeeded) : liveRec.status).localizedLabel(in: viewModel.currentLanguage)) // M5-Mut-9"
 else:
     raise SystemExit(f"unknown mutation id: {mut_id}")
 
@@ -295,27 +340,31 @@ PY
     set -e
 
     echo "--- Inner m5-ui.sh summary against mutated copy (exit=${suite_rc}) ---"
-    grep -E '^(\[(PASS|FAIL|RECORD|SKIP)\]|ALL M5|M5 UI ACCEPTANCE|Row [0-9]+ error:)' "${suite_out}" || cat "${suite_out}"
+    grep -E '^(\[(PASS|FAIL|RECORD|SKIP)\]|ALL M5|M5 UI ACCEPTANCE|Row [0-9]+ error:|[[:space:]]*Violations:)' "${suite_out}" || cat "${suite_out}"
 
     rm -rf "${mut_tmp}/pkg"
     local git_after
     git_after="$(git status --porcelain)"
     if [[ "${git_after}" != "${git_before}" ]]; then
         echo "[FAIL] M5-Mut-${mut_id}: repository git status changed during mutation check!" >&2
+        cleanup_mut_tmp
         return 1
     fi
 
     if [[ "${suite_rc}" -eq 0 ]]; then
         echo "[FAIL] M5-Mut-${mut_id}: m5-ui.sh unexpectedly exited 0 (mutation NOT caught)" >&2
         cat "${suite_out}" >&2
+        cleanup_mut_tmp
         return 1
     fi
     if ! grep -Fq "[FAIL] ${expected_fail_row}:" "${suite_out}"; then
         echo "[FAIL] M5-Mut-${mut_id}: expected '[FAIL] ${expected_fail_row}:' in output, not found" >&2
         cat "${suite_out}" >&2
+        cleanup_mut_tmp
         return 1
     fi
 
+    cleanup_mut_tmp
     echo "================================================================"
     echo "[PASS] M5-Mut-${mut_id} CAUGHT: inner m5-ui.sh exited ${suite_rc} with [FAIL] ${expected_fail_row}; working tree untouched"
     echo "================================================================"

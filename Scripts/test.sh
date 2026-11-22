@@ -48,6 +48,7 @@ Usage:
   Scripts/test.sh release [--record]
 
 Acceptance output goes to a temporary directory. Only with --record are reports/*.txt rewritten.
+release runs full unit tests, M0-M5 acceptance suites, and m5-ui.sh --mutation 1..9.
 No mode opens the desktop window. Environment: RELAY_SWIFT_JOBS=<n> caps build parallelism.
 
 Modules supported by `scope`:
@@ -340,8 +341,8 @@ run_release() {
     run_acceptance_script m4-budget.sh
     run_acceptance_script m5-ui.sh
 
-    echo "==> [release] Running m5-ui.sh temporary-copy mutations 1..6..."
-    for m5_mut in 1 2 3 4 5 6; do
+    echo "==> [release] Running m5-ui.sh temporary-copy mutations 1..9..."
+    for m5_mut in 1 2 3 4 5 6 7 8 9; do
         "${ROOT_DIR}/Scripts/acceptance/m5-ui.sh" --mutation "${m5_mut}"
     done
 

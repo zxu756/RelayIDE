@@ -83,9 +83,41 @@ enum M5NumberProvenanceAndFieldAuditor {
         let logSpendsByLane: [String: IndependentLaneLogSpend]
         let gitOwnershipByLane: [String: IndependentGitLaneOwnership]
         let reconstructedConflicts: [RelayReconstructedMergeConflictBlock]
+        let ptyRenderedRowStrings: [String]
+        let verifyOutputLines: [String]
+        let conflictBlockLines: [String]
         /// Legacy loose set used ONLY during Step 1A RED demonstration.
         let legacyLooseNumbers: Set<String>
         let legacyTerminalLogText: String
+    }
+
+    enum AuditRenderSurface: String, Sendable, Hashable, CaseIterable {
+        case ptyGrid = "ptyGrid"
+        case dagPipeline = "dagPipeline"
+        case semanticMerge = "semanticMerge"
+        case territoryMap = "territoryMap"
+        case guardrailPlugins = "guardrailPlugins"
+        case bottomDrawer = "bottomDrawer"
+        case preferencesModal = "preferencesModal"
+
+        init(pane: RelayStudioPane) {
+            switch pane {
+            case .ptyGrid: self = .ptyGrid
+            case .dagPipeline: self = .dagPipeline
+            case .semanticMerge: self = .semanticMerge
+            case .territoryMap: self = .territoryMap
+            case .guardrailPlugins: self = .guardrailPlugins
+            }
+        }
+
+        var rendersPTYGridStage: Bool {
+            switch self {
+            case .ptyGrid, .bottomDrawer, .preferencesModal:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     // MARK: - Complete Number Token Extraction (No Substring Matching)
@@ -310,6 +342,9 @@ enum M5NumberProvenanceAndFieldAuditor {
         var logSpends: [String: IndependentLaneLogSpend] = [:]
         var gitOwnership: [String: IndependentGitLaneOwnership] = [:]
         var reconstructedConflicts: [RelayReconstructedMergeConflictBlock] = []
+        var ptyRenderedRows: [String] = []
+        var verifyLines: [String] = []
+        var conflictLinesCollected: [String] = []
 
         let sqliteURL = bundleURL.appendingPathComponent("workspace.sqlite")
         identifiersSet.insert(bundleURL.deletingPathExtension().lastPathComponent)
@@ -599,9 +634,11 @@ enum M5NumberProvenanceAndFieldAuditor {
                             for tok in try extractCompleteNumberTokens(from: ptyText) { legacyLoose.insert(tok) }
                         }
                     }
-                    let vtLines = refVT.snapshot().visibleGrid.map { row in
+                    let vtRowList = refVT.snapshot().visibleGrid.map { row in
                         row.map { $0.grapheme }.joined().trimmingCharacters(in: .whitespaces)
-                    }.joined(separator: "\n")
+                    }.filter { !$0.isEmpty }
+                    ptyRenderedRows.append(contentsOf: vtRowList)
+                    let vtLines = vtRowList.joined(separator: "\n")
                     if !vtLines.isEmpty {
                         ptyNums.formUnion(try extractSafeLogNumbers(from: vtLines, strippingIdentifiers: sortedIdents))
                     }
@@ -612,6 +649,10 @@ enum M5NumberProvenanceAndFieldAuditor {
                     for blk in reconstructedConflicts {
                         if let text = blk.conflictText {
                             mergeNums.formUnion(try extractSafeLogNumbers(from: text, strippingIdentifiers: sortedIdents))
+                            for ln in text.components(separatedBy: .newlines) {
+                                let t = ln.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !t.isEmpty { conflictLinesCollected.append(t) }
+                            }
                         }
                     }
                     if let verify = integ.verify {
@@ -624,6 +665,10 @@ enum M5NumberProvenanceAndFieldAuditor {
                         if let vText = try? String(contentsOfFile: vPath, encoding: .utf8), !vText.isEmpty {
                             legacyTermLog += "\n" + vText
                             mergeNums.formUnion(try extractSafeLogNumbers(from: vText, strippingIdentifiers: sortedIdents))
+                            for ln in vText.components(separatedBy: .newlines) {
+                                let t = ln.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if !t.isEmpty { verifyLines.append(t) }
+                            }
                             for tok in try extractCompleteNumberTokens(from: vText) { legacyLoose.insert(tok) }
                         }
                     }
@@ -674,6 +719,9 @@ enum M5NumberProvenanceAndFieldAuditor {
             logSpendsByLane: logSpends,
             gitOwnershipByLane: gitOwnership,
             reconstructedConflicts: reconstructedConflicts,
+            ptyRenderedRowStrings: ptyRenderedRows,
+            verifyOutputLines: verifyLines,
+            conflictBlockLines: conflictLinesCollected,
             legacyLooseNumbers: legacyLoose,
             legacyTerminalLogText: legacyTermLog
         )
@@ -744,7 +792,7 @@ enum M5NumberProvenanceAndFieldAuditor {
         }
     }
 
-    private static func normalizePDFSpacingForFieldParsing(_ raw: String) throws -> String {
+    static func normalizePDFSpacingForFieldParsing(_ raw: String) throws -> String {
         // Normalize macOS PDFKit ToUnicode Kangxi Radicals (e.g. U+2F42 '⽂' -> U+6587 '文') without altering ASCII/symbols
         var scalars = String.UnicodeScalarView()
         scalars.reserveCapacity(raw.unicodeScalars.count)
@@ -772,6 +820,988 @@ enum M5NumberProvenanceAndFieldAuditor {
         return s
     }
 
+    private static func formatViolation(
+        surface: AuditRenderSurface,
+        language: RelayLanguage,
+        lane: String,
+        field: String,
+        got: String,
+        expected: String
+    ) -> String {
+        "[pane=\(surface.rawValue) lang=\(language.rawValue) lane=\(lane) field=\(field)] got=\(got) expected=\(expected)"
+    }
+
+    private static func formatMultiset(_ items: [String]) -> String {
+        if items.isEmpty { return "[]" }
+        var counts: [String: Int] = [:]
+        for item in items { counts[item, default: 0] += 1 }
+        let body = counts.keys.sorted().map { k in
+            let c = counts[k] ?? 0
+            return c == 1 ? "'\(k)'" : "'\(k)'×\(c)"
+        }.joined(separator: ", ")
+        return "[\(body)]"
+    }
+
+    private static func compareExact(
+        got: [String],
+        expected: [String],
+        surface: AuditRenderSurface,
+        language: RelayLanguage,
+        lane: String,
+        field: String,
+        into violations: inout [String]
+    ) {
+        if got != expected {
+            violations.append(
+                formatViolation(
+                    surface: surface,
+                    language: language,
+                    lane: lane,
+                    field: field,
+                    got: "\(got)",
+                    expected: "\(expected)"
+                )
+            )
+        }
+    }
+
+    private static func compareMultiset(
+        got: [String],
+        expected: [String],
+        surface: AuditRenderSurface,
+        language: RelayLanguage,
+        lane: String,
+        field: String,
+        into violations: inout [String]
+    ) {
+        var gotCounts: [String: Int] = [:]
+        for x in got { gotCounts[x, default: 0] += 1 }
+        var expCounts: [String: Int] = [:]
+        for x in expected { expCounts[x, default: 0] += 1 }
+        if gotCounts != expCounts {
+            violations.append(
+                formatViolation(
+                    surface: surface,
+                    language: language,
+                    lane: lane,
+                    field: field,
+                    got: formatMultiset(got),
+                    expected: formatMultiset(expected)
+                )
+            )
+        }
+    }
+
+    private static func statusAlternationPattern(in language: RelayLanguage) -> String {
+        RelayRunStatus.allCases
+            .map { $0.localizedLabel(in: language) }
+            .sorted { $0.count > $1.count }
+            .map { NSRegularExpression.escapedPattern(for: $0) }
+            .joined(separator: "|")
+    }
+
+    private static func scrubUIChromeText(
+        normalizedPDF: String,
+        surface: AuditRenderSurface,
+        orderedLanes: [RelayRunLaneRecord],
+        truth: AuditGroundTruth
+    ) throws -> String {
+        var text = normalizedPDF
+
+        if surface.rendersPTYGridStage && !orderedLanes.isEmpty {
+            let gutterRx = try NSRegularExpression(pattern: #"^(?:0[1-9]|1[0-9]|2[0-6])\s+(?!checkpoints\b|个快照)(.*)$"#)
+            let normVTRows = try truth.ptyRenderedRowStrings.map {
+                try normalizePDFSpacingForFieldParsing($0).trimmingCharacters(in: .whitespaces)
+            }.filter { !$0.isEmpty }
+
+            var pendingWrappedTails: [String: Int] = [:]
+            var keptLines: [String] = []
+            for line in text.components(separatedBy: "\n") {
+                let ns = line as NSString
+                if let m = gutterRx.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) {
+                    let head = ns.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespaces)
+                    if !head.isEmpty && head != "▋" {
+                        for vtRow in normVTRows where vtRow.hasPrefix(head) && vtRow.count > head.count {
+                            let tail = String(vtRow.dropFirst(head.count)).trimmingCharacters(in: .whitespaces)
+                            if !tail.isEmpty {
+                                pendingWrappedTails[tail, default: 0] += 1
+                            }
+                        }
+                    }
+                    continue
+                }
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty, let c = pendingWrappedTails[trimmed], c > 0 {
+                    pendingWrappedTails[trimmed] = c - 1
+                    continue
+                }
+                keptLines.append(line)
+            }
+            text = keptLines.joined(separator: "\n")
+        }
+
+        if surface == .semanticMerge {
+            var transcriptLineCounts: [String: Int] = [:]
+            for rawLine in (truth.verifyOutputLines + truth.conflictBlockLines) {
+                let normLine = try normalizePDFSpacingForFieldParsing(rawLine).trimmingCharacters(in: .whitespaces)
+                if !normLine.isEmpty {
+                    transcriptLineCounts[normLine, default: 0] += 1
+                }
+            }
+            var keptLines: [String] = []
+            for line in text.components(separatedBy: "\n") {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty, let c = transcriptLineCounts[trimmed], c > 0 {
+                    transcriptLineCounts[trimmed] = c - 1
+                    continue
+                }
+                keptLines.append(line)
+            }
+            text = keptLines.joined(separator: "\n")
+            if truth.latestRun?.integration?.verify != nil {
+                let cmdRx = try NSRegularExpression(pattern: #"(?m)\$\s+[^\n]*$"#)
+                text = cmdRx.stringByReplacingMatches(
+                    in: text,
+                    range: NSRange(location: 0, length: (text as NSString).length),
+                    withTemplate: ""
+                )
+            }
+        }
+
+        return text
+    }
+
+    static func verifyLedgerAgainstLogMD(truth: AuditGroundTruth) -> [String] {
+        if useLegacyLooseCheckForRedProof {
+            return []
+        }
+        guard let run = truth.latestRun else {
+            return []
+        }
+        var violations: [String] = []
+        let orderedLanes = run.lanes.sorted(by: { $0.ordinal < $1.ordinal })
+        var logSumUSD = 0.0
+        var logUnpricedTok = 0
+        for lane in orderedLanes {
+            if let ls = truth.logSpendsByLane[lane.laneID], ls.hasStepRecord {
+                if ls.costSource != lane.costSource {
+                    violations.append("[pane=sqliteLedger lang=all lane=\(lane.laneID) field=costSource] got=\(lane.costSource ?? "nil") expected=\(ls.costSource)")
+                }
+                if ls.costSource == "usd", let lUSD = ls.costUSD {
+                    logSumUSD += lUSD
+                    if abs((lane.costUSD ?? -1) - lUSD) > 1e-6 {
+                        violations.append("[pane=sqliteLedger lang=all lane=\(lane.laneID) field=costUSD] got=\(String(describing: lane.costUSD)) expected=\(lUSD)")
+                    }
+                } else if ls.costSource == "unpriced", let lTok = ls.tokens {
+                    logUnpricedTok += lTok
+                    if lane.tokens != lTok {
+                        violations.append("[pane=sqliteLedger lang=all lane=\(lane.laneID) field=tokens] got=\(String(describing: lane.tokens)) expected=\(lTok)")
+                    }
+                }
+            }
+        }
+        if abs(run.totalCostUSD - logSumUSD) > 1e-6 {
+            violations.append("[pane=sqliteLedger lang=all lane=<run> field=totalCostUSD] got=\(run.totalCostUSD) expected=\(logSumUSD)")
+        }
+        if run.unpricedTokens != logUnpricedTok {
+            violations.append("[pane=sqliteLedger lang=all lane=<run> field=unpricedTokens] got=\(run.unpricedTokens) expected=\(logUnpricedTok)")
+        }
+        return violations
+    }
+
+    /// Audits a SINGLE rendered PDF surface in isolation: extracts EVERY displayed occurrence of all 11 key-field
+    /// categories via regular expressions (never substring `contains`), verifying per-lane exact equality wherever
+    /// lane identifiers and fields sit adjacent on the panel, plus panel-wide multiset equality across all occurrences.
+    static func verifySingleRenderKeyFields(
+        pdfText rawPDF: String,
+        surface: AuditRenderSurface,
+        language: RelayLanguage,
+        truth: AuditGroundTruth
+    ) throws -> [String] {
+        if useLegacyLooseCheckForRedProof {
+            return []
+        }
+
+        let normPDF = try normalizePDFSpacingForFieldParsing(rawPDF)
+        let isZh = language.isChinese
+        let run = truth.latestRun
+        let orderedLanes = run?.lanes.sorted(by: { $0.ordinal < $1.ordinal }) ?? []
+        let uiPDF = try scrubUIChromeText(
+            normalizedPDF: normPDF,
+            surface: surface,
+            orderedLanes: orderedLanes,
+            truth: truth
+        )
+
+        var violations: [String] = []
+        let expectedLaneCount = orderedLanes.count
+        let expectedFinishedCount = orderedLanes.filter(\.status.isTerminal).count
+        let expectedConflictCount = run?.integration?.merges.reduce(0) { $0 + $1.conflicts.count } ?? 0
+        let expectedTotalOwnedFiles = orderedLanes.reduce(0) { $0 + (truth.gitOwnershipByLane[$1.laneID]?.files.count ?? 0) }
+        let expectedTotalAdd = orderedLanes.reduce(0) { $0 + (truth.gitOwnershipByLane[$1.laneID]?.totalAdditions ?? 0) }
+        let expectedTotalDel = orderedLanes.reduce(0) { $0 + (truth.gitOwnershipByLane[$1.laneID]?.totalDeletions ?? 0) }
+        let expectedTotalCommitted = orderedLanes.reduce(0) { $0 + (truth.gitOwnershipByLane[$1.laneID]?.committedCount ?? 0) }
+        let expectedTotalUncommitted = orderedLanes.reduce(0) { $0 + (truth.gitOwnershipByLane[$1.laneID]?.uncommittedCount ?? 0) }
+        let statusAlt = statusAlternationPattern(in: language)
+
+        func expectedDuration(_ lane: RelayRunLaneRecord) -> String? {
+            guard let s = lane.startedAt, let f = lane.finishedAt else { return nil }
+            return String(format: "%.2fs", max(0.0, f.timeIntervalSince(s)))
+        }
+        func expectedSpendUSD(_ lane: RelayRunLaneRecord) -> String? {
+            guard lane.costSource == "usd", let usd = lane.costUSD else { return nil }
+            return RelayBauhausDesign.formatRunUSD(usd)
+        }
+        func expectedUnpricedTokens(_ lane: RelayRunLaneRecord) -> String? {
+            if lane.costSource == "unpriced" || (lane.costUSD == nil && (lane.tokens ?? 0) > 0) {
+                if let tok = lane.tokens, tok > 0 { return "\(tok)" }
+            }
+            return nil
+        }
+
+        // ------------------------------------------------------------------
+        // 1. Top Bar Wave/Lane Count & Run Status + Left Rail Badges + Store Strip
+        // ------------------------------------------------------------------
+        let wavePat = isZh
+            ? #"(\d+)/(\d+)\s*条通道\s*·\s*("# + statusAlt + #")"#
+            : #"(\d+)/(\d+)\s+Lanes\s*·\s*("# + statusAlt + #")"#
+        let waveCaps = try regexCaptures(wavePat, in: uiPDF).map { "\($0[0])/\($0[1])·\($0[2])" }
+        if let run {
+            let expWave = ["\(expectedFinishedCount)/\(expectedLaneCount)·\(run.status.localizedLabel(in: language))"]
+            compareExact(got: waveCaps, expected: expWave, surface: surface, language: language, lane: "<topBar>", field: "activeWaveSummary", into: &violations)
+        } else {
+            compareExact(got: waveCaps, expected: [], surface: surface, language: language, lane: "<topBar>", field: "activeWaveSummary", into: &violations)
+            let idlePat = isZh ? #"(\d+)\s*项任务\s*·\s*(空闲)"# : #"(\d+)\s+Tasks\s*·\s*(Idle)"#
+            let idleCaps = try regexCaptures(idlePat, in: uiPDF).map { "\($0[0])·\($0[1])" }
+            let expIdle = [isZh ? "0·空闲" : "0·Idle"]
+            compareExact(got: idleCaps, expected: expIdle, surface: surface, language: language, lane: "<topBar>", field: "emptyIdleSummary", into: &violations)
+        }
+
+        let b1Caps = try regexCaptures(#"([^\s]+)\s+⌘1(?![0-9–])"#, in: uiPDF).map { $0[0] }
+        compareExact(got: b1Caps, expected: ["\(expectedLaneCount)"], surface: surface, language: language, lane: "<leftRail>", field: "badge⌘1LaneCount", into: &violations)
+
+        let b2Caps = try regexCaptures(#"([^\s]+)\s+⌘2"#, in: uiPDF).map { $0[0] }
+        compareExact(got: b2Caps, expected: ["\(expectedLaneCount)"], surface: surface, language: language, lane: "<leftRail>", field: "badge⌘2LaneCount", into: &violations)
+
+        let b3Caps = try regexCaptures(#"([^\s]+)\s+⌘3"#, in: uiPDF).map { $0[0] }
+        if expectedConflictCount > 0 {
+            compareExact(got: b3Caps, expected: ["\(expectedConflictCount)!"], surface: surface, language: language, lane: "<leftRail>", field: "badge⌘3ConflictCount", into: &violations)
+        } else if isZh {
+            if b3Caps.count != 1 || !b3Caps[0].hasSuffix("就绪") || b3Caps[0].rangeOfCharacter(from: .decimalDigits) != nil {
+                violations.append(formatViolation(surface: surface, language: language, lane: "<leftRail>", field: "badge⌘3Clean", got: "\(b3Caps)", expected: "['*就绪' (0 digits)]"))
+            }
+        } else {
+            compareExact(got: b3Caps, expected: ["OK"], surface: surface, language: language, lane: "<leftRail>", field: "badge⌘3Clean", into: &violations)
+        }
+
+        let b4Caps = try regexCaptures(#"([^\s]+)\s+⌘4"#, in: uiPDF).map { $0[0] }
+        compareExact(got: b4Caps, expected: ["\(expectedTotalOwnedFiles)"], surface: surface, language: language, lane: "<leftRail>", field: "badge⌘4OwnedFiles", into: &violations)
+
+        let svCaps = try regexCaptures(#"SQLite WAL v(\d+)\s*·\s*FTS5"#, in: uiPDF).map { $0[0] }
+        compareExact(got: svCaps, expected: ["\(truth.schemaVersion)"], surface: surface, language: language, lane: "<leftRail>", field: "sqliteSchemaVersion", into: &violations)
+
+        let cpPat = isZh ? #"(\d+)\s*个快照"# : #"(\d+)\s+checkpoints\b"#
+        let cpCaps = try regexCaptures(cpPat, in: uiPDF).map { $0[0] }
+        compareExact(got: cpCaps, expected: ["\(truth.checkpointsCount)"], surface: surface, language: language, lane: "<leftRail>", field: "checkpointsCount", into: &violations)
+
+        // All standalone `N lanes` / `N 条通道` pills on this single panel + EN bottom bar `Observing N lane(s)`
+        let lanePillPat = isZh ? #"(?<!/)(?<![0-9.])(\d+)\s*条通道"# : #"(?<!/)(?<![0-9.])(\d+)\s+lanes\b"#
+        let gotLanePills = try regexCaptures(lanePillPat, in: uiPDF).map { $0[0] }
+        let expLanePillOccurrences: Int = {
+            if isZh {
+                if expectedLaneCount > 0 {
+                    // Left Rail + Bottom Status Bar (+1 on ⌘2 DAG header, +1 on ⌘4 Ownership header)
+                    switch surface {
+                    case .dagPipeline, .territoryMap: return 3
+                    default: return 2
+                    }
+                } else {
+                    // Left Rail (+1 on ⌘1 empty card '当前 0 条通道', +1 on ⌘4 Ownership header '0 条通道')
+                    if surface.rendersPTYGridStage || surface == .territoryMap {
+                        return 2
+                    }
+                    return 1
+                }
+            } else {
+                switch surface {
+                case .dagPipeline:
+                    return expectedLaneCount > 0 ? 2 : 1
+                case .territoryMap:
+                    return 2
+                default:
+                    return 1
+                }
+            }
+        }()
+        compareMultiset(
+            got: gotLanePills,
+            expected: Array(repeating: "\(expectedLaneCount)", count: expLanePillOccurrences),
+            surface: surface,
+            language: language,
+            lane: "<panel-multiset>",
+            field: "laneCountPills",
+            into: &violations
+        )
+        if !isZh {
+            let obsCaps = try regexCaptures(#"Observing\s+(\d+)\s+lane\(s\)"#, in: uiPDF).map { $0[0] }
+            let expObs = expectedLaneCount > 0 ? ["\(expectedLaneCount)"] : []
+            compareExact(got: obsCaps, expected: expObs, surface: surface, language: language, lane: "<bottomBar>", field: "observingLaneCount", into: &violations)
+        }
+
+        // ------------------------------------------------------------------
+        // 2. Top Bar Spend / Budget / Unpriced Pill + Forbidden $0.00 / Fake Ceiling
+        // ------------------------------------------------------------------
+        let forbiddenZeroCents = try regexCaptures(#"(\$0\.00(?!\d))"#, in: uiPDF).map { $0[0] }
+        compareExact(got: forbiddenZeroCents, expected: [], surface: surface, language: language, lane: "<panel>", field: "forbiddenTwoDecimalZeroUSD", into: &violations)
+        if run?.budgetUSD == nil {
+            let fakeCeil = try regexCaptures(#"(/\s*\$\d+(?:\.\d+)?)"#, in: uiPDF).map { $0[0] }
+            compareExact(got: fakeCeil, expected: [], surface: surface, language: language, lane: "<topBar>", field: "unexpectedBudgetCeiling", into: &violations)
+        }
+
+        let topSpendPat = isZh
+            ? #"花费\s+(\$\d+(?:\.\d+)?)(?:\s*/\s*(\$\d+(?:\.\d+)?))?(?:\s*·\s*(\d+)\s*tokens\s*未计价)?"#
+            : #"Spend\s+(\$\d+(?:\.\d+)?)(?:\s*/\s*(\$\d+(?:\.\d+)?))?(?:\s*·\s*(\d+)\s*tokens\s+unpriced)?"#
+        let topSpendCaps = try regexCaptures(topSpendPat, in: uiPDF).map { c in
+            "spend=\(c[0])|cap=\(c[1])|unpriced=\(c[2])"
+        }
+        if let run, (run.pricedLaneCount > 0 || run.budgetUSD != nil) {
+            let expSpend = RelayBauhausDesign.formatRunUSD(run.totalCostUSD)
+            let expCap = run.budgetUSD.map { RelayBauhausDesign.formatRunUSD($0) } ?? ""
+            let expUnp = run.unpricedTokens > 0 ? "\(run.unpricedTokens)" : ""
+            compareExact(
+                got: topSpendCaps,
+                expected: ["spend=\(expSpend)|cap=\(expCap)|unpriced=\(expUnp)"],
+                surface: surface,
+                language: language,
+                lane: "<topBar>",
+                field: "topBarSpendBudgetUnpriced",
+                into: &violations
+            )
+        } else {
+            compareExact(got: topSpendCaps, expected: [], surface: surface, language: language, lane: "<topBar>", field: "topBarSpendBudgetUnpriced", into: &violations)
+        }
+
+        if surface == .preferencesModal {
+            let prefCapPat = isZh
+                ? #"工作区全局美元预算上限\s*(\$\d+(?:\.\d+)?)"#
+                : #"Global Workspace USD Budget Ceiling[^\n]*?\n?(?:[^\n]*?\s)?(\$\d+(?:\.\d+)?)"#
+            if let cap = run?.budgetUSD {
+                let expCap = RelayBauhausDesign.formatRunUSD(cap)
+                let gotCap = try regexCaptures(prefCapPat, in: uiPDF).map { $0[0] }
+                if !gotCap.isEmpty {
+                    compareExact(got: gotCap, expected: [expCap], surface: surface, language: language, lane: "<preferencesModal>", field: "modalBudgetCeilingUSD", into: &violations)
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 3. Left Rail Per-Lane Card Exact Binding (All 7 Surfaces)
+        // ------------------------------------------------------------------
+        for lane in orderedLanes {
+            let escID = NSRegularExpression.escapedPattern(for: lane.laneID)
+            let vendorName = RelayBauhausDesign.vendorStudioName(lane.agent.agentVendor, language: language)
+            let escVendor = NSRegularExpression.escapedPattern(for: vendorName)
+
+            let railPat = #"(?m)(?:^|\n)\s*"# + escID + #"(?![A-Za-z0-9_-])\s*("# + statusAlt + #")\s*(?:(?:exit|退出码)\s*(-?\d+)|in progress|执行中|—)(?:[ \t]*(\d+\.\d+s))?"#
+            let railCaps = try regexCaptures(railPat, in: uiPDF)
+            let expStatus = lane.status.localizedLabel(in: language)
+            let expEC = lane.exitCode.map { "\($0)" } ?? ""
+            let expDur = expectedDuration(lane) ?? ""
+            compareExact(
+                got: railCaps.map { $0[0] },
+                expected: [expStatus],
+                surface: surface,
+                language: language,
+                lane: lane.laneID,
+                field: "leftRailStatus",
+                into: &violations
+            )
+            compareExact(
+                got: railCaps.map { $0[1] },
+                expected: [expEC],
+                surface: surface,
+                language: language,
+                lane: lane.laneID,
+                field: "leftRailExitCode",
+                into: &violations
+            )
+            compareExact(
+                got: railCaps.map { $0[2] },
+                expected: [expDur],
+                surface: surface,
+                language: language,
+                lane: lane.laneID,
+                field: "leftRailDuration",
+                into: &violations
+            )
+
+            // Left rail per-lane spend / unpriced tokens adjacent to laneID
+            let railSpendPat = #"(?m)^"# + escVendor + #"[ \t]+(\$\d+(?:\.\d+)?)\s*\n\s*"# + escID + #"(?![A-Za-z0-9_-])"#
+            let railSpendCaps = try regexCaptures(railSpendPat, in: uiPDF).map { $0[0] }
+            if let expUSD = expectedSpendUSD(lane) {
+                if surface != .preferencesModal || !railSpendCaps.isEmpty {
+                    compareExact(got: railSpendCaps, expected: [expUSD], surface: surface, language: language, lane: lane.laneID, field: "leftRailSpendUSD", into: &violations)
+                }
+            } else {
+                compareExact(got: railSpendCaps, expected: [], surface: surface, language: language, lane: lane.laneID, field: "leftRailSpendUSD", into: &violations)
+            }
+
+            let railTokPat = #"(?m)^"# + escVendor + #"[ \t]+(\d+)\s*tokens\s*·\s*(?:unpriced|未计价)\s*\n\s*"# + escID + #"(?![A-Za-z0-9_-])"#
+            let railTokCaps = try regexCaptures(railTokPat, in: uiPDF).map { $0[0] }
+            if let expTok = expectedUnpricedTokens(lane) {
+                if surface != .preferencesModal || !railTokCaps.isEmpty {
+                    compareExact(got: railTokCaps, expected: [expTok], surface: surface, language: language, lane: lane.laneID, field: "leftRailUnpricedTokens", into: &violations)
+                }
+            } else {
+                compareExact(got: railTokCaps, expected: [], surface: surface, language: language, lane: lane.laneID, field: "leftRailUnpricedTokens", into: &violations)
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 4. Surface `.ptyGrid`, `.bottomDrawer`, `.preferencesModal`: ⌘1 Per-Lane Terminal Headers
+        // ------------------------------------------------------------------
+        if surface.rendersPTYGridStage {
+            for lane in orderedLanes {
+                let escID = NSRegularExpression.escapedPattern(for: lane.laneID)
+                let vendorName = RelayBauhausDesign.vendorStudioName(lane.agent.agentVendor, language: language)
+                let escVendor = NSRegularExpression.escapedPattern(for: vendorName)
+
+                let hdrPat = escVendor + #"\s*·\s*"# + escID + #"(?![A-Za-z0-9_-])(?:[ \t]+\$\d+(?:\.\d+)?)?\s*\n?\s*("# + statusAlt + #")(?:\s*·\s*(?:exit|退出码)\s*(-?\d+))?(?:[ \t]+(\d+\.\d+s))?"#
+                let hdrCaps = try regexCaptures(hdrPat, in: uiPDF)
+                let expStatus = lane.status.localizedLabel(in: language)
+                let expEC = lane.exitCode.map { "\($0)" } ?? ""
+                let expDur = expectedDuration(lane) ?? ""
+
+                compareExact(
+                    got: hdrCaps.map { $0[0] },
+                    expected: [expStatus],
+                    surface: surface,
+                    language: language,
+                    lane: lane.laneID,
+                    field: "ptyHeaderStatus",
+                    into: &violations
+                )
+                compareExact(
+                    got: hdrCaps.map { $0[1] },
+                    expected: [expEC],
+                    surface: surface,
+                    language: language,
+                    lane: lane.laneID,
+                    field: "ptyHeaderExitCode",
+                    into: &violations
+                )
+                compareExact(
+                    got: hdrCaps.map { $0[2] },
+                    expected: [expDur],
+                    surface: surface,
+                    language: language,
+                    lane: lane.laneID,
+                    field: "ptyHeaderDuration",
+                    into: &violations
+                )
+
+                if surface != .preferencesModal {
+                    let hdrSpendPat = escVendor + #"\s*·\s*"# + escID + #"(?![A-Za-z0-9_-])[^\n]*?(\$\d+(?:\.\d+)?)"#
+                    let hdrSpendCaps = try regexCaptures(hdrSpendPat, in: uiPDF).map { $0[0] }
+                    let expUSD = expectedSpendUSD(lane).map { [$0] } ?? []
+                    compareExact(got: hdrSpendCaps, expected: expUSD, surface: surface, language: language, lane: lane.laneID, field: "ptyHeaderSpendUSD", into: &violations)
+                }
+
+                let hdrTokPat = escVendor + #"\s*·\s*"# + escID + #"(?![A-Za-z0-9_-])(?:[ \t]+\$\d+(?:\.\d+)?)?\s*\n?[^\n]*?(\d+)\s*tokens\s*·\s*(?:unpriced|未计价)"#
+                let hdrTokCaps = try regexCaptures(hdrTokPat, in: uiPDF).map { $0[0] }
+                let expTok = expectedUnpricedTokens(lane).map { [$0] } ?? []
+                compareExact(got: hdrTokCaps, expected: expTok, surface: surface, language: language, lane: lane.laneID, field: "ptyHeaderUnpricedTokens", into: &violations)
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 5. Surface `.dagPipeline` (⌘2): Header, Per-Node Status & Timing, Selected-Lane Inspector
+        // ------------------------------------------------------------------
+        if surface == .dagPipeline, let run, !orderedLanes.isEmpty {
+            let escRunID = NSRegularExpression.escapedPattern(for: run.runID)
+            let dagHdrPat = escRunID + #"\s+("# + statusAlt + #")\s+(\d+)\s*(?:lanes\b|条通道)(?:[ \t]+(\d+\.\d+s))?"#
+            let dagHdrCaps = try regexCaptures(dagHdrPat, in: uiPDF)
+            let expRunStatus = run.status.localizedLabel(in: language)
+            let expRunDur = run.finishedAt.map { String(format: "%.2fs", max(0.0, $0.timeIntervalSince(run.startedAt))) } ?? ""
+            compareExact(got: dagHdrCaps.map { $0[0] }, expected: [expRunStatus], surface: surface, language: language, lane: "<dagHeader>", field: "dagRunStatus", into: &violations)
+            compareExact(got: dagHdrCaps.map { $0[1] }, expected: ["\(expectedLaneCount)"], surface: surface, language: language, lane: "<dagHeader>", field: "dagLaneCount", into: &violations)
+            compareExact(got: dagHdrCaps.map { $0[2] }, expected: [expRunDur], surface: surface, language: language, lane: "<dagHeader>", field: "dagRunElapsed", into: &violations)
+
+            var expectedNodeTimings: [String] = []
+            for lane in orderedLanes {
+                let shortTag = NSRegularExpression.escapedPattern(for: RelayBauhausDesign.vendorShortTag(lane.agent.agentVendor))
+                let escID = NSRegularExpression.escapedPattern(for: lane.laneID)
+
+                // Single-line header `<TAG> #<ordinal> <status>` uniquely identifies lane by `#ordinal`
+                let nodeHdrPat = #"(?<![A-Za-z0-9_-])"# + shortTag + #"[ \t]+#"# + "\(lane.ordinal)" + #"(?!\d)[ \t]+("# + statusAlt + #")"#
+                let nodeHdrCaps = try regexCaptures(nodeHdrPat, in: uiPDF).map { $0[0] }
+                compareExact(
+                    got: nodeHdrCaps,
+                    expected: [lane.status.localizedLabel(in: language)],
+                    surface: surface,
+                    language: language,
+                    lane: lane.laneID,
+                    field: "dagNodeStatus",
+                    into: &violations
+                )
+
+                if let s = lane.startedAt, let f = lane.finishedAt {
+                    let so = max(0.0, s.timeIntervalSince(run.startedAt))
+                    let fo = max(0.0, f.timeIntervalSince(run.startedAt))
+                    let dur = String(format: "%.2fs", max(0.0, f.timeIntervalSince(s)))
+                    let expTiming = String(format: "+%.2fs → +%.2fs · %@", so, fo, dur)
+                    expectedNodeTimings.append(expTiming)
+
+                    let adjTimingPat = #"(?<![A-Za-z0-9_-])"# + shortTag + #"[ \t]+#"# + "\(lane.ordinal)" + #"(?!\d)[ \t]+(?:"# + statusAlt + #")\s+"# + escID + #"(?![A-Za-z0-9_-])(?:(?!\+\d)[^\n]*\n?){0,2}\s*(\+\d+\.\d+s\s*→\s*\+\d+\.\d+s\s*·\s*\d+\.\d+s)"#
+                    let adjCaps = try regexCaptures(adjTimingPat, in: uiPDF).map {
+                        $0[0].replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    }
+                    if !adjCaps.isEmpty {
+                        compareExact(
+                            got: adjCaps,
+                            expected: [expTiming],
+                            surface: surface,
+                            language: language,
+                            lane: lane.laneID,
+                            field: "dagNodeTiming",
+                            into: &violations
+                        )
+                    }
+                }
+            }
+
+            let allNodeTimingCaps = try regexCaptures(#"(\+\d+\.\d+s\s*→\s*\+\d+\.\d+s\s*·\s*\d+\.\d+s)"#, in: uiPDF).map {
+                $0[0].replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            }
+            compareMultiset(
+                got: allNodeTimingCaps,
+                expected: expectedNodeTimings,
+                surface: surface,
+                language: language,
+                lane: "<dagNodes-multiset>",
+                field: "dagNodeTimingMultiset",
+                into: &violations
+            )
+
+            // Selected-lane inspector on the right (`orderedLanes[0]`)
+            let selLane = orderedLanes[0]
+            let selVendorName = NSRegularExpression.escapedPattern(for: RelayBauhausDesign.vendorStudioName(selLane.agent.agentVendor, language: language))
+            let inspStatusCaps = try regexCaptures(selVendorName + #"[ \t]+("# + statusAlt + #")(?!\s*\$)"#, in: uiPDF).map { $0[0] }
+            compareExact(got: inspStatusCaps, expected: [selLane.status.localizedLabel(in: language)], surface: surface, language: language, lane: selLane.laneID, field: "dagInspectorStatus", into: &violations)
+
+            let inspTimingCaps = try regexCaptures(#"(\+\d+\.\d+s\s*→\s*\+\d+\.\d+s\s*\(\d+\.\d+s\))"#, in: uiPDF).map {
+                $0[0].replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            }
+            if let s = selLane.startedAt, let f = selLane.finishedAt, let dur = expectedDuration(selLane) {
+                let so = max(0.0, s.timeIntervalSince(run.startedAt))
+                let fo = max(0.0, f.timeIntervalSince(run.startedAt))
+                let expInspTiming = [String(format: "+%.2fs → +%.2fs (%@)", so, fo, dur)]
+                compareExact(got: inspTimingCaps, expected: expInspTiming, surface: surface, language: language, lane: selLane.laneID, field: "dagInspectorTiming", into: &violations)
+            } else {
+                compareExact(got: inspTimingCaps, expected: [], surface: surface, language: language, lane: selLane.laneID, field: "dagInspectorTiming", into: &violations)
+            }
+
+            let inspExitCaps = try regexCaptures(#"(?:EXIT STATUS|退出状态)\s*\n?\s*(?:exit|退出码)\s*(-?\d+)"#, in: uiPDF).map { $0[0] }
+            compareExact(got: inspExitCaps, expected: selLane.exitCode.map { ["\($0)"] } ?? [], surface: surface, language: language, lane: selLane.laneID, field: "dagInspectorExitCode", into: &violations)
+
+            if let selUSD = expectedSpendUSD(selLane) {
+                let inspSpendCaps = try regexCaptures(#"(?:RECORDED SPEND / TOKENS|记录花费与 Token)\s*\n?\s*(\$\d+(?:\.\d+)?)"#, in: uiPDF).map { $0[0] }
+                compareExact(got: inspSpendCaps, expected: [selUSD], surface: surface, language: language, lane: selLane.laneID, field: "dagInspectorSpendUSD", into: &violations)
+            } else if let selTok = expectedUnpricedTokens(selLane) {
+                let inspTokCaps = try regexCaptures(#"(?:RECORDED SPEND / TOKENS|记录花费与 Token)\s*\n?\s*(\d+)\s*tokens\s*·\s*(?:unpriced|未计价)"#, in: uiPDF).map { $0[0] }
+                compareExact(got: inspTokCaps, expected: [selTok], surface: surface, language: language, lane: selLane.laneID, field: "dagInspectorUnpricedTokens", into: &violations)
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 6. Surface `.semanticMerge` (⌘3): Header Status, Ready, Steps, Conflicts, Verify
+        // ------------------------------------------------------------------
+        var statusCheckText = uiPDF
+        if surface == .semanticMerge, let integ = run?.integration {
+            let readyCaps = try regexCaptures(#"ready:\s*(true|false)"#, in: uiPDF).map { $0[0] }
+            compareExact(got: readyCaps, expected: [integ.ready ? "true" : "false"], surface: surface, language: language, lane: "<integration>", field: "integrationReady", into: &violations)
+
+            let integRawAlt = RelayIntegrationStatus.allCases.map(\.rawValue).sorted { $0.count > $1.count }.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
+            if isZh {
+                let integZhAlt = RelayIntegrationStatus.allCases.map { $0.localizedLabel(in: .zhHans) }.sorted { $0.count > $1.count }.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
+                let pat = #"集成合并与验证结果\s*("# + integZhAlt + #")\s*·\s*("# + integRawAlt + #")"#
+                let caps = try regexCaptures(pat, in: uiPDF).map { "\($0[0])·\($0[1])" }
+                let exp = ["\(integ.status.localizedLabel(in: .zhHans))·\(integ.status.rawValue)"]
+                compareExact(got: caps, expected: exp, surface: surface, language: language, lane: "<integration>", field: "integrationStatus", into: &violations)
+                let rx = try NSRegularExpression(pattern: pat)
+                statusCheckText = rx.stringByReplacingMatches(in: statusCheckText, range: NSRange(location: 0, length: (statusCheckText as NSString).length), withTemplate: "集成合并与验证结果")
+            } else {
+                let pat = #"Integration Merge & Verification\s+("# + integRawAlt + #")\s+ready:"#
+                let caps = try regexCaptures(pat, in: uiPDF).map { $0[0] }
+                compareExact(got: caps, expected: [integ.status.rawValue], surface: surface, language: language, lane: "<integration>", field: "integrationStatus", into: &violations)
+                let rx = try NSRegularExpression(pattern: pat)
+                statusCheckText = rx.stringByReplacingMatches(in: statusCheckText, range: NSRange(location: 0, length: (statusCheckText as NSString).length), withTemplate: "Integration Merge & Verification ready:")
+            }
+
+            let stepPat = isZh ? #"(\d+)\s*步"# : #"(\d+)\s+steps\b"#
+            let stepCaps = try regexCaptures(stepPat, in: uiPDF).map { $0[0] }
+            compareExact(got: stepCaps, expected: ["\(integ.merges.count)"], surface: surface, language: language, lane: "<integration>", field: "mergeStepCount", into: &violations)
+
+            let sortedSteps = integ.merges.sorted { $0.ordinal < $1.ordinal }
+            for step in sortedSteps {
+                let escStepLane = NSRegularExpression.escapedPattern(for: step.laneID)
+                let stepRawAlt = RelayMergeStepStatus.allCases.map(\.rawValue).sorted { $0.count > $1.count }.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
+                if isZh {
+                    let stepZhAlt = RelayMergeStepStatus.allCases.map { $0.localizedLabel(in: .zhHans) }.sorted { $0.count > $1.count }.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
+                    let rowPat = #"#"# + "\(step.ordinal)" + #"(?!\d)\s+"# + escStepLane + #"(?![A-Za-z0-9_-])\s+("# + stepZhAlt + #")\s*·\s*("# + stepRawAlt + #")"#
+                    let rowCaps = try regexCaptures(rowPat, in: uiPDF).map { "\($0[0])·\($0[1])" }
+                    compareExact(got: rowCaps, expected: ["\(step.status.localizedLabel(in: .zhHans))·\(step.status.rawValue)"], surface: surface, language: language, lane: step.laneID, field: "mergeStepStatus", into: &violations)
+                } else {
+                    let rowPat = #"#"# + "\(step.ordinal)" + #"(?!\d)\s+"# + escStepLane + #"(?![A-Za-z0-9_-])\s+("# + stepRawAlt + #")"#
+                    let rowCaps = try regexCaptures(rowPat, in: uiPDF).map { $0[0] }
+                    compareExact(got: rowCaps, expected: [step.status.rawValue], surface: surface, language: language, lane: step.laneID, field: "mergeStepStatus", into: &violations)
+                }
+            }
+            if sortedSteps.isEmpty, let reason = integ.reason, !reason.isEmpty {
+                let normReason = try normalizePDFSpacingForFieldParsing(reason)
+                statusCheckText = statusCheckText.replacingOccurrences(of: normReason, with: " ")
+            }
+
+            let hasConflicts = !truth.reconstructedConflicts.isEmpty || integ.status == .conflict
+            let confPat = isZh ? #"(\d+)\s*个文件"# : #"(\d+)\s+files\b"#
+            let confCaps = try regexCaptures(confPat, in: uiPDF).map { $0[0] }
+            compareExact(got: confCaps, expected: hasConflicts ? ["\(truth.reconstructedConflicts.count)"] : [], surface: surface, language: language, lane: "<integration>", field: "conflictFileCount", into: &violations)
+
+            if let verify = integ.verify {
+                let verRawAlt = RelayVerifyStatus.allCases.map(\.rawValue).sorted { $0.count > $1.count }.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
+                if isZh {
+                    let verZhAlt = RelayVerifyStatus.allCases.map { $0.localizedLabel(in: .zhHans) }.sorted { $0.count > $1.count }.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
+                    let vPat = #"("# + verZhAlt + #")\s*·\s*("# + verRawAlt + #")(?:\s*退出码\s*(-?\d+))?"#
+                    let vCaps = try regexCaptures(vPat, in: uiPDF)
+                    compareExact(got: vCaps.map { "\($0[0])·\($0[1])" }, expected: ["\(verify.status.localizedLabel(in: .zhHans))·\(verify.status.rawValue)"], surface: surface, language: language, lane: "<verify>", field: "verifyStatus", into: &violations)
+                    compareExact(got: vCaps.map { $0[2] }, expected: [verify.exitCode.map { "\($0)" } ?? ""], surface: surface, language: language, lane: "<verify>", field: "verifyExitCode", into: &violations)
+                    let vRx = try NSRegularExpression(pattern: #"("# + verZhAlt + #")\s*·\s*("# + verRawAlt + #")"#)
+                    statusCheckText = vRx.stringByReplacingMatches(in: statusCheckText, range: NSRange(location: 0, length: (statusCheckText as NSString).length), withTemplate: " ")
+                } else {
+                    let vPat = #"(?:VERIFICATION OUTPUT \(VERIFY\.PTY\)|Verification Output \(verify\.pty\))[^\n]*\n\s*("# + verRawAlt + #")(?:[ \t]+exit\s+(-?\d+))?"#
+                    let vCaps = try regexCaptures(vPat, in: uiPDF)
+                    compareExact(got: vCaps.map { $0[0] }, expected: [verify.status.rawValue], surface: surface, language: language, lane: "<verify>", field: "verifyStatus", into: &violations)
+                    compareExact(got: vCaps.map { $0[1] }, expected: [verify.exitCode.map { "\($0)" } ?? ""], surface: surface, language: language, lane: "<verify>", field: "verifyExitCode", into: &violations)
+                    let vRx = try NSRegularExpression(pattern: #"(?:VERIFICATION OUTPUT \(VERIFY\.PTY\)|Verification Output \(verify\.pty\))[^\n]*\n\s*("# + verRawAlt + #")"#)
+                    statusCheckText = vRx.stringByReplacingMatches(in: statusCheckText, range: NSRange(location: 0, length: (statusCheckText as NSString).length), withTemplate: "Verification Output (verify.pty)\n")
+                }
+            } else {
+                statusCheckText = statusCheckText
+                    .replacingOccurrences(of: "verification was skipped", with: " ")
+                    .replacingOccurrences(of: "验证阶段已跳过", with: " ")
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 7. Surface `.territoryMap` (⌘4): Header, Per-Lane Card Status/Files/+Add/-Del, Per-File State & Diffs
+        // ------------------------------------------------------------------
+        if surface == .territoryMap {
+            for lane in orderedLanes {
+                let shortTag = NSRegularExpression.escapedPattern(for: RelayBauhausDesign.vendorShortTag(lane.agent.agentVendor))
+                let escID = NSRegularExpression.escapedPattern(for: lane.laneID)
+                let own = truth.gitOwnershipByLane[lane.laneID]
+                let expCardFiles = "\(own?.files.count ?? 0)"
+                let expCardDiff = "+\(own?.totalAdditions ?? 0)/-\(own?.totalDeletions ?? 0)"
+
+                // Per-lane status on ⌘4 card (`<TAG> <laneID> <status>`)
+                let cardStatusPat = #"(?<![A-Za-z0-9_-])"# + shortTag + #"[ \t]+"# + escID + #"(?![A-Za-z0-9_-])\s*("# + statusAlt + #")"#
+                let cardStatusCaps = try regexCaptures(cardStatusPat, in: uiPDF).map { $0[0] }
+                compareExact(
+                    got: cardStatusCaps,
+                    expected: [lane.status.localizedLabel(in: language)],
+                    surface: surface,
+                    language: language,
+                    lane: lane.laneID,
+                    field: "ownershipCardStatus",
+                    into: &violations
+                )
+
+                // Per-lane `+add / -del` & `N files` adjacent to `<TAG> <laneID> <status>`
+                let cardMetricsPat = #"(?<![A-Za-z0-9_-])"# + shortTag + #"[ \t]+"# + escID + #"(?![A-Za-z0-9_-])\s*(?:"# + statusAlt + #")(?:\s*(?:start:|起点:)\s*[0-9a-fA-F]+)?\s*\+(\d+)\s*/\s*-(\d+)\s+(\d+)\s*(?:files\b|个文件)"#
+                let cardMetricsCaps = try regexCaptures(cardMetricsPat, in: uiPDF)
+                if !cardMetricsCaps.isEmpty {
+                    compareExact(
+                        got: cardMetricsCaps.map { "+\($0[0])/-\($0[1])" },
+                        expected: [expCardDiff],
+                        surface: surface,
+                        language: language,
+                        lane: lane.laneID,
+                        field: "ownershipCardDiffSummary",
+                        into: &violations
+                    )
+                    compareExact(
+                        got: cardMetricsCaps.map { $0[2] },
+                        expected: [expCardFiles],
+                        surface: surface,
+                        language: language,
+                        lane: lane.laneID,
+                        field: "ownershipCardFileCount",
+                        into: &violations
+                    )
+                }
+            }
+
+            let filesPat = isZh ? #"(\d+)\s*个文件"# : #"(\d+)\s+files\b"#
+            let gotFileCounts = try regexCaptures(filesPat, in: uiPDF).map { $0[0] }
+            let expFileCounts: [String] = expectedLaneCount == 0
+                ? ["0"]
+                : (["\(expectedTotalOwnedFiles)"] + orderedLanes.map { "\(truth.gitOwnershipByLane[$0.laneID]?.files.count ?? 0)" })
+            compareMultiset(
+                got: gotFileCounts,
+                expected: expFileCounts,
+                surface: surface,
+                language: language,
+                lane: "<territoryMap-multiset>",
+                field: "ownershipFileCounts",
+                into: &violations
+            )
+
+            let gotSlashDiffs = try regexCaptures(#"\+(\d+)\s*/\s*-(\d+)"#, in: uiPDF).map { "+\($0[0])/-\($0[1])" }
+            var expSlashDiffs: [String] = []
+            if expectedTotalOwnedFiles > 0 {
+                expSlashDiffs.append("+\(expectedTotalAdd)/-\(expectedTotalDel)")
+            }
+            for lane in orderedLanes {
+                let own = truth.gitOwnershipByLane[lane.laneID]
+                expSlashDiffs.append("+\(own?.totalAdditions ?? 0)/-\(own?.totalDeletions ?? 0)")
+            }
+            compareMultiset(
+                got: gotSlashDiffs,
+                expected: expSlashDiffs,
+                surface: surface,
+                language: language,
+                lane: "<territoryMap-multiset>",
+                field: "ownershipDiffSummaries",
+                into: &violations
+            )
+
+            let stateSummaryPat = isZh
+                ? #"(\d+)\s*已提交\s*·\s*(\d+)\s*未提交"#
+                : #"(\d+)\s+committed\s*·\s*(\d+)\s+uncommitted"#
+            let gotStateSummary = try regexCaptures(stateSummaryPat, in: uiPDF).map { "\($0[0])/\($0[1])" }
+            let expStateSummary = expectedTotalOwnedFiles > 0 ? ["\(expectedTotalCommitted)/\(expectedTotalUncommitted)"] : []
+            compareExact(
+                got: gotStateSummary,
+                expected: expStateSummary,
+                surface: surface,
+                language: language,
+                lane: "<territoryMapHeader>",
+                field: "committedUncommittedSummary",
+                into: &violations
+            )
+
+            let fileRowPat = isZh
+                ? #"(?m)(?:^|\s)([^\s\n]+)\s+(已提交|未提交)\s+\+(\d+)\s+-(\d+)(?!\s*/)"#
+                : #"(?m)(?:^|\s)([^\s\n]+)\s+(committed|uncommitted)\s+\+(\d+)\s+-(\d+)(?!\s*/)"#
+            let gotFileRows = try regexCaptures(fileRowPat, in: uiPDF).map { "\($0[0])|\($0[1])|+\($0[2]) -\($0[3])" }
+            var expFileRows: [String] = []
+            var expStandaloneFileDiffs: [String] = []
+            for lane in orderedLanes {
+                for f in truth.gitOwnershipByLane[lane.laneID]?.files ?? [] {
+                    let stLabel = f.isCommitted ? (isZh ? "已提交" : "committed") : (isZh ? "未提交" : "uncommitted")
+                    expFileRows.append("\(f.relativePath)|\(stLabel)|+\(f.additions) -\(f.deletions)")
+                    expStandaloneFileDiffs.append("+\(f.additions) -\(f.deletions)")
+                }
+            }
+            compareMultiset(
+                got: gotFileRows,
+                expected: expFileRows,
+                surface: surface,
+                language: language,
+                lane: "<territoryMap-files>",
+                field: "perFilePathStateAndDiff",
+                into: &violations
+            )
+
+            let gotStandaloneFileDiffs = try regexCaptures(#"\+(\d+)\s+-(\d+)(?!\s*/)"#, in: uiPDF).map { "+\($0[0]) -\($0[1])" }
+            compareMultiset(
+                got: gotStandaloneFileDiffs,
+                expected: expStandaloneFileDiffs,
+                surface: surface,
+                language: language,
+                lane: "<territoryMap-files>",
+                field: "perFileAdditionsDeletions",
+                into: &violations
+            )
+        }
+
+        // ------------------------------------------------------------------
+        // 8. Panel-Wide Full Multiset Verification Across ALL Occurrences on This Surface
+        //    (Catches ANY extra, missing, or displaced status, exitCode, duration, USD spend, or unpriced token!)
+        // ------------------------------------------------------------------
+
+        // 8a. All `RelayRunStatus` occurrences on this panel
+        let allStatusPat = isZh
+            ? #"("# + statusAlt + #")"#
+            : #"(?<![A-Za-z0-9_-])("# + statusAlt + #")(?![A-Za-z0-9_-])"#
+        let gotAllStatuses = try regexCaptures(allStatusPat, in: statusCheckText).map { $0[0] }
+        var expAllStatuses: [String] = []
+        if let run {
+            let runLbl = run.status.localizedLabel(in: language)
+            expAllStatuses.append(runLbl) // Top Bar
+            if !orderedLanes.isEmpty {
+                expAllStatuses.append(runLbl) // Bottom Status Bar `Live run (<status>)` / `实时运行<status>`
+            }
+            if surface == .dagPipeline && !orderedLanes.isEmpty {
+                expAllStatuses.append(runLbl) // DAG Header Strip
+            }
+        }
+        for lane in orderedLanes {
+            let lbl = lane.status.localizedLabel(in: language)
+            expAllStatuses.append(lbl) // Left Rail
+            if surface.rendersPTYGridStage {
+                expAllStatuses.append(lbl) // ⌘1 Terminal Pane Header
+            } else if surface == .dagPipeline {
+                expAllStatuses.append(lbl) // ⌘2 DAG Node Card
+            } else if surface == .territoryMap {
+                expAllStatuses.append(lbl) // ⌘4 Lane Ownership Card
+            }
+        }
+        if surface == .dagPipeline, let sel = orderedLanes.first {
+            expAllStatuses.append(sel.status.localizedLabel(in: language)) // ⌘2 Selected-Lane Inspector
+        }
+        compareMultiset(
+            got: gotAllStatuses,
+            expected: expAllStatuses,
+            surface: surface,
+            language: language,
+            lane: "<panel-multiset>",
+            field: "allStatusesOnPanel",
+            into: &violations
+        )
+
+        // 8b. All `exit <N>` / `退出码 <N>` occurrences on this panel
+        let exitPat = isZh ? #"退出码\s*(-?\d+)"# : #"\bexit\s+(-?\d+)\b"#
+        let gotAllExits = try regexCaptures(exitPat, in: uiPDF).map { $0[0] }
+        var expAllExits: [String] = []
+        for lane in orderedLanes {
+            if let ec = lane.exitCode {
+                expAllExits.append("\(ec)") // Left Rail
+                if surface.rendersPTYGridStage {
+                    expAllExits.append("\(ec)") // ⌘1 Terminal Pane Header
+                }
+            }
+        }
+        if surface == .dagPipeline, let selEC = orderedLanes.first?.exitCode {
+            expAllExits.append("\(selEC)") // ⌘2 Inspector
+        }
+        if surface == .semanticMerge, let verEC = run?.integration?.verify?.exitCode {
+            expAllExits.append("\(verEC)") // ⌘3 Verify Section
+        }
+        compareMultiset(
+            got: gotAllExits,
+            expected: expAllExits,
+            surface: surface,
+            language: language,
+            lane: "<panel-multiset>",
+            field: "allExitCodesOnPanel",
+            into: &violations
+        )
+
+        // 8c. All `%.2fs` / `+%.2fs` duration & offset tokens on this panel
+        let gotAllTimings = try regexCaptures(#"([+]?\d+\.\d+s)\b"#, in: uiPDF).map { $0[0] }
+        var expAllTimings: [String] = []
+        for lane in orderedLanes {
+            if let d = expectedDuration(lane) {
+                expAllTimings.append(d) // Left Rail
+                if surface.rendersPTYGridStage {
+                    expAllTimings.append(d) // ⌘1 Terminal Pane Header
+                }
+            }
+        }
+        if surface == .dagPipeline, let run, !orderedLanes.isEmpty {
+            if let end = run.finishedAt {
+                expAllTimings.append(String(format: "%.2fs", max(0.0, end.timeIntervalSince(run.startedAt))))
+            }
+            for lane in orderedLanes {
+                if let s = lane.startedAt, let f = lane.finishedAt, let d = expectedDuration(lane) {
+                    expAllTimings.append(String(format: "+%.2fs", max(0.0, s.timeIntervalSince(run.startedAt))))
+                    expAllTimings.append(String(format: "+%.2fs", max(0.0, f.timeIntervalSince(run.startedAt))))
+                    expAllTimings.append(d)
+                }
+            }
+            if let sel = orderedLanes.first, let s = sel.startedAt, let f = sel.finishedAt, let d = expectedDuration(sel) {
+                expAllTimings.append(String(format: "+%.2fs", max(0.0, s.timeIntervalSince(run.startedAt))))
+                expAllTimings.append(String(format: "+%.2fs", max(0.0, f.timeIntervalSince(run.startedAt))))
+                expAllTimings.append(d)
+            }
+        }
+        compareMultiset(
+            got: gotAllTimings,
+            expected: expAllTimings,
+            surface: surface,
+            language: language,
+            lane: "<panel-multiset>",
+            field: "allDurationsAndOffsetsOnPanel",
+            into: &violations
+        )
+
+        // 8d. All `$X.XXXX` (or any `$\d+(?:\.\d+)?`) dollar spend tokens on this panel
+        let gotAllDollars = try regexCaptures(#"(\$\d+(?:\.\d+)?)"#, in: uiPDF).map { $0[0] }
+        var expAllDollars: [String] = []
+        if let run {
+            if run.pricedLaneCount > 0 || run.budgetUSD != nil {
+                expAllDollars.append(RelayBauhausDesign.formatRunUSD(run.totalCostUSD))
+                if let cap = run.budgetUSD {
+                    expAllDollars.append(RelayBauhausDesign.formatRunUSD(cap))
+                }
+            }
+            if surface == .preferencesModal, let cap = run.budgetUSD {
+                expAllDollars.append(RelayBauhausDesign.formatRunUSD(cap))
+            }
+        }
+        for lane in orderedLanes {
+            if let usd = expectedSpendUSD(lane) {
+                expAllDollars.append(usd) // Left Rail
+                if surface.rendersPTYGridStage {
+                    expAllDollars.append(usd) // ⌘1 Terminal Pane Header
+                }
+            }
+        }
+        if surface == .dagPipeline, let sel = orderedLanes.first, let selUSD = expectedSpendUSD(sel) {
+            expAllDollars.append(selUSD) // ⌘2 Inspector
+        }
+        compareMultiset(
+            got: gotAllDollars,
+            expected: expAllDollars,
+            surface: surface,
+            language: language,
+            lane: "<panel-multiset>",
+            field: "allDollarAmountsOnPanel",
+            into: &violations
+        )
+
+        // 8e. All `<N> tokens [·] unpriced|未计价` occurrences on this panel
+        let unpPat = isZh ? #"(\d+)\s*tokens\s*(?:·\s*)?未计价"# : #"(\d+)\s*tokens\s*(?:·\s*)?unpriced"#
+        let gotAllUnpriced = try regexCaptures(unpPat, in: uiPDF).map { $0[0] }
+        var expAllUnpriced: [String] = []
+        if let run, run.unpricedTokens > 0 {
+            expAllUnpriced.append("\(run.unpricedTokens)") // Top Bar
+        }
+        for lane in orderedLanes {
+            if let tok = expectedUnpricedTokens(lane) {
+                expAllUnpriced.append(tok) // Left Rail
+                if surface.rendersPTYGridStage {
+                    expAllUnpriced.append(tok) // ⌘1 Terminal Pane Header
+                }
+            }
+        }
+        if surface == .dagPipeline, let sel = orderedLanes.first, let selTok = expectedUnpricedTokens(sel) {
+            expAllUnpriced.append(selTok) // ⌘2 Inspector
+        }
+        compareMultiset(
+            got: gotAllUnpriced,
+            expected: expAllUnpriced,
+            surface: surface,
+            language: language,
+            lane: "<panel-multiset>",
+            field: "allUnpricedTokensOnPanel",
+            into: &violations
+        )
+
+        return violations
+    }
+
     static func verifyKeyFieldsExactEquality(
         pdfByPane rawPDFByPane: [RelayStudioPane: String],
         language: RelayLanguage,
@@ -780,314 +1810,17 @@ enum M5NumberProvenanceAndFieldAuditor {
         if useLegacyLooseCheckForRedProof {
             return []
         }
-
-        var pdfByPane: [RelayStudioPane: String] = [:]
-        for (k, v) in rawPDFByPane {
-            pdfByPane[k] = try normalizePDFSpacingForFieldParsing(v)
+        var violations = verifyLedgerAgainstLogMD(truth: truth)
+        for pane in RelayStudioPane.allCases {
+            guard let pdf = rawPDFByPane[pane] else { continue }
+            let errs = try verifySingleRenderKeyFields(
+                pdfText: pdf,
+                surface: AuditRenderSurface(pane: pane),
+                language: language,
+                truth: truth
+            )
+            violations.append(contentsOf: errs)
         }
-
-        var violations: [String] = []
-        let isZh = language.isChinese
-        let run = truth.latestRun
-        let expectedLaneCount = run?.lanes.count ?? 0
-        let expectedFinishedCount = run?.lanes.filter(\.status.isTerminal).count ?? 0
-        let expectedConflictCount = run?.integration?.merges.reduce(0) { $0 + $1.conflicts.count } ?? 0
-        let orderedLanes = run?.lanes.sorted(by: { $0.ordinal < $1.ordinal }) ?? []
-        let expectedTotalOwnedFiles = orderedLanes.reduce(0) { $0 + (truth.gitOwnershipByLane[$1.laneID]?.files.count ?? 0) }
-        let expectedTotalAdd = orderedLanes.reduce(0) { $0 + (truth.gitOwnershipByLane[$1.laneID]?.totalAdditions ?? 0) }
-        let expectedTotalDel = orderedLanes.reduce(0) { $0 + (truth.gitOwnershipByLane[$1.laneID]?.totalDeletions ?? 0) }
-        let expectedTotalCommitted = orderedLanes.reduce(0) { $0 + (truth.gitOwnershipByLane[$1.laneID]?.committedCount ?? 0) }
-        let expectedTotalUncommitted = orderedLanes.reduce(0) { $0 + (truth.gitOwnershipByLane[$1.laneID]?.uncommittedCount ?? 0) }
-
-        // Cross-check SQLite run spend/tokens against independent .relay/LOG.md readings
-        if let run {
-            var logSumUSD = 0.0
-            var logUnpricedTok = 0
-            for lane in orderedLanes {
-                if let ls = truth.logSpendsByLane[lane.laneID], ls.hasStepRecord {
-                    if ls.costSource != lane.costSource {
-                        violations.append("Lane \(lane.laneID) SQLite costSource=\(lane.costSource ?? "nil") != LOG.md \(ls.costSource)")
-                    }
-                    if ls.costSource == "usd", let lUSD = ls.costUSD {
-                        logSumUSD += lUSD
-                        if abs((lane.costUSD ?? -1) - lUSD) > 1e-6 {
-                            violations.append("Lane \(lane.laneID) SQLite costUSD=\(String(describing: lane.costUSD)) != LOG.md \(lUSD)")
-                        }
-                    } else if ls.costSource == "unpriced", let lTok = ls.tokens {
-                        logUnpricedTok += lTok
-                        if lane.tokens != lTok {
-                            violations.append("Lane \(lane.laneID) SQLite tokens=\(String(describing: lane.tokens)) != LOG.md \(lTok)")
-                        }
-                    }
-                }
-            }
-            if abs(run.totalCostUSD - logSumUSD) > 1e-6 {
-                violations.append("Run totalCostUSD \(run.totalCostUSD) != LOG.md sum \(logSumUSD)")
-            }
-            if run.unpricedTokens != logUnpricedTok {
-                violations.append("Run unpricedTokens \(run.unpricedTokens) != LOG.md sum \(logUnpricedTok)")
-            }
-        }
-
-        // Check Top Bar & Left Rail common fields across EVERY pane
-        for (pane, pdf) in pdfByPane {
-            let ctx = "[\(pane.rawValue)/\(language.rawValue)]"
-
-            // 1. Top bar active wave / lane count & run status pill
-            if let run {
-                let pat = isZh ? #"(\d+)/(\d+)\s*条通道\s*·\s*([^\n]+)"# : #"(\d+)/(\d+)\s+Lanes\s*·\s*([^\n]+)"#
-                let caps = try regexCaptures(pat, in: pdf)
-                if caps.count != 1 {
-                    violations.append("\(ctx) Top bar missing exact lane summary pill (matches=\(caps.count))")
-                } else {
-                    let gotFin = Int(caps[0][0]) ?? -1
-                    let gotTot = Int(caps[0][1]) ?? -1
-                    if gotFin != expectedFinishedCount || gotTot != expectedLaneCount {
-                        violations.append("\(ctx) Top bar lane counts \(gotFin)/\(gotTot) != expected \(expectedFinishedCount)/\(expectedLaneCount)")
-                    }
-                    let expRunStatus = run.status.localizedLabel(in: language)
-                    if !caps[0][2].contains(expRunStatus) {
-                        violations.append("\(ctx) Top bar run status '\(caps[0][2])' missing expected '\(expRunStatus)'")
-                    }
-                }
-            } else {
-                let idleNeedle = isZh ? "0 项任务 · 空闲" : "0 Tasks · Idle"
-                if !pdf.contains(idleNeedle) {
-                    violations.append("\(ctx) Empty top bar missing '\(idleNeedle)'")
-                }
-            }
-
-            // 2. Top bar total spend / budget / unpriced tokens pill
-            if let run {
-                if run.pricedLaneCount > 0 || run.budgetUSD != nil {
-                    let spendText = RelayBauhausDesign.formatRunUSD(run.totalCostUSD)
-                    let capSuffix = run.budgetUSD.map { " / \(RelayBauhausDesign.formatRunUSD($0))" } ?? ""
-                    let unpricedSuffix = run.unpricedTokens > 0
-                        ? (isZh ? " · \(run.unpricedTokens) tokens 未计价" : " · \(run.unpricedTokens) tokens unpriced")
-                        : ""
-                    let expectedSpendPill = isZh
-                        ? "花费 \(spendText)\(capSuffix)\(unpricedSuffix)"
-                        : "Spend \(spendText)\(capSuffix)\(unpricedSuffix)"
-                    if !pdf.contains(expectedSpendPill) {
-                        violations.append("\(ctx) Top bar spend pill mismatch: expected exact '\(expectedSpendPill)'")
-                    }
-                    if run.budgetUSD == nil && pdf.contains("/ $0.00") {
-                        violations.append("\(ctx) Top bar rendered fake '/ $0.00' budget ceiling")
-                    }
-                } else if run.unpricedTokens > 0 {
-                    let expUnpriced = isZh
-                        ? "\(run.unpricedTokens) tokens · 未计价"
-                        : "\(run.unpricedTokens) tokens · unpriced"
-                    if !pdf.contains(expUnpriced) {
-                        violations.append("\(ctx) Top bar unpriced pill mismatch: expected '\(expUnpriced)'")
-                    }
-                }
-            } else {
-                if pdf.contains("Spend $") || pdf.contains("花费 $") {
-                    violations.append("\(ctx) Empty workspace rendered unexpected top-bar spend pill")
-                }
-            }
-
-            // 3. Left rail badges for ⌘1..⌘4
-            let b1 = try regexCaptures(#"([^\s]+)\s+⌘1(?![0-9–])"#, in: pdf).first?.first
-            if b1 != "\(expectedLaneCount)" {
-                violations.append("\(ctx) Left rail ⌘1 badge '\(b1 ?? "nil")' != expected laneCount '\(expectedLaneCount)'")
-            }
-            let b2 = try regexCaptures(#"([^\s]+)\s+⌘2"#, in: pdf).first?.first
-            if b2 != "\(expectedLaneCount)" {
-                violations.append("\(ctx) Left rail ⌘2 badge '\(b2 ?? "nil")' != expected DAG laneCount '\(expectedLaneCount)'")
-            }
-            let b3 = try regexCaptures(#"([^\s]+)\s+⌘3"#, in: pdf).first?.first
-            if expectedConflictCount > 0 {
-                if b3 != "\(expectedConflictCount)!" {
-                    violations.append("\(ctx) Left rail ⌘3 badge '\(b3 ?? "nil")' != expected '\(expectedConflictCount)!'")
-                }
-            } else if isZh {
-                if b3?.hasSuffix("就绪") != true || b3?.rangeOfCharacter(from: .decimalDigits) != nil {
-                    violations.append("\(ctx) Left rail ⌘3 badge '\(b3 ?? "nil")' missing clean '就绪' badge")
-                }
-            } else if b3 != "OK" {
-                violations.append("\(ctx) Left rail ⌘3 badge '\(b3 ?? "nil")' != expected 'OK'")
-            }
-            let b4 = try regexCaptures(#"([^\s]+)\s+⌘4"#, in: pdf).first?.first
-            if b4 != "\(expectedTotalOwnedFiles)" {
-                violations.append("\(ctx) Left rail ⌘4 badge '\(b4 ?? "nil")' != expected ownedFiles '\(expectedTotalOwnedFiles)'")
-            }
-
-            // 4. SQLite schema version & checkpoints
-            let svCaps = try regexCaptures(#"SQLite WAL v(\d+)\s*·\s*FTS5"#, in: pdf)
-            if svCaps.first?.first != "\(truth.schemaVersion)" {
-                violations.append("\(ctx) SQLite schema version badge != \(truth.schemaVersion)")
-            }
-            let cpPat = isZh ? #"(\d+)\s*个快照"# : #"(\d+)\s+checkpoints"#
-            let cpCaps = try regexCaptures(cpPat, in: pdf)
-            if cpCaps.first?.first != "\(truth.checkpointsCount)" {
-                violations.append("\(ctx) Checkpoints count != \(truth.checkpointsCount)")
-            }
-
-            // 5. Left rail per-lane status, exitCode, duration, spend/tokens
-            for lane in orderedLanes {
-                if !pdf.contains(lane.laneID) {
-                    violations.append("\(ctx) Left rail missing laneID '\(lane.laneID)'")
-                }
-                let stLabel = lane.status.localizedLabel(in: language)
-                if !pdf.contains(stLabel) {
-                    violations.append("\(ctx) Left rail missing status '\(stLabel)' for '\(lane.laneID)'")
-                }
-                if let ec = lane.exitCode {
-                    let exitStr = isZh ? "退出码 \(ec)" : "exit \(ec)"
-                    if !pdf.contains(exitStr) {
-                        violations.append("\(ctx) Left rail missing '\(exitStr)' for '\(lane.laneID)'")
-                    }
-                }
-                if let s = lane.startedAt, let f = lane.finishedAt {
-                    let durStr = String(format: "%.2fs", max(0.0, f.timeIntervalSince(s)))
-                    if !pdf.contains(durStr) {
-                        violations.append("\(ctx) Left rail missing duration '\(durStr)' for '\(lane.laneID)'")
-                    }
-                }
-                if lane.costSource == "usd", let usd = lane.costUSD {
-                    let usdStr = RelayBauhausDesign.formatRunUSD(usd)
-                    if !pdf.contains(usdStr) {
-                        violations.append("\(ctx) Left rail missing 4-decimal spend '\(usdStr)' for '\(lane.laneID)'")
-                    }
-                } else if lane.costSource == "unpriced", let tok = lane.tokens, tok > 0 {
-                    let tokStr = isZh ? "\(tok) tokens · 未计价" : "\(tok) tokens · unpriced"
-                    if !pdf.contains(tokStr) {
-                        violations.append("\(ctx) Left rail missing unpriced tokens '\(tokStr)' for '\(lane.laneID)'")
-                    }
-                    if pdf.contains("$0.00") {
-                        violations.append("\(ctx) Rendered forbidden '$0.00' alongside unpriced lane '\(lane.laneID)'")
-                    }
-                }
-            }
-        }
-
-        // 6. Pane 2 (⌘2 DAG) specific field-equality checks (laneCount pill, run elapsed, per-node timings)
-        if let dagPDF = pdfByPane[.dagPipeline] {
-            let ctx = "[dagPipeline/\(language.rawValue)]"
-            let lanePillPat = isZh ? #"(?<!/)\b(\d+)\s*条通道"# : #"(?<!/)\b(\d+)\s+lanes\b"#
-            let laneCountsInDAG = try regexCaptures(lanePillPat, in: dagPDF).compactMap { Int($0[0]) }
-            // In ZH when lanes > 0, bottom status bar also renders "只读观察 N 条通道" alongside Left Rail & DAG header
-            let expectedOccurrences = expectedLaneCount > 0 ? (isZh ? 3 : 2) : (isZh ? 2 : 1)
-            if !laneCountsInDAG.allSatisfy({ $0 == expectedLaneCount }) || laneCountsInDAG.count < (expectedLaneCount > 0 ? 2 : 1) {
-                violations.append("\(ctx) DAG laneCount pills \(laneCountsInDAG) != expected \(expectedOccurrences)x [\(expectedLaneCount)]")
-            }
-            if let run, !orderedLanes.isEmpty {
-                if let runEnd = run.finishedAt {
-                    let expRunDur = String(format: "%.2fs", max(0.0, runEnd.timeIntervalSince(run.startedAt)))
-                    if !dagPDF.contains(expRunDur) {
-                        violations.append("\(ctx) DAG header missing run elapsed '\(expRunDur)'")
-                    }
-                }
-                for lane in orderedLanes {
-                    if !dagPDF.contains("#\(lane.ordinal)") {
-                        violations.append("\(ctx) DAG missing ordinal '#\(lane.ordinal)' for '\(lane.laneID)'")
-                    }
-                    if let s = lane.startedAt, let f = lane.finishedAt {
-                        let so = max(0.0, s.timeIntervalSince(run.startedAt))
-                        let fo = max(0.0, f.timeIntervalSince(run.startedAt))
-                        let dur = String(format: "%.2fs", max(0.0, f.timeIntervalSince(s)))
-                        let timingLine = String(format: "+%.2fs → +%.2fs · %@", so, fo, dur)
-                        if !dagPDF.contains(timingLine) {
-                            violations.append("\(ctx) DAG node '\(lane.laneID)' missing exact timing '\(timingLine)'")
-                        }
-                    }
-                }
-            }
-        }
-
-        // 7. Pane 3 (⌘3 Merge) specific field-equality checks (merge step count, conflict file count, ready, verify)
-        if let mergePDF = pdfByPane[.semanticMerge] {
-            let ctx = "[semanticMerge/\(language.rawValue)]"
-            if let integ = run?.integration {
-                let expReady = integ.ready ? "ready: true" : "ready: false"
-                if !mergePDF.contains(expReady) {
-                    violations.append("\(ctx) Merge header missing '\(expReady)'")
-                }
-                if !mergePDF.contains(integ.status.rawValue) {
-                    violations.append("\(ctx) Merge header missing status '\(integ.status.rawValue)'")
-                }
-                let stepPat = isZh ? #"(\d+)\s*步"# : #"(\d+)\s+steps\b"#
-                let stepCounts = try regexCaptures(stepPat, in: mergePDF).compactMap { Int($0[0]) }
-                if stepCounts != [integ.merges.count] {
-                    violations.append("\(ctx) Merge step count \(stepCounts) != expected [\(integ.merges.count)]")
-                }
-                if !truth.reconstructedConflicts.isEmpty || integ.status == .conflict {
-                    let confPat = isZh ? #"(\d+)\s*个文件"# : #"(\d+)\s+files\b"#
-                    let confCounts = try regexCaptures(confPat, in: mergePDF).compactMap { Int($0[0]) }
-                    if confCounts != [truth.reconstructedConflicts.count] {
-                        violations.append("\(ctx) Conflict file count \(confCounts) != expected [\(truth.reconstructedConflicts.count)]")
-                    }
-                }
-                if let verify = integ.verify, let vec = verify.exitCode {
-                    let expVerifyExit = isZh ? "退出码 \(vec)" : "exit \(vec)"
-                    if !mergePDF.contains(expVerifyExit) {
-                        violations.append("\(ctx) Merge verify section missing '\(expVerifyExit)'")
-                    }
-                }
-            }
-        }
-
-        // 8. Pane 4 (⌘4 File Ownership) specific field-equality checks (file count, committed/uncommitted, +add/-del)
-        if let ownPDF = pdfByPane[.territoryMap] {
-            let ctx = "[territoryMap/\(language.rawValue)]"
-            let lanePillPat = isZh ? #"(?<!/)\b(\d+)\s*条通道"# : #"(?<!/)\b(\d+)\s+lanes\b"#
-            let lanePills = try regexCaptures(lanePillPat, in: ownPDF).compactMap { Int($0[0]) }
-            if lanePills.count < 2 || !lanePills.allSatisfy({ $0 == expectedLaneCount }) {
-                violations.append("\(ctx) Ownership laneCount pills \(lanePills) != expected all \(expectedLaneCount)")
-            }
-
-            let filesPat = isZh ? #"(\d+)\s*个文件"# : #"(\d+)\s+files\b"#
-            let gotFileCounts = try regexCaptures(filesPat, in: ownPDF).compactMap { Int($0[0]) }
-            let expFileCounts: [Int] = expectedLaneCount == 0
-                ? [0]
-                : ([expectedTotalOwnedFiles] + orderedLanes.map { truth.gitOwnershipByLane[$0.laneID]?.files.count ?? 0 })
-            if gotFileCounts != expFileCounts {
-                violations.append("\(ctx) Ownership file counts \(gotFileCounts) != git expected \(expFileCounts)")
-            }
-
-            let slashDiffCaps = try regexCaptures(#"\+(\d+)\s*/\s*-(\d+)"#, in: ownPDF)
-            let gotSlashDiffs = slashDiffCaps.map { [Int($0[0]) ?? -1, Int($0[1]) ?? -1] }
-            var expSlashDiffs: [[Int]] = []
-            if expectedTotalOwnedFiles > 0 {
-                expSlashDiffs.append([expectedTotalAdd, expectedTotalDel])
-            }
-            for lane in orderedLanes {
-                let own = truth.gitOwnershipByLane[lane.laneID]
-                expSlashDiffs.append([own?.totalAdditions ?? 0, own?.totalDeletions ?? 0])
-            }
-            if gotSlashDiffs != expSlashDiffs {
-                violations.append("\(ctx) Ownership +add / -del summaries \(gotSlashDiffs) != git expected \(expSlashDiffs)")
-            }
-
-            if expectedTotalOwnedFiles > 0 {
-                let statePat = isZh
-                    ? #"(\d+)\s*已提交\s*·\s*(\d+)\s*未提交"#
-                    : #"(\d+)\s+committed\s*·\s*(\d+)\s+uncommitted"#
-                let stateCaps = try regexCaptures(statePat, in: ownPDF)
-                let gotState = stateCaps.first.map { [Int($0[0]) ?? -1, Int($0[1]) ?? -1] }
-                if gotState != [expectedTotalCommitted, expectedTotalUncommitted] {
-                    violations.append("\(ctx) Ownership committed/uncommitted \(String(describing: gotState)) != git expected [\(expectedTotalCommitted), \(expectedTotalUncommitted)]")
-                }
-            }
-
-            let fileDiffCaps = try regexCaptures(#"\+(\d+)\s+-(\d+)"#, in: ownPDF)
-            let gotFileDiffs = fileDiffCaps.map { [Int($0[0]) ?? -1, Int($0[1]) ?? -1] }
-            var expFileDiffs: [[Int]] = []
-            for lane in orderedLanes {
-                for f in truth.gitOwnershipByLane[lane.laneID]?.files ?? [] {
-                    expFileDiffs.append([f.additions, f.deletions])
-                    if !ownPDF.contains(f.relativePath) {
-                        violations.append("\(ctx) Ownership missing git file '\(f.relativePath)'")
-                    }
-                }
-            }
-            if gotFileDiffs != expFileDiffs {
-                violations.append("\(ctx) Per-file +add -del \(gotFileDiffs) != git expected \(expFileDiffs)")
-            }
-        }
-
         return violations
     }
 }
@@ -1828,7 +2561,7 @@ struct M5UIAcceptanceTests {
         var auditedPaneRenders = 0
 
         for target in targets {
-            for lang in languages {
+            for (langIdx, lang) in languages.enumerated() {
                 let vm = RelayStudioViewModel(
                     projectBundleURL: target.bundleURL,
                     initialPane: .ptyGrid,
@@ -1836,12 +2569,15 @@ struct M5UIAcceptanceTests {
                     loadDemoWorkspace: false
                 )
                 let truth = try M5NumberProvenanceAndFieldAuditor.collectGroundTruth(bundleURL: vm.projectBundleURL)
-                var pdfByPane: [RelayStudioPane: String] = [:]
+                if langIdx == 0 {
+                    for err in M5NumberProvenanceAndFieldAuditor.verifyLedgerAgainstLogMD(truth: truth) {
+                        violations.append("[\(target.label)] \(err)")
+                    }
+                }
 
                 for pane in RelayStudioPane.allCases {
                     vm.selectPane(pane)
                     let pdf = try Self.renderPDFText(vm: vm)
-                    pdfByPane[pane] = pdf
                     auditedPaneRenders += 1
 
                     let unmatched = try M5NumberProvenanceAndFieldAuditor.unmatchedNumbersInPDF(
@@ -1853,9 +2589,18 @@ struct M5UIAcceptanceTests {
                     if !unmatched.isEmpty {
                         violations.append("[\(target.label)/\(pane.rawValue)/\(lang.rawValue)] ungrounded numbers: \(unmatched)")
                     }
+                    let fieldErrs = try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(
+                        pdfText: pdf,
+                        surface: .init(pane: pane),
+                        language: lang,
+                        truth: truth
+                    )
+                    for err in fieldErrs {
+                        violations.append("[\(target.label)] \(err)")
+                    }
                 }
 
-                // Also audit expanded Bottom Drawer & ⌘, Preferences modal
+                // Also audit expanded Bottom Drawer & ⌘, Preferences modal as individual single-panel renders
                 vm.selectPane(.ptyGrid)
                 vm.isBottomDrawerPresented = true
                 let drawerPDF = try Self.renderPDFText(vm: vm)
@@ -1868,6 +2613,14 @@ struct M5UIAcceptanceTests {
                 )
                 if !drawerUnmatched.isEmpty {
                     violations.append("[\(target.label)/bottomDrawer/\(lang.rawValue)] ungrounded numbers: \(drawerUnmatched)")
+                }
+                for err in try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(
+                    pdfText: drawerPDF,
+                    surface: .bottomDrawer,
+                    language: lang,
+                    truth: truth
+                ) {
+                    violations.append("[\(target.label)] \(err)")
                 }
                 vm.isBottomDrawerPresented = false
 
@@ -1883,17 +2636,15 @@ struct M5UIAcceptanceTests {
                 if !prefsUnmatched.isEmpty {
                     violations.append("[\(target.label)/preferencesModal/\(lang.rawValue)] ungrounded numbers: \(prefsUnmatched)")
                 }
-                vm.isPreferencesModalPresented = false
-
-                // Part (b): Exact field-by-field equality against SQLite, LOG.md & Git
-                let fieldErrs = try M5NumberProvenanceAndFieldAuditor.verifyKeyFieldsExactEquality(
-                    pdfByPane: pdfByPane,
+                for err in try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(
+                    pdfText: prefsPDF,
+                    surface: .preferencesModal,
                     language: lang,
                     truth: truth
-                )
-                for err in fieldErrs {
+                ) {
                     violations.append("[\(target.label)] \(err)")
                 }
+                vm.isPreferencesModalPresented = false
             }
         }
 
@@ -1971,5 +2722,148 @@ struct M5UIAcceptanceTests {
             "violations": violations
         ], to: spec.outputJSONPath)
         #expect(violations.isEmpty, "Row 7 violations: \(violations)")
+    }
+
+    @Test("Per-pane key-field auditor verifies all 7 surfaces in EN/ZH and catches Mutations 7, 8, 9, ⌘4 counts, and 3-decimal spend")
+    @MainActor
+    func perPaneFieldAuditorCatchesExitCodeDAGDurationOwnershipStatusAndSpendMutations() throws {
+        try Self.enforceZeroWindows()
+        let tmpRoot = FileManager.default.temporaryDirectory.appendingPathComponent("m5-per-pane-audit-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmpRoot) }
+        try FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+
+        let repoURL = tmpRoot.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repoURL, withIntermediateDirectories: true)
+        func git(_ args: [String], cwd: URL) throws {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-c", "core.hooksPath=/dev/null", "-c", "user.name=Test", "-c", "user.email=test@example.invalid"] + args
+            p.currentDirectoryURL = cwd
+            try p.run()
+            p.waitUntilExit()
+        }
+        try git(["init", "-b", "main"], cwd: repoURL)
+        try "line1\nline2\n".write(to: repoURL.appendingPathComponent("App.swift"), atomically: true, encoding: .utf8)
+        try git(["add", "App.swift"], cwd: repoURL)
+        try git(["commit", "-m", "init"], cwd: repoURL)
+        let outP = Pipe()
+        let revP = Process()
+        revP.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        revP.arguments = ["rev-parse", "HEAD"]
+        revP.currentDirectoryURL = repoURL
+        revP.standardOutput = outP
+        try revP.run()
+        revP.waitUntilExit()
+        let baseOID = String(data: outP.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)!.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let wtC1 = tmpRoot.appendingPathComponent("wt-c1", isDirectory: true)
+        let wtV1 = tmpRoot.appendingPathComponent("wt-v1", isDirectory: true)
+        let wtA1 = tmpRoot.appendingPathComponent("wt-a1", isDirectory: true)
+        let wtX1 = tmpRoot.appendingPathComponent("wt-x1", isDirectory: true)
+        for (id, wt) in [("c1", wtC1), ("v1", wtV1), ("a1", wtA1), ("x1", wtX1)] {
+            try git(["worktree", "add", "-b", "relay/r1/\(id)", wt.path, baseOID], cwd: repoURL)
+            try FileManager.default.createDirectory(at: wt.appendingPathComponent(".relay"), withIntermediateDirectories: true)
+        }
+        try "committed c1\n".write(to: wtC1.appendingPathComponent("C1.swift"), atomically: true, encoding: .utf8)
+        try git(["add", "C1.swift"], cwd: wtC1)
+        try git(["commit", "-m", "c1"], cwd: wtC1)
+        try "line1\nmodified uncommitted\nline3\n".write(to: wtC1.appendingPathComponent("App.swift"), atomically: true, encoding: .utf8)
+        try "## 01-claude: t, 2s, 2026-11-22 11:07\n- cost $0.1234, tokens 1,500\n".write(to: wtC1.appendingPathComponent(".relay/LOG.md"), atomically: true, encoding: .utf8)
+        try "{\"result\":\"Completed c1\\nSTATUS: success\"}\n".write(to: wtC1.appendingPathComponent(".relay/01-claude.log"), atomically: true, encoding: .utf8)
+        try "## 01-vibe: t, 2s, 2026-11-22 11:07\n- cost $0.2500, tokens 900\n".write(to: wtV1.appendingPathComponent(".relay/LOG.md"), atomically: true, encoding: .utf8)
+        try "[{\"content\":\"Completed v1\\nSTATUS: failed\"}]\n".write(to: wtV1.appendingPathComponent(".relay/01-vibe.log"), atomically: true, encoding: .utf8)
+        try "committed a1\nl2\n".write(to: wtA1.appendingPathComponent("A1.swift"), atomically: true, encoding: .utf8)
+        try git(["add", "A1.swift"], cwd: wtA1)
+        try git(["commit", "-m", "a1"], cwd: wtA1)
+        try "## 01-agy: t, 2s, 2026-11-22 11:07\n- tokens 4,500\n".write(to: wtA1.appendingPathComponent(".relay/LOG.md"), atomically: true, encoding: .utf8)
+        try "{\"status\":\"SUCCESS\"}\n".write(to: wtA1.appendingPathComponent(".relay/01-agy.log"), atomically: true, encoding: .utf8)
+
+        let bundleURL = tmpRoot.appendingPathComponent("PerPane.relayproj", isDirectory: true)
+        let db = try RelayProjectDatabase(bundleDirectoryURL: bundleURL)
+        let runID = "20261122-120000-abcd"
+        let lanesDir = bundleURL.appendingPathComponent("runs/\(runID)/lanes", isDirectory: true)
+        try FileManager.default.createDirectory(at: lanesDir, withIntermediateDirectories: true)
+        try "not started: the job budget ($0.2000) was exhausted\n".write(to: lanesDir.appendingPathComponent("x1.pty"), atomically: true, encoding: .utf8)
+
+        let t0 = Date(timeIntervalSince1970: 1_795_340_000.0)
+        let lanes: [RelayRunLaneRecord] = [
+            RelayRunLaneRecord(runID: runID, laneID: "c1", ordinal: 0, agent: .claude, promptPath: "/tmp/c1.md", after: [], status: .succeeded, exitCode: 0, signal: nil, reason: nil, startedAt: t0, finishedAt: t0.addingTimeInterval(1.25), pid: nil, costUSD: 0.1234, tokens: 1500, costSource: "usd", branch: "relay/r1/c1", commitOID: baseOID, worktreePath: wtC1.path, uncommittedFiles: ["App.swift"]),
+            RelayRunLaneRecord(runID: runID, laneID: "v1", ordinal: 1, agent: .vibe, promptPath: "/tmp/v1.md", after: [], status: .failed, exitCode: 3, signal: nil, reason: nil, startedAt: t0.addingTimeInterval(0.10), finishedAt: t0.addingTimeInterval(2.40), pid: nil, costUSD: 0.2500, tokens: 900, costSource: "usd", branch: "relay/r1/v1", commitOID: baseOID, worktreePath: wtV1.path, uncommittedFiles: []),
+            RelayRunLaneRecord(runID: runID, laneID: "a1", ordinal: 2, agent: .agy, promptPath: "/tmp/a1.md", after: ["c1"], status: .succeeded, exitCode: 0, signal: nil, reason: nil, startedAt: t0.addingTimeInterval(1.30), finishedAt: t0.addingTimeInterval(3.05), pid: nil, costUSD: nil, tokens: 4500, costSource: "unpriced", branch: "relay/r1/a1", commitOID: baseOID, worktreePath: wtA1.path, uncommittedFiles: []),
+            RelayRunLaneRecord(runID: runID, laneID: "x1", ordinal: 3, agent: .codex, promptPath: "/tmp/x1.md", after: ["v1"], status: .refused, exitCode: 2, signal: nil, reason: "budget", startedAt: t0.addingTimeInterval(2.45), finishedAt: t0.addingTimeInterval(2.45), pid: nil, costUSD: nil, tokens: nil, costSource: nil, branch: "relay/r1/x1", commitOID: baseOID, worktreePath: wtX1.path, uncommittedFiles: []),
+        ]
+        let integ = RelayRunIntegrationRecord(
+            branch: "relay/r1/integration",
+            worktreePath: repoURL.path,
+            baseCommitOID: baseOID,
+            headCommitOID: baseOID,
+            status: .verified,
+            reason: nil,
+            ready: true,
+            merges: [
+                RelayRunMergeRecord(ordinal: 0, laneID: "c1", laneCommitOID: baseOID, status: .merged, mergeCommitOID: baseOID, conflicts: []),
+                RelayRunMergeRecord(ordinal: 1, laneID: "a1", laneCommitOID: baseOID, status: .merged, mergeCommitOID: baseOID, conflicts: []),
+            ],
+            verify: RelayRunVerifyRecord(command: "echo ok", timeoutSec: 60, status: .passed, exitCode: 0, signal: nil, pid: nil, startedAt: t0.addingTimeInterval(3.20), finishedAt: t0.addingTimeInterval(3.55), logPath: nil)
+        )
+        let runRec = RelayRunRecord(runID: runID, repoPath: repoURL.path, planCopyPath: "/tmp/plan.json", baseRef: "main", baseCommitOID: baseOID, verifyCommand: "echo ok", relayShPath: "/tmp/relay.sh", relayShSHA256: String(repeating: "ab12", count: 16), startedAt: t0, finishedAt: t0.addingTimeInterval(3.60), status: .partial, reason: nil, relayidePID: 99, budgetUSD: 0.80, lanes: lanes, integration: integ)
+        try db.createRun(runRec)
+
+        let truth = try M5NumberProvenanceAndFieldAuditor.collectGroundTruth(bundleURL: bundleURL)
+        #expect(M5NumberProvenanceAndFieldAuditor.verifyLedgerAgainstLogMD(truth: truth).isEmpty)
+
+        var enPDFs: [M5NumberProvenanceAndFieldAuditor.AuditRenderSurface: String] = [:]
+        var zhPDFs: [M5NumberProvenanceAndFieldAuditor.AuditRenderSurface: String] = [:]
+
+        for lang in [RelayLanguage.en, .zhHans] {
+            let vm = RelayStudioViewModel(projectBundleURL: bundleURL, initialPane: .ptyGrid, localizer: RelayLocalizer(language: lang, persistToUserDefaults: false), loadDemoWorkspace: false)
+            for pane in RelayStudioPane.allCases {
+                vm.selectPane(pane)
+                let pdf = try Self.renderPDFText(vm: vm)
+                let surf = M5NumberProvenanceAndFieldAuditor.AuditRenderSurface(pane: pane)
+                if lang == .en { enPDFs[surf] = pdf } else { zhPDFs[surf] = pdf }
+                let errs = try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(pdfText: pdf, surface: surf, language: lang, truth: truth)
+                #expect(errs.isEmpty, "Clean \(surf.rawValue)/\(lang.rawValue) had violations: \(errs)")
+            }
+            vm.selectPane(.ptyGrid)
+            vm.isBottomDrawerPresented = true
+            let drawerPDF = try Self.renderPDFText(vm: vm)
+            #expect(try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(pdfText: drawerPDF, surface: .bottomDrawer, language: lang, truth: truth).isEmpty)
+            vm.isBottomDrawerPresented = false
+
+            vm.isPreferencesModalPresented = true
+            let prefsPDF = try Self.renderPDFText(vm: vm)
+            #expect(try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(pdfText: prefsPDF, surface: .preferencesModal, language: lang, truth: truth).isEmpty)
+            vm.isPreferencesModalPresented = false
+        }
+
+        // Mutation 7 simulation: ⌘1 terminal header exit code changed from `exit 0` -> `exit 1` (`abs(0 - 1)`) while Left Rail still shows `exit 0`
+        let ptyEN = try #require(enPDFs[.ptyGrid])
+        let mut7PDF = ptyEN.replacingOccurrences(of: "Claude Code · c1 succeeded · exit 0", with: "Claude Code · c1 succeeded · exit 1")
+        let mut7Errs = try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(pdfText: mut7PDF, surface: .ptyGrid, language: .en, truth: truth)
+        #expect(mut7Errs.contains { $0.contains("pane=ptyGrid") && $0.contains("lane=c1") && $0.contains("field=ptyHeaderExitCode") }, "Mut7 errs: \(mut7Errs)")
+
+        // Mutation 8 simulation: ⌘2 DAG node duration +0.01s (`1.25s` -> `1.26s`) while Left Rail & Inspector still show `1.25s`
+        let dagEN = try #require(enPDFs[.dagPipeline])
+        let mut8PDF = dagEN.replacingOccurrences(of: "+0.00s → +1.25s · 1.25s", with: "+0.00s → +1.25s · 1.26s")
+        let mut8Errs = try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(pdfText: mut8PDF, surface: .dagPipeline, language: .en, truth: truth)
+        #expect(mut8Errs.contains { $0.contains("pane=dagPipeline") && $0.contains("lane=c1") && $0.contains("field=dagNodeTiming") }, "Mut8 errs: \(mut8Errs)")
+
+        // Mutation 9 simulation: ⌘4 ownership card status flipped (`CLAUDE c1 succeeded` -> `CLAUDE c1 failed`) while Left Rail still shows `c1 succeeded`
+        let ownEN = try #require(enPDFs[.territoryMap])
+        let mut9PDF = ownEN.replacingOccurrences(of: "CLAUDE c1 succeeded", with: "CLAUDE c1 failed")
+        let mut9Errs = try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(pdfText: mut9PDF, surface: .territoryMap, language: .en, truth: truth)
+        #expect(mut9Errs.contains { $0.contains("pane=territoryMap") && $0.contains("lane=c1") && $0.contains("field=ownershipCardStatus") }, "Mut9 errs: \(mut9Errs)")
+
+        // Uncommitted count +1 & 3-decimal spend simulation
+        let mutUncommPDF = ownEN.replacingOccurrences(of: "2 committed · 1 uncommitted", with: "2 committed · 2 uncommitted")
+        let mutUncommErrs = try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(pdfText: mutUncommPDF, surface: .territoryMap, language: .en, truth: truth)
+        #expect(mutUncommErrs.contains { $0.contains("field=committedUncommittedSummary") }, "Uncommitted errs: \(mutUncommErrs)")
+
+        let mut3DecPDF = ptyEN.replacingOccurrences(of: "Claude Code · c1 succeeded · exit 0 1.25s $0.1234", with: "Claude Code · c1 succeeded · exit 0 1.25s $0.123")
+        let mut3DecErrs = try M5NumberProvenanceAndFieldAuditor.verifySingleRenderKeyFields(pdfText: mut3DecPDF, surface: .ptyGrid, language: .en, truth: truth)
+        #expect(mut3DecErrs.contains { $0.contains("lane=c1") && $0.contains("field=ptyHeaderSpendUSD") }, "3-decimal errs: \(mut3DecErrs)")
+
+        try Self.enforceZeroWindows()
     }
 }
